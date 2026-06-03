@@ -178,6 +178,7 @@ HTML = """
         .cam-row span:first-child { min-width: 55px; color: #cbd5e1; font-size: 13px; }
         .cam-row input[type=range] { flex: 1; }
         .cam-row .cam-val { min-width: 55px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; color: #e5e7eb; }
+        .cam-step { min-height: 24px; width: 26px; padding: 0; font-size: 11px; line-height: 1; border-radius: 5px; }
         .num-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 8px; }
         .num-box { display: flex; flex-direction: column; gap: 4px; }
         .num-box span { color: #cbd5e1; font-size: 11px; text-transform: uppercase; text-align: center; }
@@ -278,11 +279,15 @@ HTML = """
                     <span>Red</span>
                     <input type="range" id="redGain" min="0" max="8" step="0.1" value="{{ cam.red_gain }}">
                     <span class="cam-val" id="redGainVal">{{ cam.red_gain }}</span>
+                    <button class="cam-step" data-slider="redGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="redGain" data-dir="1">▶</button>
                 </div>
                 <div class="cam-row">
                     <span>Blue</span>
                     <input type="range" id="blueGain" min="0" max="8" step="0.1" value="{{ cam.blue_gain }}">
                     <span class="cam-val" id="blueGainVal">{{ cam.blue_gain }}</span>
+                    <button class="cam-step" data-slider="blueGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="blueGain" data-dir="1">▶</button>
                 </div>
             </section>
 
@@ -292,6 +297,8 @@ HTML = """
                     <span>Time µs</span>
                     <input type="range" id="exposure" min="100" max="100000" step="100" value="{{ cam.exposure }}">
                     <span class="cam-val" id="exposureVal">{{ cam.exposure|int }}</span>
+                    <button class="cam-step" data-slider="exposure" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="exposure" data-dir="1">▶</button>
                 </div>
             </section>
 
@@ -301,11 +308,15 @@ HTML = """
                     <span>Colour</span>
                     <input type="range" id="colourGain" min="0.1" max="4" step="0.1" value="{{ cam.colour_gain }}">
                     <span class="cam-val" id="colourGainVal">{{ cam.colour_gain }}</span>
+                    <button class="cam-step" data-slider="colourGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="colourGain" data-dir="1">▶</button>
                 </div>
                 <div class="cam-row">
                     <span>Analogue</span>
                     <input type="range" id="analogueGain" min="1" max="16" step="0.1" value="{{ cam.analogue_gain }}">
                     <span class="cam-val" id="analogueGainVal">{{ cam.analogue_gain }}</span>
+                    <button class="cam-step" data-slider="analogueGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="analogueGain" data-dir="1">▶</button>
                 </div>
             </section>
 
@@ -488,6 +499,20 @@ drawAxes();
             const vl = document.getElementById(valId);
             sl.oninput = () => {
                 vl.textContent = sl.value;
+                sendCameraControls();
+            };
+        });
+
+        document.querySelectorAll('.cam-step').forEach(btn => {
+            btn.onclick = () => {
+                const sl = document.getElementById(btn.dataset.slider);
+                const dir = parseInt(btn.dataset.dir);
+                const step = parseFloat(sl.step);
+                let val = parseFloat(sl.value) + step * dir;
+                val = Math.max(parseFloat(sl.min), Math.min(parseFloat(sl.max), val));
+                val = Math.round(val * 1000) / 1000;
+                sl.value = val;
+                document.getElementById(btn.dataset.slider + 'Val').textContent = val;
                 sendCameraControls();
             };
         });
