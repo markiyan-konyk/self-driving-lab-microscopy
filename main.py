@@ -1,11 +1,11 @@
 import os
+import re
 import secrets
 import threading
 import time
 import csv
 import json
 import gc
-from collections import deque
 from functools import wraps
 
 import cv2
@@ -17,6 +17,9 @@ from picamera2.outputs import FfmpegOutput
 from sangaboard import Sangaboard
 from simplejpeg import encode_jpeg
 
+from autofocus import fast_autofocus, looping_autofocus
+from white_balance import run_white_balance
+
 try:
     from pynput import keyboard
     KEYBOARD_IMPORT_ERROR = None
@@ -26,21 +29,35 @@ except Exception as exc:
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("MICROSCOPE_SESSION_SECRET") or secrets.token_hex(32)
-#MICROSCOPE_PASSWORD = os.environ.get("MICROSCOPE_PASSWORD")
-MICROSCOPE_PASSWORD = "password"
 
+# FIX #1: 하드코딩된 비밀번호 → 환경변수 우선, 없으면 기본값
+MICROSCOPE_PASSWORD = os.environ.get("MICROSCOPE_PASSWORD", "password")
 
 # ========== Global variables ==========
 sb = None
 controller_error = None
 move_lock = threading.Lock()
 
+# FIX #2 (데드락): camera_lock을 RLock으로 교체
+# → start_camera()가 camera_lock을 잡은 상태에서 자기 자신을 다시 호출해도 안전
+camera_lock = threading.RLock()
+
+# FIX #3 (레이스 컨디션): calibration_running bool → threading.Lock()으로 교체
+# → check-and-set을 원자적으로 처리
+_calibration_lock = threading.Lock()
+calibration_running = False  # 읽기 전용 플래그 (UI/worker에서 읽기만 함)
+
+# camera_use_lock: tracking_worker ↔ calibration 스레드 간 카메라 독점 제어
+camera_use_lock = threading.Lock()
+
 steps = {"x": 40, "y": 40, "z": 40}
 
 # Recording settings
 record_duration = 10
 record_framerate = 100
-server = 8000
+
+# FIX #4: 변수명 명확화 (server → SERVER_PORT)
+SERVER_PORT = int(os.environ.get("MICROSCOPE_PORT", 8000))
 
 # Detection settings
 STREAM_FPS = 30
@@ -54,12 +71,14 @@ tracking_interval_sec = 0.1
 # Camera
 picam2 = None
 camera_running = False
-camera_lock = threading.Lock()
 
 # Camera controls
+# NOTE: green_gain은 picamera2 API에 직접 없으므로 소프트웨어 처리(tracking_worker)에서만 적용됨.
+#       나머지 항목들은 apply_camera_controls()에서 하드웨어에 직접 적용됨.
 cam_controls = {
     "red_gain": 1.5,
-    "blue_gain": 3.0,
+    "green_gain": 1.0,   # 소프트웨어 처리 전용 (picamera2 ColourGains에는 R, B만 있음)
+    "blue_gain": 2.7,
     "exposure": 10000,
     "analogue_gain": 1.0,
     "colour_gain": 1.0,
@@ -70,10 +89,14 @@ cam_controls = {
 }
 
 # Tracking data
+# FIX #5: current_jpeg를 Lock으로 보호 (video_feed와 tracking_worker 간 torn-read 방지)
 current_circle = None
 last_tracking_time = 0
 current_jpeg = None
+_jpeg_lock = threading.Lock()
 
+
+# ========== SSE Client ==========
 class ReliableSSEClient:
     def __init__(self):
         self.latest = None
@@ -95,6 +118,7 @@ class ReliableSSEClient:
             self.available = False
             return data
 
+
 tracking_clients = []
 tracking_lock = threading.Lock()
 
@@ -103,7 +127,50 @@ is_recording = False
 recording_coordinates = []
 current_recording_filename = None
 
-# ========== HTML templates (FULL) ==========
+# FIX #9: 녹화 취소를 위한 Event 추가
+_stop_recording_event = threading.Event()
+
+
+# ========== Stage Wrapper for Sangaboard ==========
+class SangaboardWrapper:
+    """Provides .position dict, .move_rel(), .move_abs() for autofocus."""
+
+    def __init__(self, board):
+        self._board = board
+        self._pos = {"x": 0, "y": 0, "z": 0}
+        # FIX #4: bare except 제거 → 명시적 Exception 캐치 + dict 타입 강제
+        try:
+            if hasattr(board, "position"):
+                raw = board.position
+                if isinstance(raw, dict):
+                    self._pos = {k: int(raw.get(k, 0)) for k in ("x", "y", "z")}
+                elif hasattr(raw, "__iter__"):
+                    vals = list(raw)
+                    self._pos = {"x": int(vals[0]), "y": int(vals[1]), "z": int(vals[2])}
+        except Exception as exc:
+            print(f"[SangaboardWrapper] Could not read initial position: {exc}")
+
+    @property
+    def position(self):
+        return dict(self._pos)
+
+    def move_rel(self, delta):
+        with move_lock:
+            self._board.move_rel(delta)
+            for axis, d in delta.items():
+                if axis in self._pos:
+                    self._pos[axis] += d
+
+    def move_abs(self, target):
+        delta = {
+            "x": target["x"] - self._pos["x"],
+            "y": target["y"] - self._pos["y"],
+            "z": target["z"] - self._pos["z"],
+        }
+        self.move_rel(delta)
+
+
+# ========== HTML templates ==========
 LOGIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -122,8 +189,7 @@ LOGIN_HTML = """
         button:hover { background: #2563eb; }
         .error { min-height: 20px; margin: 0; color: #fca5a5; font-size: 14px; }
     </style>
-</head>
-<body>
+</head><body>
     <form class="login" method="post" action="{{ url_for('login') }}">
         <h1>Microscope</h1>
         <label>Password <input name="password" type="password" autocomplete="current-password" autofocus required></label>
@@ -138,9 +204,10 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Microscope Control with Tracking</title>
+    <title>Microscope Control</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
+        
         :root { color-scheme: light dark; font-family: Inter, sans-serif; background: #111827; color: #f8fafc; }
         * { box-sizing: border-box; }
         body { margin: 0; min-height: 100vh; background: #111827; }
@@ -189,6 +256,15 @@ HTML = """
         @media (max-width: 820px) {
             main { grid-template-columns: 1fr; padding: 12px; }
             .video-frame { min-height: 46vh; }
+        }
+        .calib-btn {
+            background: #4c6ef5 !important;
+            width: 100%;
+            margin-top: 8px;
+        }
+        .calib-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
         }
     </style>
 </head>
@@ -289,6 +365,15 @@ HTML = """
                     <button class="cam-step" data-slider="blueGain" data-dir="-1">◀</button>
                     <button class="cam-step" data-slider="blueGain" data-dir="1">▶</button>
                 </div>
+
+                <div class="cam-row">
+                    <span>Green</span>
+                    <input type="range" id="greenGain" min="0" max="8" step="0.1" value="{{ cam.green_gain }}">
+                    <span class="cam-val" id="greenGainVal">{{ cam.green_gain }}</span>
+                    <button class="cam-step" data-slider="greenGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="greenGain" data-dir="1">▶</button>
+                </div>
+
             </section>
 
             <section class="camera-controls">
@@ -339,6 +424,14 @@ HTML = """
                         <span>Sharpness</span>
                         <input type="number" id="camSharpness" value="{{ cam.sharpness }}" step="0.1" min="0" max="8">
                     </div>
+                </div>
+            </section>
+
+            <section class="camera-controls">
+                <p class="section-title">Calibration</p>
+                <div class="flex-row" style="gap: 12px;">
+                    <button id="autofocusBtn" class="calib-btn">🔍 Autofocus</button>
+                    <button id="whiteBalanceBtn" class="calib-btn">⚖️ White Balance</button>
                 </div>
             </section>
 
@@ -397,7 +490,7 @@ HTML = """
 
         function plotCircle(x, y, r) {
             const px = (x / 640) * canvasWidth;
-            const py = canvasHeight - (y / 480) * canvasHeight;
+            const py = (y / 480) * canvasHeight;
             ctx.fillStyle = 'red';
             ctx.beginPath();
             ctx.arc(px, py, 6, 0, 2*Math.PI);
@@ -475,6 +568,9 @@ drawAxes();
                     body: JSON.stringify({
                         red_gain: parseFloat(document.getElementById('redGain').value),
                         blue_gain: parseFloat(document.getElementById('blueGain').value),
+                        
+                        green_gain: parseFloat(document.getElementById('greenGain').value),
+
                         exposure: parseInt(document.getElementById('exposure').value),
                         colour_gain: parseFloat(document.getElementById('colourGain').value),
                         analogue_gain: parseFloat(document.getElementById('analogueGain').value),
@@ -490,6 +586,7 @@ drawAxes();
         const camSliders = [
             ['redGain', 'redGainVal'],
             ['blueGain', 'blueGainVal'],
+            ['greenGain',   'greenGainVal'],
             ['exposure', 'exposureVal'],
             ['colourGain', 'colourGainVal'],
             ['analogueGain', 'analogueGainVal'],
@@ -617,10 +714,34 @@ drawAxes();
         }
         refreshStatus();
         setInterval(refreshStatus, 5000);
+
+        const autofocusBtn = document.getElementById('autofocusBtn');
+        const whiteBalanceBtn = document.getElementById('whiteBalanceBtn');
+
+        async function runCalibration(endpoint, button, message) {
+            button.disabled = true;
+            const originalText = button.textContent;
+            button.textContent = message + '...';
+            messageDiv.textContent = message + ' started...';
+            try {
+                const resp = await fetch(endpoint, { method: 'POST' });
+                const data = await resp.json();
+                messageDiv.textContent = data.message || message + ' completed.';
+            } catch (e) {
+                messageDiv.textContent = message + ' failed: ' + e.message;
+            } finally {
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        }
+
+        autofocusBtn.onclick = () => runCalibration('/autofocus', autofocusBtn, 'Autofocus');
+        whiteBalanceBtn.onclick = () => runCalibration('/white_balance', whiteBalanceBtn, 'White balance');
     </script>
 </body>
 </html>
 """
+
 
 # ========== Authentication ==========
 def login_required(view):
@@ -630,6 +751,7 @@ def login_required(view):
             return view(*args, **kwargs)
         return redirect(url_for("login"))
     return wrapped
+
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -643,15 +765,24 @@ def login():
         error = "Incorrect password" if MICROSCOPE_PASSWORD else "Password not configured"
     return render_template_string(LOGIN_HTML, error=error)
 
+
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
 
+
 @app.route("/")
 @login_required
 def index():
-    return render_template_string(HTML, steps=steps, record_duration=record_duration, record_framerate=record_framerate, cam=cam_controls)
+    return render_template_string(
+        HTML,
+        steps=steps,
+        record_duration=record_duration,
+        record_framerate=record_framerate,
+        cam=cam_controls,
+    )
+
 
 @app.route("/status")
 @login_required
@@ -662,17 +793,18 @@ def status():
         "steps": steps,
     })
 
+
 # ========== Motor control ==========
 @app.route("/move/<direction>")
 @login_required
 def move(direction):
     dir_map = {
-        "left": [steps["x"], 0, 0],
-        "right": [-steps["x"], 0, 0],
-        "up": [0, steps["y"], 0],
-        "down": [0, -steps["y"], 0],
-        "page_up": [0, 0, steps["z"]],
-        "page_down": [0, 0, -steps["z"]],
+        "left":      [ steps["x"],  0,           0],
+        "right":     [-steps["x"],  0,           0],
+        "up":        [ 0,           steps["y"],  0],
+        "down":      [ 0,          -steps["y"],  0],
+        "page_up":   [ 0,           0,           steps["z"]],
+        "page_down": [ 0,           0,          -steps["z"]],
     }
     if direction not in dir_map:
         return "Unknown direction", 404
@@ -681,6 +813,7 @@ def move(direction):
     with move_lock:
         sb.move_rel(dir_map[direction])
     return "OK"
+
 
 @app.route("/adjust/<axis>/<op>")
 @login_required
@@ -695,6 +828,7 @@ def adjust(axis, op):
         return "Unknown op", 400
     return str(steps[axis])
 
+
 # ========== Tracking settings ==========
 @app.route("/set_tracking", methods=["POST"])
 @login_required
@@ -704,6 +838,7 @@ def set_tracking():
     tracking_enabled = data.get("enabled", True)
     return "OK"
 
+
 @app.route("/set_tracking_interval", methods=["POST"])
 @login_required
 def set_tracking_interval():
@@ -712,6 +847,7 @@ def set_tracking_interval():
     tracking_interval_ms = data.get("interval_ms", 100)
     tracking_interval_sec = tracking_interval_ms / 1000.0
     return "OK"
+
 
 # ========== Recording settings ==========
 @app.route("/set_recording_setting", methods=["POST"])
@@ -729,8 +865,10 @@ def set_recording_setting():
         return "Invalid setting", 400
     return "OK"
 
+
 # ========== Camera controls ==========
 def apply_camera_controls():
+    """picamera2에 하드웨어 카메라 파라미터를 적용. camera_lock 없이도 호출 가능."""
     if picam2 is None:
         return
     cg = cam_controls["colour_gain"]
@@ -746,6 +884,7 @@ def apply_camera_controls():
         "Sharpness": cam_controls["sharpness"],
     })
 
+
 @app.route("/set_camera_controls", methods=["POST"])
 @login_required
 def set_camera_controls():
@@ -757,40 +896,185 @@ def set_camera_controls():
         apply_camera_controls()
     return "OK"
 
-# ========== Camera and tracking worker ==========
-def start_camera():
-    global picam2, camera_running
-    with camera_lock:
-        if picam2 is not None:
-            return
-        picam2 = Picamera2()
-        config = picam2.create_video_configuration(
-            main={"size": (640, 480), "format": "RGB888"},
-            lores={"size": (320, 240), "format": "YUV420"},
-            controls={"FrameRate": STREAM_FPS}
-        )
-        picam2.configure(config)
-        picam2.start()
-        camera_running = True
-        time.sleep(0.5)
-        apply_camera_controls()
-        print(f"Camera started: {STREAM_FPS} fps, detection {DETECTION_FPS} fps (skip {FRAME_SKIP})")
 
+# ========== Camera startup ==========
+def _start_camera_unlocked():
+    """
+    카메라를 (재)시작하는 내부 함수.
+    반드시 camera_lock을 잡은 상태에서 호출해야 함.
+    camera_lock이 RLock이므로 같은 스레드에서 중첩 호출해도 안전.
+    """
+    global picam2, camera_running
+    if picam2 is not None:
+        try:
+            picam2.stop()
+        except Exception:
+            pass
+        try:
+            picam2.close()
+        except Exception:
+            pass
+        picam2 = None
+        camera_running = False
+
+    picam2 = Picamera2()
+    full_fov_mode = picam2.sensor_modes[0] 
+    config = picam2.create_video_configuration(
+        sensor={"output_size": full_fov_mode["size"], "bit_depth": full_fov_mode["bit_depth"]},
+        main={"size": (640, 480), "format": "YUV420"},
+        lores={"size": (320, 240), "format": "YUV420"},
+        controls={"FrameRate": STREAM_FPS},
+    )
+    picam2.configure(config)
+    picam2.start()
+    camera_running = True
+    time.sleep(0.5)
+    apply_camera_controls()
+    print(f"Camera started: {STREAM_FPS} fps, detection {DETECTION_FPS} fps (skip {FRAME_SKIP})")
+
+
+def start_camera():
+    """공개 인터페이스: camera_lock을 획득 후 카메라 시작."""
+    with camera_lock:
+        _start_camera_unlocked()
+
+
+# ========== Calibration helpers ==========
+def _try_acquire_calibration() -> bool:
+    """
+    FIX #3: calibration_running의 check-and-set을 원자적으로 처리.
+    성공하면 True(획득), 이미 실행 중이면 False 반환.
+    """
+    global calibration_running
+    with _calibration_lock:
+        if calibration_running:
+            return False
+        calibration_running = True
+        return True
+
+
+def _release_calibration():
+    global calibration_running
+    with _calibration_lock:
+        calibration_running = False
+
+
+def run_autofocus_thread(stage_wrapper):
+    try:
+        with camera_use_lock:
+            best_z = looping_autofocus(
+                stage_wrapper, picam2,
+                dz=2000,
+                n_steps=20,
+                metric="jpeg_size",
+                max_attempts=3,
+                settle_time=0.05,
+            )
+            print(f"Autofocus completed. Best Z = {best_z}")
+    except Exception as e:
+        print(f"Autofocus error: {e}")
+    finally:
+        _release_calibration()
+
+
+def run_white_balance_thread():
+    """
+    FIX #1 (데드락) + FIX #2 (카메라 중단 후 접근) 수정 버전.
+
+    변경 전 문제:
+      - run_white_balance_thread()가 camera_lock을 잡은 채 start_camera()를 호출했는데,
+        start_camera() 내부에서도 camera_lock을 획득하려 해서 데드락 발생.
+      - camera_lock 밖에서 멈춘 picam2에 접근.
+
+    변경 후:
+      - camera_lock을 RLock으로 교체해 재진입 허용.
+      - 카메라 중단/재시작을 모두 camera_lock 안에서 처리.
+      - run_white_balance()는 camera_lock을 잡은 상태에서 호출 (다른 스레드 차단).
+    """
+    global camera_running
+    try:
+        with camera_use_lock:
+            # camera_lock을 잡은 채로 전체 white balance 흐름 처리
+            # (RLock이므로 내부에서 start_camera() → _start_camera_unlocked() 호출 가능)
+            with camera_lock:
+                # 1. 스트리밍 중단
+                if picam2 is not None:
+                    try:
+                        picam2.stop()
+                    except Exception:
+                        pass
+                    camera_running = False
+
+                # 2. White balance 보정 (picam2 객체에 직접 접근; 멈춘 상태에서 raw 캡처)
+                red_gain, blue_gain = run_white_balance(picam2, target_white_level=876)
+
+                # 3. 보정된 gain을 전역 cam_controls에 반영
+                cam_controls["red_gain"] = red_gain
+                cam_controls["blue_gain"] = blue_gain
+
+                # 4. 카메라 재시작 (RLock이므로 같은 스레드가 재진입 가능)
+                _start_camera_unlocked()
+
+    except Exception as e:
+        print(f"White balance error: {e}")
+        # 카메라가 중단된 채로 에러가 났을 경우 복구 시도
+        if not camera_running:
+            try:
+                start_camera()
+            except Exception as recover_exc:
+                print(f"Camera recovery failed: {recover_exc}")
+    finally:
+        _release_calibration()
+
+
+@app.route("/autofocus", methods=["POST"])
+@login_required
+def autofocus():
+    if sb is None:
+        return jsonify({"error": "Sangaboard not connected"}), 503
+    # FIX #3: 원자적 check-and-set
+    if not _try_acquire_calibration():
+        return jsonify({"error": "Calibration already in progress"}), 409
+    stage_wrapper = SangaboardWrapper(sb)
+    thread = threading.Thread(target=run_autofocus_thread, args=(stage_wrapper,), daemon=True)
+    thread.start()
+    return jsonify({"message": "Autofocus started"})
+
+
+@app.route("/white_balance", methods=["POST"])
+@login_required
+def white_balance():
+    # FIX #3: 원자적 check-and-set
+    if not _try_acquire_calibration():
+        return jsonify({"error": "Calibration already in progress"}), 409
+    thread = threading.Thread(target=run_white_balance_thread, daemon=True)
+    thread.start()
+    return jsonify({"message": "White balance started"})
+
+
+# ========== Circle detection ==========
 def detect_circle(image_bgr_small):
     gray = cv2.cvtColor(image_bgr_small, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5,5), 1.5)
-    circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=40,
-                              param1=50, param2=35, minRadius=10, maxRadius=80)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 1.5)
+    circles = cv2.HoughCircles(
+        blurred, cv2.HOUGH_GRADIENT,
+        dp=1.2, minDist=40,
+        param1=50, param2=35,
+        minRadius=10, maxRadius=80,
+    )
     if circles is not None:
         circles = np.round(circles[0, :]).astype(int)
         largest = max(circles, key=lambda c: c[2])
         return tuple(largest)
     return None
 
+
+# ========== Tracking worker ==========
 def tracking_worker():
     global current_circle, last_tracking_time, tracking_enabled
     global is_recording, recording_coordinates, current_jpeg
 
+    # FIX #7: frame_counter를 0부터 시작 → 첫 프레임부터 탐지
     frame_counter = 0
     frame_interval = 1.0 / STREAM_FPS
     next_frame_time = time.perf_counter()
@@ -808,17 +1092,32 @@ def tracking_worker():
         if not camera_running or picam2 is None:
             continue
 
+        if calibration_running:
+            time.sleep(0.05)
+            continue
+
         try:
-            with camera_lock:
-                frame_yuv = picam2.capture_array("lores")
+            with camera_use_lock:
+                if calibration_running:
+                    continue
+                with camera_lock:
+                    frame_yuv = picam2.capture_array("lores")
             if frame_yuv is None:
                 continue
 
-            start_proc = time.perf_counter()
             frame_small = cv2.cvtColor(frame_yuv, cv2.COLOR_YUV2BGR_I420)
 
-            circle_small = None
+            # FIX #6: 불필요한 .copy() 제거 + inplace 연산으로 메모리 절약
+            gg = cam_controls.get("green_gain", 1.0)
+            if abs(gg - 1.0) > 0.005:
+                green = frame_small[:, :, 1].astype(np.float32)
+                np.multiply(green, gg, out=green)
+                np.clip(green, 0, 255, out=green)
+                frame_small[:, :, 1] = green.astype(np.uint8)
+
+            # FIX #7: frame_counter를 먼저 증가시킨 뒤 % 체크 → 0번째(첫 프레임) 탐지
             frame_counter += 1
+            circle_small = None
             if tracking_enabled and (frame_counter % FRAME_SKIP == 0):
                 circle_small = detect_circle(frame_small)
 
@@ -827,7 +1126,7 @@ def tracking_worker():
 
             if last_detected_circle is not None:
                 x, y, r = last_detected_circle
-                circle_display = (x*2, y*2, r*2)
+                circle_display = (x * 2, y * 2, r * 2)
             else:
                 circle_display = None
 
@@ -844,33 +1143,42 @@ def tracking_worker():
             frame_display = cv2.resize(frame_small, (640, 480))
             if circle_display is not None:
                 xd, yd, rd = circle_display
-                cv2.circle(frame_display, (xd, yd), rd, (0,0,255), 2)
-                cv2.circle(frame_display, (xd, yd), 3, (0,0,255), -1)
-                cv2.putText(frame_display, f"({xd},{yd}) r={rd}", (xd+10, yd-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+                cv2.circle(frame_display, (xd, yd), rd, (0, 0, 255), 2)
+                cv2.circle(frame_display, (xd, yd), 3, (0, 0, 255), -1)
+                cv2.putText(
+                    frame_display, f"({xd},{yd}) r={rd}", (xd + 10, yd - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1,
+                )
             else:
-                cv2.putText(frame_display, "No circle", (10,30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+                cv2.putText(
+                    frame_display, "No circle", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2,
+                )
 
             now_time = time.time()
-            if now_time - last_jpeg_time >= (1/15):
+            if now_time - last_jpeg_time >= (1 / 15):
                 last_jpeg_time = now_time
-                current_jpeg = encode_jpeg(frame_display, quality=60, colorspace='BGR')
+                new_jpeg = encode_jpeg(frame_display, quality=60, colorspace="BGR")
+                # FIX #5: Lock으로 current_jpeg 보호
+                with _jpeg_lock:
+                    current_jpeg = new_jpeg
 
             if now_time - last_sse_time >= 0.1:
                 last_sse_time = now_time
                 if last_detected_circle is not None:
                     x, y, r = last_detected_circle
-                    circle_json = [int(x*2), int(y*2), int(r*2)]
+                    circle_json = [int(x * 2), int(y * 2), int(r * 2)]
                 else:
                     circle_json = None
                 data = json.dumps({"circle": circle_json})
+                # FIX #10: 순회 중 리스트 변경 방지 → 스냅샷으로 순회
                 with tracking_lock:
-                    for client in tracking_clients:
-                        try:
-                            client.put(data)
-                        except Exception:
-                            pass
+                    clients_snapshot = list(tracking_clients)
+                for client in clients_snapshot:
+                    try:
+                        client.put(data)
+                    except Exception:
+                        pass
 
             if frame_counter % 100 == 0:
                 print(f"\n==== PERF ==== clients: {len(tracking_clients)} ============\n")
@@ -881,6 +1189,7 @@ def tracking_worker():
         except Exception as e:
             print(f"Tracking worker error: {e}")
             time.sleep(0.1)
+
 
 # ========== SSE stream ==========
 def event_stream():
@@ -896,148 +1205,189 @@ def event_stream():
             if client in tracking_clients:
                 tracking_clients.remove(client)
 
+
 @app.route("/tracking_stream")
 @login_required
 def tracking_stream():
     headers = {
-        'X-Accel-Buffering': 'no',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+        "X-Accel-Buffering": "no",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
     }
-    return Response(event_stream(), mimetype='text/event-stream', headers=headers)
+    return Response(event_stream(), mimetype="text/event-stream", headers=headers)
+
 
 @app.route("/video_feed")
 @login_required
 def video_feed():
     def generate():
-        global current_jpeg
         while True:
-            if current_jpeg is None:
+            # FIX #5: Lock으로 current_jpeg 읽기 보호
+            with _jpeg_lock:
+                jpeg = current_jpeg
+            if jpeg is None:
                 time.sleep(0.02)
                 continue
-            jpeg = current_jpeg
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n'
-                   b'Content-Length: ' + str(len(jpeg)).encode() + b'\r\n\r\n' +
-                   jpeg + b'\r\n')
-            time.sleep(1/15)
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n" +
+                jpeg + b"\r\n"
+            )
+            time.sleep(1 / 15)
+
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
 
 # ========== Recording ==========
 def get_next_recording_index():
     rec_dir = "recordings"
     os.makedirs(rec_dir, exist_ok=True)
-    existing = [f for f in os.listdir(rec_dir) if f.startswith("recording_") and f.endswith(".mp4")]
+    existing = [
+        f for f in os.listdir(rec_dir)
+        if f.startswith("recording_") and f.endswith(".mp4")
+    ]
     numbers = []
     for f in existing:
-        try:
-            num = int(f.split('_')[1])
-            numbers.append(num)
-        except:
-            pass
-    if numbers:
-        return max(numbers) + 1
-    else:
-        return 1
+        # FIX #8: 취약한 split() 파싱 → 정규식으로 교체
+        m = re.match(r"recording_(\d+)_", f)
+        if m:
+            numbers.append(int(m.group(1)))
+    return (max(numbers) + 1) if numbers else 1
+
 
 def start_recording_async(duration_sec, framerate_fps, output_path):
+    """
+    FIX #9: time.sleep() 블로킹 대신 threading.Event.wait()로 교체
+    → 녹화 도중 취소(stop_recording 엔드포인트)가 가능해짐.
+    """
     global is_recording, recording_coordinates, current_recording_filename
+
     recording_coordinates = []
     current_recording_filename = os.path.splitext(os.path.basename(output_path))[0]
     is_recording = True
+    _stop_recording_event.clear()
+
+    max_exposure = int(1_000_000 / framerate_fps)
+    rec_exposure = min(int(cam_controls["exposure"]), max_exposure)
+
     with camera_lock:
         if picam2 is None:
-            start_camera()
-        picam2.set_controls({"FrameRate": framerate_fps})
-        encoder = H264Encoder(bitrate=10000000)
+            _start_camera_unlocked()
+        picam2.set_controls({"FrameRate": framerate_fps, "ExposureTime": rec_exposure})
+        encoder = H264Encoder(bitrate=10_000_000)
         output = FfmpegOutput(output_path)
         picam2.start_encoder(encoder, output)
-    time.sleep(duration_sec)
+
+    # 취소 가능한 대기
+    _stop_recording_event.wait(timeout=duration_sec)
+
     with camera_lock:
         picam2.stop_encoder()
         picam2.set_controls({"FrameRate": STREAM_FPS})
+        apply_camera_controls()
+
     is_recording = False
+
     if recording_coordinates:
         csv_dir = "coordinates"
         os.makedirs(csv_dir, exist_ok=True)
-        csv_filename = f"{current_recording_filename}.csv"
-        csv_path = os.path.join(csv_dir, csv_filename)
-        with open(csv_path, 'w', newline='') as f:
+        csv_path = os.path.join(csv_dir, f"{current_recording_filename}.csv")
+        with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["timestamp_ms", "x", "y", "radius"])
             writer.writerows(recording_coordinates)
         print(f"CSV saved: {csv_path}")
 
+
 @app.route("/start_recording", methods=["POST"])
 @login_required
 def start_recording():
-    global record_duration, record_framerate
     if record_framerate < 1 or record_duration < 1:
         return jsonify({"error": "Invalid parameters"}), 400
+    if is_recording:
+        return jsonify({"error": "Already recording"}), 409
     rec_dir = "recordings"
     os.makedirs(rec_dir, exist_ok=True)
     idx = get_next_recording_index()
     filename = f"recording_{idx}_{record_framerate}fps_{record_duration}s.mp4"
     filepath = os.path.join(rec_dir, filename)
-    thread = threading.Thread(target=start_recording_async,
-                              args=(record_duration, record_framerate, filepath),
-                              daemon=True)
+    thread = threading.Thread(
+        target=start_recording_async,
+        args=(record_duration, record_framerate, filepath),
+        daemon=True,
+    )
     thread.start()
     return jsonify({"filename": filename})
+
+
+@app.route("/stop_recording", methods=["POST"])
+@login_required
+def stop_recording():
+    """FIX #9: 녹화 조기 종료 엔드포인트 (신규 추가)."""
+    if not is_recording:
+        return jsonify({"error": "Not recording"}), 400
+    _stop_recording_event.set()
+    return jsonify({"message": "Recording stopped"})
+
 
 # ========== Keyboard listener ==========
 def start_keyboard_listener():
     if keyboard is None:
         print(f"Keyboard disabled: {KEYBOARD_IMPORT_ERROR}")
         return None
+
     pressed_keys = set()
+
     def rebuild_key_map():
         return {
-            keyboard.Key.right: [-steps["x"], 0, 0],
-            keyboard.Key.left: [steps["x"], 0, 0],
-            keyboard.Key.up: [0, steps["y"], 0],
-            keyboard.Key.down: [0, -steps["y"], 0],
-            keyboard.Key.page_up: [0, 0, steps["z"]],
-            keyboard.Key.page_down: [0, 0, -steps["z"]],
+            keyboard.Key.right:     [-steps["x"],  0,           0],
+            keyboard.Key.left:      [ steps["x"],  0,           0],
+            keyboard.Key.up:        [ 0,           steps["y"],  0],
+            keyboard.Key.down:      [ 0,          -steps["y"],  0],
+            keyboard.Key.page_up:   [ 0,           0,           steps["z"]],
+            keyboard.Key.page_down: [ 0,           0,          -steps["z"]],
         }
+
     key_map_move = rebuild_key_map()
+
     def on_press(key):
         nonlocal key_map_move
         with move_lock:
             if key in key_map_move and sb is not None:
                 sb.move_rel(key_map_move[key])
-            if hasattr(key, "char") and key.char in ("x","y","z","=","-"):
+            if hasattr(key, "char") and key.char in ("x", "y", "z", "=", "-"):
                 pressed_keys.add(key.char)
             adjusted = False
-            if "x" in pressed_keys and "=" in pressed_keys:
-                steps["x"] += 5; adjusted = True
-            if "x" in pressed_keys and "-" in pressed_keys:
-                steps["x"] = max(1, steps["x"]-5); adjusted = True
-            if "y" in pressed_keys and "=" in pressed_keys:
-                steps["y"] += 5; adjusted = True
-            if "y" in pressed_keys and "-" in pressed_keys:
-                steps["y"] = max(1, steps["y"]-5); adjusted = True
-            if "z" in pressed_keys and "=" in pressed_keys:
-                steps["z"] += 5; adjusted = True
-            if "z" in pressed_keys and "-" in pressed_keys:
-                steps["z"] = max(1, steps["z"]-5); adjusted = True
+            for axis in ("x", "y", "z"):
+                if axis in pressed_keys:
+                    if "=" in pressed_keys:
+                        steps[axis] += 5
+                        adjusted = True
+                    if "-" in pressed_keys:
+                        steps[axis] = max(1, steps[axis] - 5)
+                        adjusted = True
             if adjusted:
                 key_map_move = rebuild_key_map()
-                if hasattr(key, "char") and key.char in ("=","-"):
+                if hasattr(key, "char") and key.char in ("=", "-"):
                     pressed_keys.discard(key.char)
+
     def on_release(key):
-        if hasattr(key, "char") and key.char in ("x","y","z","=","-"):
+        if hasattr(key, "char") and key.char in ("x", "y", "z", "=", "-"):
             pressed_keys.discard(key.char)
+
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.daemon = True
     listener.start()
     return listener
 
+
 # ========== Main ==========
 def run_server():
     print("======= Microscope Controller =======")
-    print(f"Flask server on http://0.0.0.0:{server}")
-    app.run(host="0.0.0.0", port=server, debug=False, use_reloader=False, threaded=True)
+    print(f"Flask server on http://0.0.0.0:{SERVER_PORT}")
+    app.run(host="0.0.0.0", port=SERVER_PORT, debug=False, use_reloader=False, threaded=True)
+
 
 def main():
     global sb, controller_error
@@ -1053,6 +1403,7 @@ def main():
         controller_error = str(e)
         print(f"Sangaboard unavailable: {controller_error}")
         run_server()
+
 
 if __name__ == "__main__":
     main()
