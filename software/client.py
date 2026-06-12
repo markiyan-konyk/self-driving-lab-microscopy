@@ -157,6 +157,22 @@ def white_balance():
     return jsonify({"message": "White balance started"})
 
 
+@app.route("/calibration_status")
+@auth.login_required
+def calibration_status():
+    """Polled by the UI so the calibration buttons reflect the real state
+    (the /autofocus and /white_balance routes return immediately)."""
+    return jsonify({"running": camera.calibration_running})
+
+
+@app.route("/get_camera_controls")
+@auth.login_required
+def get_camera_controls():
+    """Current cam_controls; the UI re-syncs its sliders from this after a
+    calibration so the calibrated gains aren't overwritten by stale values."""
+    return jsonify(camera.cam_controls)
+
+
 # ========== Streams ==========
 @app.route("/tracking_stream")
 @auth.login_required

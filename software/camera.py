@@ -211,7 +211,13 @@ def run_white_balance_thread():
                     camera_running = False
 
                 # 2. White balance 보정 (picam2 객체에 직접 접근; 멈춘 상태에서 raw 캡처)
-                red_gain, blue_gain = run_white_balance(picam2, target_white_level=876)
+                # 현재 라이브 뷰와 같은 노출로 보정하도록 exposure/analogue_gain 전달
+                red_gain, blue_gain = run_white_balance(
+                    picam2,
+                    target_white_level=876,
+                    exposure=int(cam_controls["exposure"]),
+                    analogue_gain=cam_controls["analogue_gain"],
+                )
 
                 # 3. 보정된 gain을 전역 cam_controls에 반영
                 cam_controls["red_gain"] = red_gain

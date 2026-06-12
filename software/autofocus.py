@@ -8,6 +8,12 @@ The ``stage`` argument is anything providing the small interface of
 ``controls.SangaboardWrapper``: a ``position`` dict property plus
 ``move_rel(delta)`` / ``move_abs(target)``. The ``camera`` argument is a
 started ``Picamera2`` instance.
+
+Two Raspberry Pi realities are handled here:
+  * the camera pipeline keeps a couple of requests in flight, so frames
+    captured right after a move were exposed before/during it -> flush them;
+  * the stage has mechanical backlash, so every Z position (including the
+    final move to the winner) is approached from below.
 """
 
 import time
@@ -27,6 +33,13 @@ def _to_bgr(frame):
     return frame
 
 
+def _capture_fresh(camera, flush=2):
+    """Capture a frame that was exposed after now, discarding in-flight ones."""
+    for _ in range(flush):
+        camera.capture_array("main")
+    return camera.capture_array("main")
+
+
 def focus_score(camera, metric="jpeg_size"):
     """Single focus measurement on the camera's main stream.
 
@@ -34,7 +47,7 @@ def focus_score(camera, metric="jpeg_size"):
     high-frequency detail and compress to bigger files, so bigger is sharper.
     ``laplacian``: variance of the Laplacian of the grayscale frame.
     """
-    bgr = _to_bgr(camera.capture_array("main"))
+    bgr = _to_bgr(_capture_fresh(camera))
     if metric == "laplacian":
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         return float(cv2.Laplacian(gray, cv2.CV_64F).var())
@@ -44,33 +57,44 @@ def focus_score(camera, metric="jpeg_size"):
     return float(len(buf))
 
 
-def _scan_z(stage, camera, z_positions, metric, settle_time):
-    """Visit each Z in order and measure focus. Returns one score per Z."""
+def _goto_z(stage, z):
     pos = stage.position
+    stage.move_abs({"x": pos["x"], "y": pos["y"], "z": int(z)})
+
+
+def _goto_z_from_below(stage, z, backlash, settle_time):
+    """Approach ``z`` moving upward so backlash is taken up consistently."""
+    _goto_z(stage, z - backlash)
+    _goto_z(stage, z)
+    time.sleep(settle_time)
+
+
+def _scan_z(stage, camera, z_positions, metric, settle_time, backlash):
+    """Measure focus at each Z (ascending), every position approached from
+    below so backlash affects all measurements identically."""
+    _goto_z(stage, z_positions[0] - backlash)  # take up the slack first
     scores = []
     for z in z_positions:
-        stage.move_abs({"x": pos["x"], "y": pos["y"], "z": int(z)})
+        _goto_z(stage, z)
         time.sleep(settle_time)
         scores.append(focus_score(camera, metric))
     return scores
 
 
 def fast_autofocus(stage, camera, dz=2000, n_steps=20, metric="jpeg_size",
-                   settle_time=0.05):
+                   settle_time=0.05, backlash=256):
     """Single sweep: scan [z - dz, z + dz] in ``n_steps`` and move to the
     best Z. Returns the chosen Z position."""
-    pos = stage.position
-    centre = pos["z"]
+    centre = stage.position["z"]
     z_positions = np.linspace(centre - dz, centre + dz, n_steps).astype(int)
-    scores = _scan_z(stage, camera, z_positions, metric, settle_time)
+    scores = _scan_z(stage, camera, z_positions, metric, settle_time, backlash)
     best_z = int(z_positions[int(np.argmax(scores))])
-    stage.move_abs({"x": pos["x"], "y": pos["y"], "z": best_z})
-    time.sleep(settle_time)
+    _goto_z_from_below(stage, best_z, backlash, settle_time)
     return best_z
 
 
 def looping_autofocus(stage, camera, dz=2000, n_steps=20, metric="jpeg_size",
-                      max_attempts=3, settle_time=0.05):
+                      max_attempts=3, settle_time=0.05, backlash=256):
     """Repeated sweeps, re-centred on the best Z found each time.
 
     If the best score lands on an edge of the scanned range, the true focus
@@ -80,14 +104,12 @@ def looping_autofocus(stage, camera, dz=2000, n_steps=20, metric="jpeg_size",
     """
     best_z = stage.position["z"]
     for _ in range(max_attempts):
-        pos = stage.position
-        centre = pos["z"]
+        centre = stage.position["z"]
         z_positions = np.linspace(centre - dz, centre + dz, n_steps).astype(int)
-        scores = _scan_z(stage, camera, z_positions, metric, settle_time)
+        scores = _scan_z(stage, camera, z_positions, metric, settle_time, backlash)
         best_idx = int(np.argmax(scores))
         best_z = int(z_positions[best_idx])
-        stage.move_abs({"x": pos["x"], "y": pos["y"], "z": best_z})
-        time.sleep(settle_time)
+        _goto_z_from_below(stage, best_z, backlash, settle_time)
         if 0 < best_idx < len(z_positions) - 1:
             break  # peak inside the scanned range -> focus bracketed
     return best_z

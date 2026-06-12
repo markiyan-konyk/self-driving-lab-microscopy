@@ -23,6 +23,25 @@ move_lock = threading.Lock()
 steps = {"x": 40, "y": 40, "z": 40}
 
 
+def build_dir_map():
+    """Map screen directions to relative stage moves [x, y, z].
+
+    The camera sensor is mounted rotated 90 degrees relative to the stage
+    axes, so what looks like "up"/"down" on the video feed is a move along
+    the stage X axis and "left"/"right" is a move along stage Y. If a
+    direction is mirrored on your build, flip the sign of that entry here
+    (e.g. up/down reversed -> swap the signs on the two X entries).
+    """
+    return {
+        "up":        [-steps["x"],  0,           0],
+        "down":      [ steps["x"],  0,           0],
+        "left":      [ 0,          -steps["y"],  0],
+        "right":     [ 0,           steps["y"],  0],
+        "page_up":   [ 0,           0,           steps["z"]],
+        "page_down": [ 0,           0,          -steps["z"]],
+    }
+
+
 # ========== Stage Wrapper for Sangaboard ==========
 class SangaboardWrapper:
     """Provides .position dict, .move_rel(), .move_abs() for autofocus."""
@@ -47,8 +66,11 @@ class SangaboardWrapper:
         return dict(self._pos)
 
     def move_rel(self, delta):
+        # The Sangaboard library wants a [x, y, z] displacement list, not a
+        # dict (iterating a dict would hand it the axis names).
+        displacement = [int(delta.get(axis, 0)) for axis in ("x", "y", "z")]
         with move_lock:
-            self._board.move_rel(delta)
+            self._board.move_rel(displacement)
             for axis, d in delta.items():
                 if axis in self._pos:
                     self._pos[axis] += d
@@ -64,14 +86,7 @@ class SangaboardWrapper:
 
 def move_motor(direction):
     """Jog the stage in ``direction``. Returns a (body, status_code) tuple."""
-    dir_map = {
-        "left":      [ steps["x"],  0,           0],
-        "right":     [-steps["x"],  0,           0],
-        "up":        [ 0,           steps["y"],  0],
-        "down":      [ 0,          -steps["y"],  0],
-        "page_up":   [ 0,           0,           steps["z"]],
-        "page_down": [ 0,           0,          -steps["z"]],
-    }
+    dir_map = build_dir_map()
     if direction not in dir_map:
         return "Unknown direction", 404
     if sb is None:
@@ -102,13 +117,15 @@ def start_keyboard_listener():
     pressed_keys = set()
 
     def rebuild_key_map():
+        # Same screen-direction mapping as the web UI (single source of truth).
+        dir_map = build_dir_map()
         return {
-            keyboard.Key.right:     [-steps["x"],  0,           0],
-            keyboard.Key.left:      [ steps["x"],  0,           0],
-            keyboard.Key.up:        [ 0,           steps["y"],  0],
-            keyboard.Key.down:      [ 0,          -steps["y"],  0],
-            keyboard.Key.page_up:   [ 0,           0,           steps["z"]],
-            keyboard.Key.page_down: [ 0,           0,          -steps["z"]],
+            keyboard.Key.up:        dir_map["up"],
+            keyboard.Key.down:      dir_map["down"],
+            keyboard.Key.left:      dir_map["left"],
+            keyboard.Key.right:     dir_map["right"],
+            keyboard.Key.page_up:   dir_map["page_up"],
+            keyboard.Key.page_down: dir_map["page_down"],
         }
 
     key_map_move = rebuild_key_map()

@@ -10,6 +10,11 @@ blue_gain)`` for the caller to store in ``cam_controls``.
 ``target_white_level`` is the expected white level of the illuminated
 background expressed as a 10-bit value (876/1023 ~ 219/255); it selects which
 pixels count as "white" for the balance and excludes clipped ones.
+
+Pass ``exposure`` (µs) and ``analogue_gain`` so the calibration runs at the
+same brightness as the live view: after the stop/start cycle the previous
+exposure controls are not guaranteed to persist, and with auto-exposure
+disabled an unset exposure gives arbitrary brightness and bad gains.
 """
 
 import time
@@ -29,6 +34,14 @@ def _to_bgr(frame):
     return frame
 
 
+def _capture_fresh(camera, flush=2):
+    """Capture a frame exposed after the latest set_controls(), discarding
+    the in-flight frames that still carry the previous gains."""
+    for _ in range(flush):
+        camera.capture_array("main")
+    return camera.capture_array("main")
+
+
 def _channel_means(bgr, target8):
     """Mean R, G, B over the calibration pixels.
 
@@ -45,29 +58,37 @@ def _channel_means(bgr, target8):
     return r_mean, g_mean, b_mean
 
 
-def run_white_balance(picam2, target_white_level=876, max_iterations=8,
-                      tolerance=0.02, settle_time=0.3):
+def run_white_balance(picam2, target_white_level=876, exposure=None,
+                      analogue_gain=None, max_iterations=8, tolerance=0.02,
+                      settle_time=0.3):
     """Calibrate red/blue gains on a (stopped) Picamera2. Returns (red, blue)."""
     target8 = target_white_level / 1023.0 * 255.0
     red_gain, blue_gain = 1.0, 1.0
 
     picam2.start()
     try:
-        for _ in range(max_iterations):
-            picam2.set_controls({
+        for i in range(max_iterations):
+            controls = {
                 "AwbEnable": False,
                 "AeEnable": False,
                 "ColourGains": (red_gain, blue_gain),
-            })
+            }
+            if exposure is not None:
+                controls["ExposureTime"] = int(exposure)
+            if analogue_gain is not None:
+                controls["AnalogueGain"] = float(analogue_gain)
+            picam2.set_controls(controls)
             time.sleep(settle_time)
 
-            bgr = _to_bgr(picam2.capture_array("main"))
+            bgr = _to_bgr(_capture_fresh(picam2))
             r_mean, g_mean, b_mean = _channel_means(bgr, target8)
             if r_mean <= 0 or g_mean <= 0 or b_mean <= 0:
                 raise RuntimeError("White balance: frame too dark to calibrate")
 
             r_err = g_mean / r_mean
             b_err = g_mean / b_mean
+            print(f"[white_balance] iter {i}: R={r_mean:.1f} G={g_mean:.1f} "
+                  f"B={b_mean:.1f} gains=({red_gain:.2f}, {blue_gain:.2f})")
             if abs(r_err - 1.0) < tolerance and abs(b_err - 1.0) < tolerance:
                 break
 

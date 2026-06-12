@@ -87,33 +87,33 @@
         toggleBtn.onclick = async () => {
             trackingEnabled = !trackingEnabled;
             toggleBtn.textContent = trackingEnabled ? 'Tracking ON' : 'Tracking OFF';
+            // Always tell the server, so detection actually stops when toggled
+            // off (it used to only be notified when re-enabling).
+            fetch('/set_tracking', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled: trackingEnabled})
+            });
             if (!trackingEnabled) {
                 drawAxes();
+                trackInfo.textContent = 'Tracking disabled';
+                currentCircle = null;
+            }
+        };
 
-        trackInfo.textContent = 'Tracking disabled';
-        currentCircle = null;
-    } else {
-        fetch('/set_tracking', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({enabled: true})
-        });
-    }
-};
+        const slider = document.getElementById('trackIntervalSlider');
+        const intervalSpan = document.getElementById('intervalValue');
+        slider.oninput = () => {
+            const val = slider.value;
+            intervalSpan.textContent = val;
+            fetch('/set_tracking_interval', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({interval_ms: parseInt(val)})
+            });
+        };
 
-const slider = document.getElementById('trackIntervalSlider');
-const intervalSpan = document.getElementById('intervalValue');
-slider.oninput = () => {
-    const val = slider.value;
-    intervalSpan.textContent = val;
-    fetch('/set_tracking_interval', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({interval_ms: parseInt(val)})
-    });
-};
-
-drawAxes();
+        drawAxes();
 
         // ===== Camera controls =====
         let camDebounce = null;
@@ -233,20 +233,43 @@ drawAxes();
             await updateSetting('framerate', curFps);
         };
 
-        document.getElementById('recordBtn').onclick = async () => {
-            const btn = document.getElementById('recordBtn');
-            btn.disabled = true;
-            btn.textContent = 'Recording...';
-            messageDiv.textContent = 'Recording started...';
+        // The /start_recording route returns immediately while the recording
+        // runs in a background thread, so the button doubles as a Stop button
+        // (via /stop_recording) until the duration elapses.
+        const recordBtn = document.getElementById('recordBtn');
+        let isRecording = false;
+        let recordTimer = null;
+
+        function recordingDone(msg) {
+            isRecording = false;
+            clearTimeout(recordTimer);
+            recordTimer = null;
+            recordBtn.textContent = '🎥 Record';
+            messageDiv.textContent = msg;
+        }
+
+        recordBtn.onclick = async () => {
+            if (isRecording) {
+                try {
+                    await request('/stop_recording', { method: 'POST' });
+                    recordingDone('Recording stopped early.');
+                } catch(e) {
+                    messageDiv.textContent = `Stop failed: ${e.message}`;
+                }
+                return;
+            }
             try {
                 const resp = await request('/start_recording', { method: 'POST' });
                 const result = await resp.json();
-                messageDiv.textContent = `Recording saved: ${result.filename}`;
+                isRecording = true;
+                recordBtn.textContent = '⏹ Stop';
+                messageDiv.textContent = `Recording ${result.filename} (${curDur}s)...`;
+                recordTimer = setTimeout(
+                    () => recordingDone(`Recording saved: ${result.filename}`),
+                    curDur * 1000 + 1500
+                );
             } catch(e) {
                 messageDiv.textContent = `Recording failed: ${e.message}`;
-            } finally {
-                btn.disabled = false;
-                btn.textContent = '🎥 Record';
             }
         };
 
@@ -276,19 +299,73 @@ drawAxes();
         const autofocusBtn = document.getElementById('autofocusBtn');
         const whiteBalanceBtn = document.getElementById('whiteBalanceBtn');
 
+        // The /autofocus and /white_balance routes return immediately while a
+        // worker thread runs, so poll /calibration_status to know when the
+        // calibration actually finished.
+        async function waitForCalibration(timeoutSec = 120) {
+            for (let i = 0; i < timeoutSec; i++) {
+                await new Promise(r => setTimeout(r, 1000));
+                try {
+                    const resp = await request('/calibration_status');
+                    const data = await resp.json();
+                    if (!data.running) return true;
+                } catch (e) { /* transient error: keep polling */ }
+            }
+            return false;
+        }
+
+        // Pull cam_controls from the server and update every slider/input so
+        // calibrated gains aren't overwritten by stale UI values on the next
+        // slider touch.
+        async function syncCameraControls() {
+            const resp = await request('/get_camera_controls');
+            const cam = await resp.json();
+            const sliderMap = {
+                redGain: 'red_gain',
+                greenGain: 'green_gain',
+                blueGain: 'blue_gain',
+                exposure: 'exposure',
+                colourGain: 'colour_gain',
+                analogueGain: 'analogue_gain',
+            };
+            for (const [id, key] of Object.entries(sliderMap)) {
+                const val = (id === 'exposure') ? Math.round(cam[key]) : Math.round(cam[key] * 100) / 100;
+                document.getElementById(id).value = val;
+                document.getElementById(id + 'Val').textContent = val;
+            }
+            const numMap = {
+                camContrast: 'contrast',
+                camSaturation: 'saturation',
+                camBrightness: 'brightness',
+                camSharpness: 'sharpness',
+            };
+            for (const [id, key] of Object.entries(numMap)) {
+                document.getElementById(id).value = cam[key];
+            }
+        }
+
         async function runCalibration(endpoint, button, message) {
-            button.disabled = true;
+            autofocusBtn.disabled = true;
+            whiteBalanceBtn.disabled = true;
             const originalText = button.textContent;
             button.textContent = message + '...';
             messageDiv.textContent = message + ' started...';
             try {
                 const resp = await fetch(endpoint, { method: 'POST' });
                 const data = await resp.json();
-                messageDiv.textContent = data.message || message + ' completed.';
+                if (!resp.ok || data.error) {
+                    throw new Error(data.error || resp.statusText);
+                }
+                const finished = await waitForCalibration();
+                try { await syncCameraControls(); } catch (e) { /* non-fatal */ }
+                messageDiv.textContent = finished
+                    ? message + ' completed.'
+                    : message + ' is taking unusually long - check the server log.';
             } catch (e) {
                 messageDiv.textContent = message + ' failed: ' + e.message;
             } finally {
-                button.disabled = false;
+                autofocusBtn.disabled = false;
+                whiteBalanceBtn.disabled = false;
                 button.textContent = originalText;
             }
         }
