@@ -1,0 +1,58 @@
+:root { color-scheme: light dark; font-family: Inter, sans-serif; background: #111827; color: #f8fafc; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: #111827; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; min-height: 100vh; padding: 18px; }
+.camera-pane { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { margin: 0; font-size: 18px; font-weight: 650; }
+.status { display: inline-flex; align-items: center; min-height: 28px; padding: 4px 9px; border-radius: 7px; background: #1f2937; color: #d1d5db; font-size: 13px; white-space: nowrap; }
+.video-frame { position: relative; flex: 1; min-height: 360px; overflow: hidden; border: 1px solid #374151; border-radius: 8px; background: #030712; }
+.video-frame img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.plot-frame { margin-top: 10px; border: 1px solid #374151; border-radius: 8px; background: #0f172a; padding: 10px; }
+.plot-canvas { width: 100%; height: 200px; background: white; }
+.panel { display: flex; flex-direction: column; gap: 18px; padding: 14px; border: 1px solid #374151; border-radius: 8px; background: #161f2f; overflow-y: auto; max-height: 100vh; }
+.section-title { margin: 0 0 10px; color: #cbd5e1; font-size: 13px; font-weight: 650; text-transform: uppercase; }
+.jog { display: grid; grid-template-columns: repeat(3, 74px); grid-template-rows: repeat(3, 58px); gap: 8px; justify-content: center; }
+button { border: 1px solid #475569; border-radius: 8px; background: #263244; color: #f8fafc; font: inherit; font-weight: 650; cursor: pointer; touch-action: manipulation; }
+button:hover { background: #334155; }
+button:active { transform: translateY(1px); background: #1d4ed8; }
+.jog button { font-size: 25px; }
+.up { grid-column: 2; grid-row: 1; }
+.left { grid-column: 1; grid-row: 2; }
+.down { grid-column: 2; grid-row: 2; }
+.right { grid-column: 3; grid-row: 2; }
+.z-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.z-grid button { min-height: 48px; }
+.steps { display: grid; grid-template-columns: 28px 1fr auto 1fr; gap: 8px; align-items: center; }
+.steps span { color: #e5e7eb; font-variant-numeric: tabular-nums; text-align: center; min-width: 40px; }
+.steps button { min-height: 38px; }
+.recording-controls { margin-top: 8px; border-top: 1px solid #374151; padding-top: 12px; }
+.recording-controls .flex-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; justify-content: space-between; }
+.tracking-controls { margin-top: 8px; border-top: 1px solid #374151; padding-top: 12px; }
+.tracking-controls .flex-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; justify-content: space-between; }
+.camera-controls { margin-top: 8px; border-top: 1px solid #374151; padding-top: 12px; }
+.cam-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.cam-row span:first-child { min-width: 55px; color: #cbd5e1; font-size: 13px; }
+.cam-row input[type=range] { flex: 1; }
+.cam-row .cam-val { min-width: 55px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; color: #e5e7eb; }
+.cam-step { min-height: 24px; width: 26px; padding: 0; font-size: 11px; line-height: 1; border-radius: 5px; }
+.num-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 8px; }
+.num-box { display: flex; flex-direction: column; gap: 4px; }
+.num-box span { color: #cbd5e1; font-size: 11px; text-transform: uppercase; text-align: center; }
+.num-box input { width: 100%; min-height: 36px; border: 1px solid #475569; border-radius: 6px; background: #0f172a; color: #f8fafc; font: inherit; font-size: 14px; padding: 4px 6px; text-align: center; outline: none; }
+.message { min-height: 20px; color: #93c5fd; font-size: 13px; }
+.logout { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 4px 9px; border: 1px solid #475569; border-radius: 7px; color: #d1d5db; font-size: 13px; text-decoration: none; }
+.logout:hover { background: #263244; color: #f8fafc; }
+@media (max-width: 820px) {
+    main { grid-template-columns: 1fr; padding: 12px; }
+    .video-frame { min-height: 46vh; }
+}
+.calib-btn {
+    background: #4c6ef5 !important;
+    width: 100%;
+    margin-top: 8px;
+}
+.calib-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}

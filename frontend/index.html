@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Microscope Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+__STYLE__
+    </style>
+</head>
+<body>
+    <main>
+        <section class="camera-pane">
+            <div class="topbar">
+                <h1>Microscope</h1>
+                <span class="status" id="status">Connecting</span>
+                <a class="logout" href="/logout">Lock</a>
+            </div>
+            <div class="video-frame">
+                <img src="/video_feed" alt="Microscope camera stream" id="stream">
+            </div>
+            <div class="plot-frame">
+                <canvas id="trackCanvas" width="600" height="200" style="width:100%; height:200px; background:white; border:1px solid #ccc;"></canvas>
+            </div>
+        </section>
+
+        <aside class="panel">
+            <section>
+                <p class="section-title">XY Jog</p>
+                <div class="jog">
+                    <button class="up" data-move="up">↑</button>
+                    <button class="left" data-move="left">←</button>
+                    <button class="down" data-move="down">↓</button>
+                    <button class="right" data-move="right">→</button>
+                </div>
+            </section>
+            <section>
+                <p class="section-title">Focus</p>
+                <div class="z-grid">
+                    <button data-move="page_up">Z+</button>
+                    <button data-move="page_down">Z-</button>
+                </div>
+            </section>
+            <section>
+                <p class="section-title">Step Size</p>
+                <div class="steps">
+                    <strong>X</strong>
+                    <button data-adjust="x:dec">-5</button>
+                    <span id="x_value">{{ steps.x }}</span>
+                    <button data-adjust="x:inc">+5</button>
+                    <strong>Y</strong>
+                    <button data-adjust="y:dec">-5</button>
+                    <span id="y_value">{{ steps.y }}</span>
+                    <button data-adjust="y:inc">+5</button>
+                    <strong>Z</strong>
+                    <button data-adjust="z:dec">-5</button>
+                    <span id="z_value">{{ steps.z }}</span>
+                    <button data-adjust="z:inc">+5</button>
+                </div>
+            </section>
+
+            <section class="recording-controls">
+                <p class="section-title">Recordings</p>
+                <div class="flex-row">
+                    <button id="recDurDown">-1s</button>
+                    <span id="durDisplay">10</span><span> s</span>
+                    <button id="recDurUp">+1s</button>
+                </div>
+                <div class="flex-row">
+                    <button id="recFpsDown">-10fps</button>
+                    <span id="fpsDisplay">100</span><span> fps</span>
+                    <button id="recFpsUp">+10fps</button>
+                </div>
+                <div class="flex-row">
+                    <button id="recordBtn" style="background:#2563eb; width:100%;">🎥 Record</button>
+                </div>
+            </section>
+
+            <section class="tracking-controls">
+                <p class="section-title">Particle Tracking</p>
+                <div class="flex-row">
+                    <button id="trackToggleBtn" style="background:#2563eb;">Tracking ON</button>
+                </div>
+                <div class="flex-row">
+                    <span>Log interval (ms)</span>
+                    <input type="range" id="trackIntervalSlider" min="50" max="500" step="50" value="100">
+                    <span id="intervalValue">100</span><span> ms</span>
+                </div>
+                <div class="message" id="trackInfo">No circle detected</div>
+            </section>
+
+            <section class="camera-controls">
+                <p class="section-title">White Balance</p>
+                <div class="cam-row">
+                    <span>Red</span>
+                    <input type="range" id="redGain" min="0" max="8" step="0.1" value="{{ cam.red_gain }}">
+                    <span class="cam-val" id="redGainVal">{{ cam.red_gain }}</span>
+                    <button class="cam-step" data-slider="redGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="redGain" data-dir="1">▶</button>
+                </div>
+                <div class="cam-row">
+                    <span>Blue</span>
+                    <input type="range" id="blueGain" min="0" max="8" step="0.1" value="{{ cam.blue_gain }}">
+                    <span class="cam-val" id="blueGainVal">{{ cam.blue_gain }}</span>
+                    <button class="cam-step" data-slider="blueGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="blueGain" data-dir="1">▶</button>
+                </div>
+
+                <div class="cam-row">
+                    <span>Green</span>
+                    <input type="range" id="greenGain" min="0" max="8" step="0.1" value="{{ cam.green_gain }}">
+                    <span class="cam-val" id="greenGainVal">{{ cam.green_gain }}</span>
+                    <button class="cam-step" data-slider="greenGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="greenGain" data-dir="1">▶</button>
+                </div>
+
+            </section>
+
+            <section class="camera-controls">
+                <p class="section-title">Exposure</p>
+                <div class="cam-row">
+                    <span>Time µs</span>
+                    <input type="range" id="exposure" min="100" max="100000" step="100" value="{{ cam.exposure }}">
+                    <span class="cam-val" id="exposureVal">{{ cam.exposure|int }}</span>
+                    <button class="cam-step" data-slider="exposure" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="exposure" data-dir="1">▶</button>
+                </div>
+            </section>
+
+            <section class="camera-controls">
+                <p class="section-title">Gains</p>
+                <div class="cam-row">
+                    <span>Colour</span>
+                    <input type="range" id="colourGain" min="0.1" max="4" step="0.1" value="{{ cam.colour_gain }}">
+                    <span class="cam-val" id="colourGainVal">{{ cam.colour_gain }}</span>
+                    <button class="cam-step" data-slider="colourGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="colourGain" data-dir="1">▶</button>
+                </div>
+                <div class="cam-row">
+                    <span>Analogue</span>
+                    <input type="range" id="analogueGain" min="1" max="16" step="0.1" value="{{ cam.analogue_gain }}">
+                    <span class="cam-val" id="analogueGainVal">{{ cam.analogue_gain }}</span>
+                    <button class="cam-step" data-slider="analogueGain" data-dir="-1">◀</button>
+                    <button class="cam-step" data-slider="analogueGain" data-dir="1">▶</button>
+                </div>
+            </section>
+
+            <section class="camera-controls">
+                <p class="section-title">Image Processing</p>
+                <div class="num-row">
+                    <div class="num-box">
+                        <span>Contrast</span>
+                        <input type="number" id="camContrast" value="{{ cam.contrast }}" step="0.1" min="0" max="4">
+                    </div>
+                    <div class="num-box">
+                        <span>Saturation</span>
+                        <input type="number" id="camSaturation" value="{{ cam.saturation }}" step="0.1" min="0" max="4">
+                    </div>
+                    <div class="num-box">
+                        <span>Brightness</span>
+                        <input type="number" id="camBrightness" value="{{ cam.brightness }}" step="0.05" min="-1" max="1">
+                    </div>
+                    <div class="num-box">
+                        <span>Sharpness</span>
+                        <input type="number" id="camSharpness" value="{{ cam.sharpness }}" step="0.1" min="0" max="8">
+                    </div>
+                </div>
+            </section>
+
+            <section class="camera-controls">
+                <p class="section-title">Calibration</p>
+                <div class="flex-row" style="gap: 12px;">
+                    <button id="autofocusBtn" class="calib-btn">🔍 Autofocus</button>
+                    <button id="whiteBalanceBtn" class="calib-btn">⚖️ White Balance</button>
+                </div>
+            </section>
+
+            <div class="message" id="message"></div>
+        </aside>
+    </main>
+
+    <script>
+__SCRIPT__
+    </script>
+</body>
+</html>

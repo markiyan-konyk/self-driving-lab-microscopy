@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Microscope Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root { color-scheme: light dark; font-family: Inter, sans-serif; background: #111827; color: #f8fafc; }
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 18px; background: #111827; }
+        .login { width: min(100%, 380px); display: flex; flex-direction: column; gap: 16px; padding: 22px; border: 1px solid #374151; border-radius: 8px; background: #161f2f; }
+        h1 { margin: 0; font-size: 22px; font-weight: 700; }
+        label { display: flex; flex-direction: column; gap: 8px; color: #cbd5e1; font-size: 13px; text-transform: uppercase; }
+        input { width: 100%; min-height: 46px; border: 1px solid #475569; border-radius: 8px; background: #0f172a; color: #f8fafc; font: inherit; font-size: 18px; padding: 9px 11px; outline: none; }
+        button { min-height: 46px; border: 1px solid #2563eb; border-radius: 8px; background: #1d4ed8; color: #f8fafc; font-weight: 700; cursor: pointer; }
+        button:hover { background: #2563eb; }
+        .error { min-height: 20px; margin: 0; color: #fca5a5; font-size: 14px; }
+    </style>
+</head><body>
+    <form class="login" method="post" action="{{ url_for('auth.login') }}">
+        <h1>Microscope</h1>
+        <label>Password <input name="password" type="password" autocomplete="current-password" autofocus required></label>
+        <button type="submit">Unlock</button>
+        <p class="error">{{ error }}</p>
+    </form>
+</body>
+</html>
