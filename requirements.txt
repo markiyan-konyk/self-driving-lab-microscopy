@@ -1,0 +1,8 @@
+# Runtime dependencies for software/main.py (run on the Raspberry Pi).
+# picamera2 is preinstalled on Raspberry Pi OS (or: sudo apt install python3-picamera2).
+flask
+numpy
+opencv-python
+simplejpeg
+sangaboard
+pynput
