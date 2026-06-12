@@ -23,7 +23,22 @@ import client
 
 
 def main():
-    camera.start_camera()
+    try:
+        camera.start_camera()
+    except Exception as e:
+        print(f"Camera failed to start: {e}")
+        if e.__cause__ is not None:
+            print(f"Caused by: {e.__cause__}")
+        print()
+        print("If the cause says 'Device or resource busy', another process is")
+        print("holding the camera - usually a previous run of this program that")
+        print("is still alive. On the Pi, find and stop it with:")
+        print("    ps aux | grep -E 'main.py|libcamera|rpicam|motion'")
+        print("    pkill -f main.py")
+        print("or list the camera's users with:")
+        print("    sudo fuser -v /dev/video* /dev/media*")
+        print("then start this program again.")
+        raise SystemExit(1)
 
     tracking_thread = threading.Thread(target=ML.tracking_worker, daemon=True)
     tracking_thread.start()
