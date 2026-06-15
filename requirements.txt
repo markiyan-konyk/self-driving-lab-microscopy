@@ -1,8 +1,44 @@
-# Runtime dependencies for software/main.py (run on the Raspberry Pi).
-# picamera2 is preinstalled on Raspberry Pi OS (or: sudo apt install python3-picamera2).
+# Dependencies for software/main.py, running on a Raspberry Pi
+# (Raspberry Pi OS Bookworm or newer).
+#
+# ============================ First-time setup ============================
+#
+# 1. Install the camera stack and OpenCV from apt (NOT pip). picamera2 needs
+#    the libcamera bindings that only the apt packages provide, and they pull
+#    in matching numpy + simplejpeg builds:
+#
+#        sudo apt update
+#        sudo apt install -y python3-picamera2 python3-opencv
+#
+# 2. Create a virtual environment that can SEE those apt packages
+#    (the --system-site-packages flag is essential), then install the rest:
+#
+#        cd ~/self-driving-lab
+#        python3 -m venv --system-site-packages venv
+#        source venv/bin/activate
+#        pip install -r requirements.txt
+#
+# 3. Run it:
+#
+#        cd software
+#        python main.py
+#
+#    Then open http://<pi-address>:8000 in a browser. Optional environment
+#    variables: MICROSCOPE_PASSWORD, MICROSCOPE_PORT, MICROSCOPE_SESSION_SECRET.
+#
+# ==========================================================================
+#
+# Deliberately NOT listed below (they come from apt in step 1; installing
+# them with pip can shadow the apt builds with binary-incompatible versions
+# and break picamera2):
+#   picamera2, opencv (cv2), numpy, simplejpeg
+
+# Web server / UI
 flask
-numpy
-opencv-python
-simplejpeg
+
+# OpenFlexure Sangaboard stage controller (serial motor control)
 sangaboard
+
+# Physical keyboard jog control on the Pi itself (optional at runtime: the
+# program runs fine without a keyboard/display if this fails to load)
 pynput
