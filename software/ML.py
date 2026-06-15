@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 from simplejpeg import encode_jpeg
 
-import software.camera as camera
+import camera
 
 # ========== Tracking settings/state ==========
 tracking_enabled = True

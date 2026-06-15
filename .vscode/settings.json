@@ -1,0 +1,10 @@
+{
+  // The app runs from inside software/ as `python main.py`, so its modules
+  // (camera, controls, ML, client, ...) import each other by bare name:
+  // `import camera`, not `import software.camera`. Treat software/ as a module
+  // root so Pylance resolves those imports AND auto-imports in the bare form,
+  // instead of "helpfully" rewriting them to `import software.camera`, which
+  // crashes at runtime (ModuleNotFoundError: No module named 'software').
+  "python.analysis.extraPaths": ["software"],
+  "python.autoComplete.extraPaths": ["software"]
+}
