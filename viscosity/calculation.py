@@ -40,35 +40,41 @@ KB = 1.380649e-23  # J / K
 
 # ──────────────────────────────────────────────────────────────────────────────
 def estimate_viscosity(
-    csv_file: str,
+    csv_file,
     temperature_K: float,
     pixel_size_m_per_px: float,
+    particle_radius_m: float,
+    particle_radius_uncertainty_m: float = 0.0,
     fit_fraction: float = 0.25,
     drift_correction: bool = True,
-    radius_uncertainty_mode: str = "sem",
 ) -> dict:
     """
-    Estimate dynamic viscosity from 2-D particle tracking data.
+    Estimate dynamic viscosity from one particle's 2-D tracking data.
 
     Parameters
     ----------
-    csv_file : str
-        CSV with columns: timestamp_ms, x, y, radius
+    csv_file : str | path | file-like | pandas.DataFrame
+        Single-particle trajectory with columns: timestamp_ms, x, y.
+        A `particle` column is allowed but must contain only one id — this
+        routine models a single trajectory, so pre-filter multi-particle tables.
     temperature_K : float
         Absolute temperature [K]
     pixel_size_m_per_px : float
         Physical size of one pixel [m/px]
+    particle_radius_m : float
+        Known particle radius [m] (e.g. calibrated / monodisperse beads). Used
+        directly in Stokes–Einstein rather than measured from the image, which
+        is far more accurate for sub-micron beads where the imaged blob size is
+        dominated by the optics.
+    particle_radius_uncertainty_m : float
+        1σ uncertainty on the radius [m] (e.g. from bead polydispersity).
+        Defaults to 0 (treat the radius as exact).
     fit_fraction : float
         Fraction of MSD lag range used for the linear fit (0 < fit_fraction ≤ 1).
         MSD is reliable only at short lags (typically ≤ N/4), so values above
         0.5 are rarely useful.
     drift_correction : bool
         Remove a linear (constant-velocity) stage drift before computing MSD.
-    radius_uncertainty_mode : str
-        "sem"  – use standard error of the mean (statistical uncertainty on the
-                 average radius; optimistic if bead is truly monodisperse).
-        "sd"   – use standard deviation (more conservative; recommended if
-                 individual-frame radius estimates are noisy).
 
     Returns
     -------
@@ -82,9 +88,18 @@ def estimate_viscosity(
         intercept_warning (str | None)
     """
     # ── 1. Load & validate ────────────────────────────────────────────────────
-    df = pd.read_csv(csv_file)
+    df = csv_file.copy() if isinstance(csv_file, pd.DataFrame) else pd.read_csv(csv_file)
 
-    required = {"timestamp_ms", "x", "y", "radius"}
+    # This routine models ONE particle. A multi-particle table (sorted only by
+    # time) would interleave different beads, and the MSD below would difference
+    # positions of *different* particles → silent garbage. Fail loudly instead.
+    if "particle" in df.columns and df["particle"].nunique() > 1:
+        raise ValueError(
+            f"estimate_viscosity expects a single particle's trajectory, but got "
+            f"{df['particle'].nunique()} particles — filter by `particle` first."
+        )
+
+    required = {"timestamp_ms", "x", "y"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns: {missing}")
@@ -109,19 +124,11 @@ def estimate_viscosity(
     x = df["x"].to_numpy(dtype=float) * pixel_size_m_per_px
     y = df["y"].to_numpy(dtype=float) * pixel_size_m_per_px
 
-    # Radius: mean + uncertainty
-    r_px = df["radius"].to_numpy(dtype=float)
-    radius_m = r_px.mean() * pixel_size_m_per_px
-
-    if radius_uncertainty_mode == "sem":
-        radius_unc_m = r_px.std(ddof=1) / np.sqrt(n) * pixel_size_m_per_px
-    elif radius_uncertainty_mode == "sd":
-        radius_unc_m = r_px.std(ddof=1) * pixel_size_m_per_px
-    else:
-        raise ValueError("radius_uncertainty_mode must be 'sem' or 'sd'.")
-
+    # Radius: known value supplied by the caller (not measured from the image).
+    radius_m     = float(particle_radius_m)
+    radius_unc_m = float(particle_radius_uncertainty_m)
     if radius_m <= 0:
-        raise ValueError("Mean particle radius is non-positive.")
+        raise ValueError("particle_radius_m must be positive.")
 
     # ── 3. Drift correction (linear) ─────────────────────────────────────────
     if drift_correction:
@@ -166,7 +173,7 @@ def estimate_viscosity(
     # This happens at very short trajectories where some lag has only 1 pair.
     valid_sem = sem_fit[np.isfinite(sem_fit) & (sem_fit > 0)]
     if len(valid_sem) == 0:
-        raise RuntimeError("All MSD SEM values are NaN/zero – trajectory too short.")
+        raise RuntimeError("All MSD SEM values are NaN/zero - trajectory too short.")
     fallback_sem = np.median(valid_sem)
     sem_fit = np.where(np.isfinite(sem_fit) & (sem_fit > 0), sem_fit, fallback_sem)
 
@@ -186,7 +193,7 @@ def estimate_viscosity(
 
     if slope <= 0:
         raise RuntimeError(
-            f"Fitted slope is non-positive ({slope:.3e} m²/s). "
+            f"Fitted slope is non-positive ({slope:.3e} m^2/s). "
             "Check for insufficient displacement or over-correction of drift."
         )
 
@@ -214,12 +221,12 @@ def estimate_viscosity(
     if abs(intercept) > intercept_threshold:
         if intercept > 0:
             intercept_warning = (
-                f"Positive intercept ({intercept:.3e} m²) exceeds 2σ. "
+                f"Positive intercept ({intercept:.3e} m^2) exceeds 2 sigma. "
                 "This may indicate localisation noise (add noise floor to model)."
             )
         else:
             intercept_warning = (
-                f"Negative intercept ({intercept:.3e} m²) exceeds 2σ. "
+                f"Negative intercept ({intercept:.3e} m^2) exceeds 2 sigma. "
                 "Possible over-correction of drift."
             )
         warnings.warn(intercept_warning)
@@ -256,7 +263,7 @@ if __name__ == "__main__":
     px_size  = 0.5e-6  # m/px  →  1 px = 0.5 µm
 
     eta_true = KB * T / (6 * np.pi * r_true * D_true)
-    print(f"True η = {eta_true:.4f} Pa·s")
+    print(f"True eta = {eta_true:.4f} Pa.s")
 
     steps  = rng.normal(0, np.sqrt(2 * D_true * dt), (n_pts, 2))
     pos    = np.cumsum(steps, axis=0)          # metres
@@ -268,7 +275,6 @@ if __name__ == "__main__":
         "timestamp_ms": ts_ms.astype(int),
         "x":            pos_px[:, 0],
         "y":            pos_px[:, 1],
-        "radius":       rng.normal(r_true / px_size, 1.0, n_pts),  # px
     })
     df_sim.to_csv(fake_csv, index=False)
     fake_csv.seek(0)
@@ -277,9 +283,9 @@ if __name__ == "__main__":
         fake_csv,
         temperature_K       = T,
         pixel_size_m_per_px = px_size,
+        particle_radius_m   = r_true,
         fit_fraction        = 0.25,
         drift_correction    = True,
-        radius_uncertainty_mode = "sem",
     )
 
     print("\nEstimated results:")
