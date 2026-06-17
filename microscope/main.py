@@ -1,12 +1,12 @@
-"""Entry point: start the camera, the tracking worker, the motor controller and
+"""Entry point: start the camera, the display worker, the motor controller and
 the Flask server.
 
     python main.py
 
 Module layout:
-    camera.py            camera setup, live controls, calibration, recording
+    camera.py            camera setup, live controls, calibration, recording,
+                         and the live JPEG display worker
     controls.py          motor actuation + keyboard listener
-    ML.py                circle detection + tracking worker + SSE
     authentification.py  password, session secret, login/logout
     client.py            Flask app and all HTTP routes
     frontend/            index.html, style.css, app.js, login.html
@@ -18,7 +18,6 @@ from sangaboard import Sangaboard
 
 import camera
 import controls
-import ML
 import client
 
 
@@ -40,8 +39,8 @@ def main():
         print("then start this program again.")
         raise SystemExit(1)
 
-    tracking_thread = threading.Thread(target=ML.tracking_worker, daemon=True)
-    tracking_thread.start()
+    display_thread = threading.Thread(target=camera.display_worker, daemon=True)
+    display_thread.start()
 
     try:
         with Sangaboard() as board:

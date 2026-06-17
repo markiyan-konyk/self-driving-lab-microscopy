@@ -2,8 +2,8 @@
 
 Creates the ``app``, wires in the auth blueprint, and exposes the HTTP API the
 frontend talks to. Each route delegates to the relevant module
-(``camera`` / ``controls`` / ``ML``) and reads/writes shared state through the
-module namespace so cross-module updates stay visible.
+(``camera`` / ``controls``) and reads/writes shared state through the module
+namespace so cross-module updates stay visible.
 """
 
 import os
@@ -14,11 +14,9 @@ from flask import Flask, Response, jsonify, render_template_string, request
 
 import camera
 import controls
-import ML
 import authentification as auth
 
 # ========== Server config ==========
-# FIX #4: 변수명 명확화 (server → SERVER_PORT)
 SERVER_PORT = int(os.environ.get("MICROSCOPE_PORT", 8000))
 
 _FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
@@ -47,8 +45,9 @@ def render_page():
         document,
         steps=controls.steps,
         record_duration=camera.record_duration,
-        record_framerate=camera.record_framerate,
         cam=camera.cam_controls,
+        min_fps=camera.MIN_FPS,
+        max_fps=camera.MAX_FPS,
     )
 
 
@@ -84,22 +83,11 @@ def adjust(axis, op):
     return body, code
 
 
-# ========== Tracking settings ==========
-@app.route("/set_tracking", methods=["POST"])
+@app.route("/set_step/<axis>/<int:value>")
 @auth.login_required
-def set_tracking():
-    data = request.get_json()
-    ML.tracking_enabled = data.get("enabled", True)
-    return "OK"
-
-
-@app.route("/set_tracking_interval", methods=["POST"])
-@auth.login_required
-def set_tracking_interval():
-    data = request.get_json()
-    ML.tracking_interval_ms = data.get("interval_ms", 100)
-    ML.tracking_interval_sec = ML.tracking_interval_ms / 1000.0
-    return "OK"
+def set_step(axis, value):
+    body, code = controls.set_step(axis, value)
+    return body, code
 
 
 # ========== Recording settings ==========
@@ -110,20 +98,42 @@ def set_recording_setting():
     setting = data.get("setting")
     value = data.get("value")
     if setting == "duration":
-        camera.record_duration = max(1, int(value))
-    elif setting == "framerate":
-        camera.record_framerate = max(1, int(value))
+        # 0 / null means "record until manually stopped" (infinite).
+        camera.record_duration = None if not value else max(1, int(value))
     else:
         return "Invalid setting", 400
     return "OK"
 
 
 # ========== Camera controls ==========
+@app.route("/set_framerate", methods=["POST"])
+@auth.login_required
+def set_framerate():
+    """Single user-facing frame-rate control. The exposure and the analogue
+    gain needed to achieve it (without darkening) are derived server-side."""
+    data = request.get_json()
+    fps = data.get("fps")
+    if fps is None:
+        return "Missing fps", 400
+    camera.apply_framerate(float(fps))
+    return jsonify({
+        "framerate": camera.cam_controls["framerate"],
+        "exposure": camera.cam_controls["exposure"],
+        "analogue_gain": camera.cam_controls["analogue_gain"],
+    })
+
+
 @app.route("/set_camera_controls", methods=["POST"])
 @auth.login_required
 def set_camera_controls():
     data = request.get_json()
+    # A manual analogue-gain change is interpreted as a brightness change so it
+    # survives subsequent frame-rate changes.
+    if "analogue_gain" in data:
+        camera.set_exposure_budget_from_gain(float(data["analogue_gain"]))
     for key in camera.cam_controls:
+        if key in ("framerate", "exposure", "analogue_gain"):
+            continue
         if key in data:
             camera.cam_controls[key] = float(data[key])
     with camera.camera_lock:
@@ -137,7 +147,6 @@ def set_camera_controls():
 def autofocus():
     if controls.sb is None:
         return jsonify({"error": "Sangaboard not connected"}), 503
-    # FIX #3: 원자적 check-and-set
     if not camera._try_acquire_calibration():
         return jsonify({"error": "Calibration already in progress"}), 409
     stage_wrapper = controls.SangaboardWrapper(controls.sb)
@@ -149,7 +158,6 @@ def autofocus():
 @app.route("/white_balance", methods=["POST"])
 @auth.login_required
 def white_balance():
-    # FIX #3: 원자적 check-and-set
     if not camera._try_acquire_calibration():
         return jsonify({"error": "Calibration already in progress"}), 409
     thread = threading.Thread(target=camera.run_white_balance_thread, daemon=True)
@@ -174,23 +182,11 @@ def get_camera_controls():
 
 
 # ========== Streams ==========
-@app.route("/tracking_stream")
-@auth.login_required
-def tracking_stream():
-    headers = {
-        "X-Accel-Buffering": "no",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-    }
-    return Response(ML.event_stream(), mimetype="text/event-stream", headers=headers)
-
-
 @app.route("/video_feed")
 @auth.login_required
 def video_feed():
     def generate():
         while True:
-            # FIX #5: Lock으로 current_jpeg 읽기 보호
             with camera._jpeg_lock:
                 jpeg = camera.current_jpeg
             if jpeg is None:
@@ -202,7 +198,7 @@ def video_feed():
                 b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n" +
                 jpeg + b"\r\n"
             )
-            time.sleep(1 / 15)
+            time.sleep(1 / camera.DISPLAY_FPS)
 
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -211,32 +207,48 @@ def video_feed():
 @app.route("/start_recording", methods=["POST"])
 @auth.login_required
 def start_recording():
-    if camera.record_framerate < 1 or camera.record_duration < 1:
-        return jsonify({"error": "Invalid parameters"}), 400
     if camera.is_recording:
         return jsonify({"error": "Already recording"}), 409
     rec_dir = "recordings"
     os.makedirs(rec_dir, exist_ok=True)
     idx = camera.get_next_recording_index()
-    filename = f"recording_{idx}_{camera.record_framerate}fps_{camera.record_duration}s.mp4"
+    fps = int(round(camera.cam_controls["framerate"]))
+    dur = camera.record_duration
+    dur_tag = f"{int(dur)}s" if dur else "inf"
+    filename = f"recording_{idx}_{fps}fps_{dur_tag}.mp4"
     filepath = os.path.join(rec_dir, filename)
     thread = threading.Thread(
         target=camera.start_recording_async,
-        args=(camera.record_duration, camera.record_framerate, filepath),
+        args=(camera.record_duration, filepath),
         daemon=True,
     )
     thread.start()
-    return jsonify({"filename": filename})
+    return jsonify({"filename": filename, "duration": dur})
 
 
 @app.route("/stop_recording", methods=["POST"])
 @auth.login_required
 def stop_recording():
-    """FIX #9: 녹화 조기 종료 엔드포인트 (신규 추가)."""
     if not camera.is_recording:
         return jsonify({"error": "Not recording"}), 400
     camera._stop_recording_event.set()
     return jsonify({"message": "Recording stopped"})
+
+
+@app.route("/recording_status")
+@auth.login_required
+def recording_status():
+    """Lets a freshly-loaded client (e.g. a phone joining mid-recording)
+    discover that a recording is in progress and how much time is left."""
+    remaining = None
+    if camera.is_recording and camera.recording_started_at and camera.recording_duration:
+        elapsed = time.time() - camera.recording_started_at
+        remaining = max(0, int(camera.recording_duration - elapsed))
+    return jsonify({
+        "recording": camera.is_recording,
+        "duration": camera.recording_duration,
+        "remaining": remaining,
+    })
 
 
 # ========== Server ==========

@@ -1,72 +1,81 @@
 """Camera setup, live camera controls, calibration, and video recording.
 
-Owns all camera-related state and the recording pipeline. Two streams are
-configured on the Picamera2:
+Owns all camera-related state and the recording pipeline. A single colour
+stream is configured on the Picamera2:
 
-  * ``main``  640x480 YUV420  -> full-resolution stream used for H264 recording
-  * ``lores`` 320x240 YUV420  -> lightweight stream consumed by the ML worker
-                                 (``ML.tracking_worker``) for circle detection
+  * ``main``  640x480 YUV420  -> used both for H264 recording and, after a
+                                 cheap YUV->BGR conversion, for the JPEG live
+                                 view produced by ``display_worker``.
 
-The frame-rate constants (STREAM_FPS / DETECTION_FPS / FRAME_SKIP) live here
-because they configure the camera; ``ML`` imports them from this module.
+Frame rate is driven by a single user-facing target (``framerate``). The
+exposure needed to satisfy that frame rate is computed automatically
+(``apply_framerate``): the longer a frame lasts the more light it can gather,
+so higher frame rates force shorter exposures, and the analogue gain is scaled
+to keep the overall brightness ("exposure budget") roughly constant.
 
-Calibration (autofocus / white balance) also lives here: the worker threads
-take exclusive camera ownership via ``camera_use_lock`` and the
-``calibration_running`` flag that ``ML.tracking_worker`` checks.
+Calibration (autofocus / white balance) takes exclusive camera ownership via
+``camera_use_lock`` and the ``calibration_running`` flag that the
+``display_worker`` checks.
 """
 
 import os
 import re
 import time
-import csv
 import threading
 
+import cv2
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 from picamera2.outputs import FfmpegOutput
+from simplejpeg import encode_jpeg
 
-from autofocus import fast_autofocus, looping_autofocus
+from autofocus import looping_autofocus
 from white_balance import run_white_balance
 
-# ========== Frame rate / detection cadence ==========
+# ========== Frame rate ==========
+# Default live/record frame rate. The slider in the UI drives this value via
+# apply_framerate(); STREAM_FPS is just the initial value.
 STREAM_FPS = 30
-DETECTION_FPS = 10
-FRAME_SKIP = STREAM_FPS // DETECTION_FPS
+MIN_FPS = 1
+MAX_FPS = 120
+
+# Live JPEG display cadence (independent of capture/record rate).
+DISPLAY_FPS = 15
 
 # ========== Recording settings ==========
-record_duration = 10
-record_framerate = 100
+# Duration in seconds. ``None`` (or 0) means "record until manually stopped".
+record_duration = 600  # 10 minutes default
 
 # ========== Camera state ==========
 picam2 = None
 camera_running = False
 
-# FIX #2 (데드락): camera_lock을 RLock으로 교체
-# → start_camera()가 camera_lock을 잡은 상태에서 자기 자신을 다시 호출해도 안전
+# RLock so a thread already holding the lock (e.g. white balance) can call
+# start_camera() -> _start_camera_unlocked() without deadlocking.
 camera_lock = threading.RLock()
 
-# FIX #3 (레이스 컨디션): calibration_running bool → threading.Lock()으로 교체
-# → check-and-set을 원자적으로 처리
+# Atomic check-and-set for the calibration flag.
 _calibration_lock = threading.Lock()
-calibration_running = False  # 읽기 전용 플래그 (UI/worker에서 읽기만 함)
+calibration_running = False  # read-only flag for the UI / display worker
 
-# camera_use_lock: tracking_worker ↔ calibration 스레드 간 카메라 독점 제어
+# Exclusive camera ownership between display_worker and calibration threads.
 camera_use_lock = threading.Lock()
 
-# Latest JPEG-encoded display frame (produced by ML.tracking_worker,
+# Latest JPEG-encoded display frame (produced by display_worker,
 # consumed by the /video_feed route).
-# FIX #5: current_jpeg를 Lock으로 보호 (video_feed와 tracking_worker 간 torn-read 방지)
 current_jpeg = None
 _jpeg_lock = threading.Lock()
 
 # ========== Camera controls ==========
-# NOTE: green_gain은 picamera2 API에 직접 없으므로 소프트웨어 처리(tracking_worker)에서만 적용됨.
-#       나머지 항목들은 apply_camera_controls()에서 하드웨어에 직접 적용됨.
+# ``framerate`` drives exposure automatically (see apply_framerate). The
+# ``exposure`` value below is the *budget* upper bound: the brightest single
+# frame we aim for when the frame period allows it.
 cam_controls = {
-    "red_gain": 1.5,
-    "green_gain": 1.0,   # 소프트웨어 처리 전용 (picamera2 ColourGains에는 R, B만 있음)
-    "blue_gain": 2.7,
-    "exposure": 10000,
+    "red_gain": 2.4,
+    "green_gain": 1.0,   # software-only (picamera2 ColourGains has R, B only)
+    "blue_gain": 2.5,
+    "framerate": STREAM_FPS,
+    "exposure": 20000,    # computed/clamped by apply_framerate()
     "analogue_gain": 1.0,
     "colour_gain": 1.0,
     "contrast": 1.0,
@@ -75,17 +84,23 @@ cam_controls = {
     "sharpness": 1.0,
 }
 
+# The brightness target ("exposure budget") in units of exposure_us * gain.
+# When the frame rate forces the exposure down, the analogue gain is raised to
+# keep this product constant so the image does not get darker. Seeded from the
+# defaults above.
+exposure_budget = cam_controls["exposure"] * cam_controls["analogue_gain"]
+
 # ========== Recording state ==========
 is_recording = False
-recording_coordinates = []
 current_recording_filename = None
+recording_started_at = None
+recording_duration = None  # seconds, or None for open-ended
 
-# FIX #9: 녹화 취소를 위한 Event 추가
 _stop_recording_event = threading.Event()
 
 
 def apply_camera_controls():
-    """picamera2에 하드웨어 카메라 파라미터를 적용. camera_lock 없이도 호출 가능."""
+    """Apply hardware camera parameters to picamera2."""
     if picam2 is None:
         return
     cg = cam_controls["colour_gain"]
@@ -102,13 +117,62 @@ def apply_camera_controls():
     })
 
 
+def apply_framerate(fps):
+    """Set the capture frame rate and derive the exposure/gain that makes it
+    achievable while keeping the image brightness constant.
+
+    Physics: a frame lasts ``1/fps`` seconds, so the exposure can be at most
+    that long (we keep a safety margin). When a higher frame rate forces the
+    exposure below the brightness budget, the analogue gain is scaled up by the
+    same factor so the picture does not get darker - this is what fixes the
+    "goes dark above 30 fps" problem: the program now compensates automatically.
+    """
+    global exposure_budget
+    fps = max(MIN_FPS, min(MAX_FPS, float(fps)))
+    cam_controls["framerate"] = fps
+
+    # Longest exposure that fits inside one frame, with a margin for readout.
+    frame_period_us = 1_000_000.0 / fps
+    max_exposure_us = int(frame_period_us * 0.92)
+
+    # Use the budget's worth of light, but never longer than the frame allows.
+    exposure_us = min(exposure_budget, max_exposure_us)
+    exposure_us = max(100, int(exposure_us))
+
+    # Whatever brightness the exposure could not provide, recover with gain.
+    analogue_gain = exposure_budget / exposure_us
+    analogue_gain = max(1.0, min(16.0, analogue_gain))
+
+    cam_controls["exposure"] = exposure_us
+    cam_controls["analogue_gain"] = round(analogue_gain, 3)
+
+    with camera_lock:
+        if picam2 is not None:
+            picam2.set_controls({
+                "FrameRate": fps,
+                "ExposureTime": exposure_us,
+                "AnalogueGain": cam_controls["analogue_gain"],
+            })
+
+
+def set_exposure_budget_from_gain(analogue_gain):
+    """Treat a manual analogue-gain change as a brightness (budget) change.
+
+    The exposure itself is locked to the frame rate, so the only free knob the
+    user has for brightness is the analogue gain. When they move it we fold the
+    new brightness into the budget and re-derive the operating point so the
+    relationship survives the next frame-rate change.
+    """
+    global exposure_budget
+    analogue_gain = max(1.0, min(16.0, float(analogue_gain)))
+    exposure_budget = cam_controls["exposure"] * analogue_gain
+    apply_framerate(cam_controls["framerate"])
+
+
 # ========== Camera startup ==========
 def _start_camera_unlocked():
-    """
-    카메라를 (재)시작하는 내부 함수.
-    반드시 camera_lock을 잡은 상태에서 호출해야 함.
-    camera_lock이 RLock이므로 같은 스레드에서 중첩 호출해도 안전.
-    """
+    """(Re)start the camera. Must be called while holding camera_lock (RLock,
+    so nested calls from the same thread are safe)."""
     global picam2, camera_running
     if picam2 is not None:
         try:
@@ -127,29 +191,77 @@ def _start_camera_unlocked():
     config = picam2.create_video_configuration(
         sensor={"output_size": full_fov_mode["size"], "bit_depth": full_fov_mode["bit_depth"]},
         main={"size": (640, 480), "format": "YUV420"},
-        lores={"size": (320, 240), "format": "YUV420"},
-        controls={"FrameRate": STREAM_FPS},
+        controls={"FrameRate": cam_controls["framerate"]},
     )
     picam2.configure(config)
     picam2.start()
     camera_running = True
     time.sleep(0.5)
+    apply_framerate(cam_controls["framerate"])
     apply_camera_controls()
-    print(f"Camera started: {STREAM_FPS} fps, detection {DETECTION_FPS} fps (skip {FRAME_SKIP})")
+    print(f"Camera started: {cam_controls['framerate']} fps, "
+          f"exposure {cam_controls['exposure']}us, gain {cam_controls['analogue_gain']}")
 
 
 def start_camera():
-    """공개 인터페이스: camera_lock을 획득 후 카메라 시작."""
+    """Public interface: acquire camera_lock then start the camera."""
     with camera_lock:
         _start_camera_unlocked()
 
 
+# ========== Live display worker ==========
+def _yuv_to_bgr(frame_yuv):
+    return cv2.cvtColor(frame_yuv, cv2.COLOR_YUV2BGR_I420)
+
+
+def display_worker():
+    """Continuously capture the main stream, convert to BGR, apply the
+    software green gain, and publish a JPEG for the /video_feed route."""
+    global current_jpeg
+    frame_interval = 1.0 / DISPLAY_FPS
+    next_frame_time = time.perf_counter()
+
+    while True:
+        now = time.perf_counter()
+        if now < next_frame_time:
+            time.sleep(next_frame_time - now)
+        next_frame_time = time.perf_counter() + frame_interval
+
+        if not camera_running or picam2 is None:
+            time.sleep(0.05)
+            continue
+        if calibration_running:
+            time.sleep(0.05)
+            continue
+
+        try:
+            with camera_use_lock:
+                if calibration_running:
+                    continue
+                with camera_lock:
+                    frame_yuv = picam2.capture_array("main")
+            if frame_yuv is None:
+                continue
+
+            frame = _yuv_to_bgr(frame_yuv)
+
+            gg = cam_controls.get("green_gain", 1.0)
+            if abs(gg - 1.0) > 0.005:
+                green = frame[:, :, 1].astype("float32")
+                green *= gg
+                frame[:, :, 1] = green.clip(0, 255).astype("uint8")
+
+            jpeg = encode_jpeg(frame, quality=70, colorspace="BGR")
+            with _jpeg_lock:
+                current_jpeg = jpeg
+        except Exception as e:
+            print(f"Display worker error: {e}")
+            time.sleep(0.1)
+
+
 # ========== Calibration helpers ==========
 def _try_acquire_calibration() -> bool:
-    """
-    FIX #3: calibration_running의 check-and-set을 원자적으로 처리.
-    성공하면 True(획득), 이미 실행 중이면 False 반환.
-    """
+    """Atomic check-and-set of calibration_running. Returns True on acquire."""
     global calibration_running
     with _calibration_lock:
         if calibration_running:
@@ -183,57 +295,33 @@ def run_autofocus_thread(stage_wrapper):
 
 
 def run_white_balance_thread():
-    """
-    FIX #1 (데드락) + FIX #2 (카메라 중단 후 접근) 수정 버전.
+    """Calibrate the red/blue colour gains using the camera's own (hardware)
+    auto-white-balance algorithm, then lock the result in.
 
-    변경 전 문제:
-      - run_white_balance_thread()가 camera_lock을 잡은 채 start_camera()를 호출했는데,
-        start_camera() 내부에서도 camera_lock을 획득하려 해서 데드락 발생.
-      - camera_lock 밖에서 멈춘 picam2에 접근.
-
-    변경 후:
-      - camera_lock을 RLock으로 교체해 재진입 허용.
-      - 카메라 중단/재시작을 모두 camera_lock 안에서 처리.
-      - run_white_balance()는 camera_lock을 잡은 상태에서 호출 (다른 스레드 차단).
+    The camera stays running throughout: we briefly enable AWB, let it
+    converge on the current scene, read back the colour gains it chose, then
+    disable AWB and keep those gains fixed. This is far more robust than the
+    old hand-rolled grey-world loop, which could converge to a wrong (blue)
+    result and "revert" after appearing correct mid-iteration.
     """
-    global camera_running
     try:
         with camera_use_lock:
-            # camera_lock을 잡은 채로 전체 white balance 흐름 처리
-            # (RLock이므로 내부에서 start_camera() → _start_camera_unlocked() 호출 가능)
             with camera_lock:
-                # 1. 스트리밍 중단
-                if picam2 is not None:
-                    try:
-                        picam2.stop()
-                    except Exception:
-                        pass
-                    camera_running = False
-
-                # 2. White balance 보정 (picam2 객체에 직접 접근; 멈춘 상태에서 raw 캡처)
-                # 현재 라이브 뷰와 같은 노출로 보정하도록 exposure/analogue_gain 전달
-                red_gain, blue_gain = run_white_balance(
-                    picam2,
-                    target_white_level=876,
-                    exposure=int(cam_controls["exposure"]),
-                    analogue_gain=cam_controls["analogue_gain"],
-                )
-
-                # 3. 보정된 gain을 전역 cam_controls에 반영
+                gains = run_white_balance(picam2)
+            if gains is not None:
+                red_gain, blue_gain = gains
                 cam_controls["red_gain"] = red_gain
                 cam_controls["blue_gain"] = blue_gain
-
-                # 4. 카메라 재시작 (RLock이므로 같은 스레드가 재진입 가능)
-                _start_camera_unlocked()
-
+                # The calibrated gains are absolute, so the colour multiplier
+                # must be neutral for them to be applied as measured.
+                cam_controls["colour_gain"] = 1.0
+                with camera_lock:
+                    apply_camera_controls()
+                print(f"White balance: red_gain={red_gain}, blue_gain={blue_gain}")
+            else:
+                print("White balance: camera did not report colour gains")
     except Exception as e:
         print(f"White balance error: {e}")
-        # 카메라가 중단된 채로 에러가 났을 경우 복구 시도
-        if not camera_running:
-            try:
-                start_camera()
-            except Exception as recover_exc:
-                print(f"Camera recovery failed: {recover_exc}")
     finally:
         _release_calibration()
 
@@ -248,52 +336,46 @@ def get_next_recording_index():
     ]
     numbers = []
     for f in existing:
-        # FIX #8: 취약한 split() 파싱 → 정규식으로 교체
         m = re.match(r"recording_(\d+)_", f)
         if m:
             numbers.append(int(m.group(1)))
     return (max(numbers) + 1) if numbers else 1
 
 
-def start_recording_async(duration_sec, framerate_fps, output_path):
-    """
-    FIX #9: time.sleep() 블로킹 대신 threading.Event.wait()로 교체
-    → 녹화 도중 취소(stop_recording 엔드포인트)가 가능해짐.
-    """
-    global is_recording, recording_coordinates, current_recording_filename
+def start_recording_async(duration_sec, output_path):
+    """Record the main stream to ``output_path`` for ``duration_sec`` seconds.
 
-    recording_coordinates = []
+    ``duration_sec`` of ``None`` (or 0) records until ``_stop_recording_event``
+    is set by the /stop_recording route. The capture frame rate and exposure
+    are whatever the live settings already are (driven by the FPS slider), so
+    no per-recording frame-rate juggling is needed.
+    """
+    global is_recording, current_recording_filename
+    global recording_started_at, recording_duration
+
     current_recording_filename = os.path.splitext(os.path.basename(output_path))[0]
     is_recording = True
+    recording_started_at = time.time()
+    recording_duration = duration_sec if duration_sec else None
     _stop_recording_event.clear()
-
-    max_exposure = int(1_000_000 / framerate_fps)
-    rec_exposure = min(int(cam_controls["exposure"]), max_exposure)
 
     with camera_lock:
         if picam2 is None:
             _start_camera_unlocked()
-        picam2.set_controls({"FrameRate": framerate_fps, "ExposureTime": rec_exposure})
         encoder = H264Encoder(bitrate=10_000_000)
         output = FfmpegOutput(output_path)
         picam2.start_encoder(encoder, output)
 
-    # 취소 가능한 대기
-    _stop_recording_event.wait(timeout=duration_sec)
+    # Cancellable wait. timeout=None blocks until the stop event is set.
+    _stop_recording_event.wait(timeout=duration_sec if duration_sec else None)
 
     with camera_lock:
-        picam2.stop_encoder()
-        picam2.set_controls({"FrameRate": STREAM_FPS})
-        apply_camera_controls()
+        try:
+            picam2.stop_encoder()
+        except Exception as e:
+            print(f"stop_encoder error: {e}")
 
     is_recording = False
-
-    if recording_coordinates:
-        csv_dir = "coordinates"
-        os.makedirs(csv_dir, exist_ok=True)
-        csv_path = os.path.join(csv_dir, f"{current_recording_filename}.csv")
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["timestamp_ms", "x", "y", "radius"])
-            writer.writerows(recording_coordinates)
-        print(f"CSV saved: {csv_path}")
+    recording_started_at = None
+    recording_duration = None
+    print(f"Recording saved: {output_path}")

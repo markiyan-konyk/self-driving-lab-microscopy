@@ -1,101 +1,48 @@
 """Automatic white-balance calibration.
 
 Used by ``camera.run_white_balance_thread``, which calls this with the camera
-*stopped* (but still configured). The routine restarts the camera, then
-iteratively adjusts the red/blue colour gains until the red and blue channel
-means match the green channel (grey-world balance over the near-white
-pixels), stops the camera again and returns the final ``(red_gain,
-blue_gain)`` for the caller to store in ``cam_controls``.
+*running*. Instead of a hand-rolled grey-world loop (which could converge to a
+wrong, bluish result and visibly "revert" after briefly looking correct), we
+borrow the Raspberry Pi ISP's own, properly tuned auto-white-balance:
 
-``target_white_level`` is the expected white level of the illuminated
-background expressed as a 10-bit value (876/1023 ~ 219/255); it selects which
-pixels count as "white" for the balance and excludes clipped ones.
+  1. enable ``AwbEnable`` so the hardware AWB algorithm runs,
+  2. let it converge on the current scene over a number of frames,
+  3. read the colour gains it settled on from the frame metadata,
+  4. disable ``AwbEnable`` again and hand those gains back to the caller, who
+     stores them in ``cam_controls`` and re-applies them as fixed gains.
 
-Pass ``exposure`` (µs) and ``analogue_gain`` so the calibration runs at the
-same brightness as the live view: after the stop/start cycle the previous
-exposure controls are not guaranteed to persist, and with auto-exposure
-disabled an unset exposure gives arbitrary brightness and bad gains.
+The caller keeps the camera running before and after; this routine only
+toggles the AWB control and reads metadata.
 """
 
 import time
 
-import cv2
-import numpy as np
 
-
-def _to_bgr(frame):
-    """Best-effort conversion of a capture_array() result to BGR."""
-    if frame is None:
-        raise RuntimeError("Camera returned no frame")
-    if frame.ndim == 2:  # YUV420 planar: shape (height * 3/2, width)
-        return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
-    if frame.ndim == 3 and frame.shape[2] == 4:  # XBGR8888 / XRGB8888
-        return frame[:, :, :3]
-    return frame
-
-
-def _capture_fresh(camera, flush=2):
-    """Capture a frame exposed after the latest set_controls(), discarding
-    the in-flight frames that still carry the previous gains."""
-    for _ in range(flush):
-        camera.capture_array("main")
-    return camera.capture_array("main")
-
-
-def _channel_means(bgr, target8):
-    """Mean R, G, B over the calibration pixels.
-
-    Uses pixels whose green level is in the near-white band (above half the
-    target, below clipping) so the illuminated background drives the balance;
-    falls back to the whole frame if fewer than 1% of pixels qualify.
+def run_white_balance(picam2, settle_frames=40, settle_timeout=8.0):
+    """Run the hardware AWB briefly and return the ``(red_gain, blue_gain)``
+    it converged on, or ``None`` if the camera did not report colour gains.
     """
-    green = bgr[:, :, 1]
-    band = (green > target8 * 0.5) & (green < 250)
-    if np.count_nonzero(band) < band.size // 100:
-        band = np.ones_like(green, dtype=bool)
-    sel = bgr[band].astype(np.float64)
-    b_mean, g_mean, r_mean = sel.mean(axis=0)
-    return r_mean, g_mean, b_mean
+    # Hand control to the ISP's auto white balance with auto exposure left off
+    # (we keep the operator-chosen exposure so brightness does not jump).
+    picam2.set_controls({"AwbEnable": True, "AwbMode": 0})
 
-
-def run_white_balance(picam2, target_white_level=876, exposure=None,
-                      analogue_gain=None, max_iterations=8, tolerance=0.02,
-                      settle_time=0.3):
-    """Calibrate red/blue gains on a (stopped) Picamera2. Returns (red, blue)."""
-    target8 = target_white_level / 1023.0 * 255.0
-    red_gain, blue_gain = 1.0, 1.0
-
-    picam2.start()
     try:
-        for i in range(max_iterations):
-            controls = {
-                "AwbEnable": False,
-                "AeEnable": False,
-                "ColourGains": (red_gain, blue_gain),
-            }
-            if exposure is not None:
-                controls["ExposureTime"] = int(exposure)
-            if analogue_gain is not None:
-                controls["AnalogueGain"] = float(analogue_gain)
-            picam2.set_controls(controls)
-            time.sleep(settle_time)
-
-            bgr = _to_bgr(_capture_fresh(picam2))
-            r_mean, g_mean, b_mean = _channel_means(bgr, target8)
-            if r_mean <= 0 or g_mean <= 0 or b_mean <= 0:
-                raise RuntimeError("White balance: frame too dark to calibrate")
-
-            r_err = g_mean / r_mean
-            b_err = g_mean / b_mean
-            print(f"[white_balance] iter {i}: R={r_mean:.1f} G={g_mean:.1f} "
-                  f"B={b_mean:.1f} gains=({red_gain:.2f}, {blue_gain:.2f})")
-            if abs(r_err - 1.0) < tolerance and abs(b_err - 1.0) < tolerance:
+        gains = None
+        deadline = time.time() + settle_timeout
+        # Let the AWB algorithm settle, tracking the most recent gains it picks.
+        for _ in range(settle_frames):
+            if time.time() > deadline:
                 break
-
-            # ColourGains valid range on the Pi ISP; also matches the UI sliders.
-            red_gain = float(np.clip(red_gain * r_err, 0.1, 8.0))
-            blue_gain = float(np.clip(blue_gain * b_err, 0.1, 8.0))
+            md = picam2.capture_metadata()
+            g = md.get("ColourGains")
+            if g is not None:
+                gains = g
     finally:
-        picam2.stop()  # leave the camera as we found it; caller restarts it
+        # Always re-freeze AWB so the gains we return actually stick.
+        picam2.set_controls({"AwbEnable": False})
 
+    if gains is None:
+        return None
+    red_gain, blue_gain = float(gains[0]), float(gains[1])
+    print(f"[white_balance] AWB settled on R={red_gain:.2f} B={blue_gain:.2f}")
     return round(red_gain, 2), round(blue_gain, 2)

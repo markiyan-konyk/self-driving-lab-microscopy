@@ -33,8 +33,8 @@ def build_dir_map():
     (e.g. up/down reversed -> swap the signs on the two X entries).
     """
     return {
-        "up":        [-steps["x"],  0,           0],
-        "down":      [ steps["x"],  0,           0],
+        "up":        [ steps["x"],  0,           0],
+        "down":      [-steps["x"],  0,           0],
         "left":      [ 0,          -steps["y"],  0],
         "right":     [ 0,           steps["y"],  0],
         "page_up":   [ 0,           0,           steps["z"]],
@@ -106,6 +106,17 @@ def adjust_step(axis, op):
         steps[axis] = max(1, steps[axis] - 5)
     else:
         return "Unknown op", 400
+    return str(steps[axis]), 200
+
+
+def set_step(axis, value):
+    """Set the step size for an axis directly (from the editable box)."""
+    if axis not in steps:
+        return "Unknown axis", 404
+    try:
+        steps[axis] = max(1, int(value))
+    except (TypeError, ValueError):
+        return "Invalid value", 400
     return str(steps[axis]), 200
 
 
