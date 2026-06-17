@@ -3,6 +3,7 @@
         const statusEl = $('status');
         const mobileStatus = $('mobileStatus');
         const msg = t => { messageDiv.textContent = t; };
+        const NATIVE_W = 640, NATIVE_H = 480;
 
         async function request(path, options = {}) {
             const response = await fetch(path, { cache: 'no-store', ...options });
@@ -10,56 +11,38 @@
             return response;
         }
         const postJSON = (path, body) => request(path, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
         });
 
+        // ===== Splash =====
+        window.addEventListener('load', () => setTimeout(() => $('splash').classList.add('hidden'), 1500));
+
         // ============================================================
-        //  Movement (continuous press-and-hold, pointer + keyboard)
+        //  Movement (continuous press-and-hold)
         // ============================================================
         const HOLD_MS = 110;
-        const pHeld = new Set();   // directions held by pointer
-        const kHeld = new Set();   // directions held by keyboard
-        let holdTimer = null;
-        let moveInFlight = false;
-
-        function unionHas(dir) { return pHeld.has(dir) || kHeld.has(dir); }
+        const pHeld = new Set(), kHeld = new Set();
+        let holdTimer = null, moveInFlight = false;
+        const unionHas = dir => pHeld.has(dir) || kHeld.has(dir);
 
         async function sendMove(dir) {
-            if (moveInFlight) return;       // don't let slow requests pile up
+            if (moveInFlight) return;
             moveInFlight = true;
             try { await request('/move/' + dir); msg(''); }
             catch (e) { msg(e.message); }
             finally { moveInFlight = false; }
         }
-
-        function tick() {
-            // Serialize: fire the first active direction each tick.
-            const dir = [...pHeld, ...kHeld][0];
-            if (dir) sendMove(dir);
-        }
+        function tick() { const dir = [...pHeld, ...kHeld][0]; if (dir) sendMove(dir); }
         function refreshTimer() {
             const any = pHeld.size + kHeld.size > 0;
             if (any && !holdTimer) holdTimer = setInterval(tick, HOLD_MS);
             if (!any && holdTimer) { clearInterval(holdTimer); holdTimer = null; }
         }
         function setDirActive(dir, on) {
-            document.querySelectorAll('[data-move="' + dir + '"]')
-                .forEach(b => b.classList.toggle('active', on));
+            document.querySelectorAll('[data-move="' + dir + '"]').forEach(b => b.classList.toggle('active', on));
         }
-        function holdStart(set, dir) {
-            if (set.has(dir)) return;
-            set.add(dir);
-            setDirActive(dir, true);
-            sendMove(dir);          // immediate response to the first press
-            refreshTimer();
-        }
-        function holdStop(set, dir) {
-            if (!set.has(dir)) return;
-            set.delete(dir);
-            if (!unionHas(dir)) setDirActive(dir, false);
-            refreshTimer();
-        }
+        function holdStart(set, dir) { if (set.has(dir)) return; set.add(dir); setDirActive(dir, true); sendMove(dir); refreshTimer(); }
+        function holdStop(set, dir) { if (!set.has(dir)) return; set.delete(dir); if (!unionHas(dir)) setDirActive(dir, false); refreshTimer(); }
 
         document.querySelectorAll('[data-move]').forEach(btn => {
             const dir = btn.dataset.move;
@@ -72,64 +55,49 @@
             btn.addEventListener('pointerup', stop);
             btn.addEventListener('pointercancel', stop);
         });
-        // Safety net: any pointer release clears pointer-held directions.
         window.addEventListener('pointerup', () => { [...pHeld].forEach(d => holdStop(pHeld, d)); });
 
         const keyMap = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', PageUp: 'page_up', PageDown: 'page_down' };
         document.addEventListener('keydown', e => {
-            if (e.target.tagName === 'INPUT') return;     // don't hijack typing
+            if (e.key === 'Escape') { $('calibModal').classList.remove('show'); closePreview(); cancelTool(); return; }
+            if (e.target.tagName === 'INPUT') return;
             const dir = keyMap[e.key];
             if (!dir) return;
             e.preventDefault();
-            if (e.repeat) return;                          // we drive our own repeat
+            if (e.repeat) return;
             holdStart(kHeld, dir);
         });
-        document.addEventListener('keyup', e => {
-            const dir = keyMap[e.key];
-            if (dir) holdStop(kHeld, dir);
-        });
+        document.addEventListener('keyup', e => { const dir = keyMap[e.key]; if (dir) holdStop(kHeld, dir); });
 
         // ============================================================
         //  Step size
         // ============================================================
         document.querySelectorAll('.step-arrow').forEach(btn => {
             btn.addEventListener('click', async () => {
-                const axis = btn.dataset.step;
-                const op = btn.dataset.dir; // inc | dec
                 try {
-                    const r = await request('/adjust/' + axis + '/' + op);
-                    $(axis + '_value').value = await r.text();
+                    const r = await request('/adjust/' + btn.dataset.step + '/' + btn.dataset.dir);
+                    $(btn.dataset.step + '_value').value = await r.text();
                 } catch (e) { msg(e.message); }
             });
         });
         document.querySelectorAll('.step-box').forEach(box => {
             box.addEventListener('change', async () => {
-                const axis = box.dataset.axis;
                 let v = Math.max(1, parseInt(box.value || '1', 10));
                 box.value = v;
-                try {
-                    const r = await request('/set_step/' + axis + '/' + v);
-                    box.value = await r.text();
-                } catch (e) { msg(e.message); }
+                try { const r = await request('/set_step/' + box.dataset.axis + '/' + v); box.value = await r.text(); }
+                catch (e) { msg(e.message); }
             });
         });
 
         // ============================================================
         //  Recording length (h / m / s + infinite)
         // ============================================================
-        const durH = $('durH'), durM = $('durM'), durS = $('durS');
-        const infiniteBtn = $('infiniteBtn');
+        const durH = $('durH'), durM = $('durM'), durS = $('durS'), infiniteBtn = $('infiniteBtn');
         let infinite = false;
-
-        function totalSeconds() {
-            const h = parseInt(durH.value || 0, 10);
-            const m = parseInt(durM.value || 0, 10);
-            const s = parseInt(durS.value || 0, 10);
-            return Math.max(0, h * 3600 + m * 60 + s);
-        }
+        const totalSeconds = () => Math.max(0,
+            (parseInt(durH.value || 0, 10)) * 3600 + (parseInt(durM.value || 0, 10)) * 60 + (parseInt(durS.value || 0, 10)));
         async function pushDuration() {
-            const value = infinite ? 0 : totalSeconds();
-            try { await postJSON('/set_recording_setting', { setting: 'duration', value }); }
+            try { await postJSON('/set_recording_setting', { setting: 'duration', value: infinite ? 0 : totalSeconds() }); }
             catch (e) { msg(e.message); }
         }
         [durH, durM, durS].forEach(b => b.addEventListener('change', () => {
@@ -140,18 +108,15 @@
         infiniteBtn.addEventListener('click', () => {
             infinite = !infinite;
             infiniteBtn.classList.toggle('active', infinite);
-            [durH, durM, durS].forEach(x => { x.disabled = infinite; });
+            [durH, durM, durS].forEach(x => x.disabled = infinite);
             pushDuration();
         });
 
         // ============================================================
         //  Recording control + timer
         // ============================================================
-        const recordBtn = $('recordBtn');
-        const mobileRecordBtn = $('mobileRecordBtn');
-        let isRecording = false;
-        let recRemaining = null;     // seconds left (null = open-ended)
-        let recStartObserved = 0;
+        const recordBtn = $('recordBtn'), mobileRecordBtn = $('mobileRecordBtn');
+        let isRecording = false, recRemaining = null, recStartObserved = 0;
 
         function fmtTime(total) {
             total = Math.max(0, Math.floor(total));
@@ -161,13 +126,7 @@
         }
         function renderTimer() {
             let text = '';
-            if (isRecording) {
-                if (recRemaining == null) {
-                    text = '∞ ' + fmtTime((Date.now() - recStartObserved) / 1000);
-                } else {
-                    text = fmtTime(recRemaining);
-                }
-            }
+            if (isRecording) text = (recRemaining == null) ? '∞ ' + fmtTime((Date.now() - recStartObserved) / 1000) : fmtTime(recRemaining);
             $('recTimer').textContent = text;
             $('mobileRecTimer').textContent = text;
         }
@@ -177,28 +136,16 @@
             if (mobileRecordBtn) mobileRecordBtn.querySelector('.rec-label').textContent = isRecording ? 'Stop' : 'Record';
             renderTimer();
         }
-        function enterRecordingUI(remaining) {
-            isRecording = true;
-            recRemaining = (remaining === undefined ? null : remaining);
-            recStartObserved = Date.now();
-            renderRecordState();
-        }
-        function exitRecordingUI(text) {
-            isRecording = false;
-            recRemaining = null;
-            renderRecordState();
-            if (text) msg(text);
-        }
+        function enterRecordingUI(remaining) { isRecording = true; recRemaining = (remaining === undefined ? null : remaining); recStartObserved = Date.now(); renderRecordState(); }
+        function exitRecordingUI(text) { isRecording = false; recRemaining = null; renderRecordState(); if (text) msg(text); loadRecordings(); }
         async function toggleRecording() {
             if (isRecording) {
-                try { await request('/stop_recording', { method: 'POST' }); }
-                catch (e) { msg('Stop failed: ' + e.message); }
+                try { await request('/stop_recording', { method: 'POST' }); } catch (e) { msg('Stop failed: ' + e.message); }
                 exitRecordingUI('Recording stopped & saved.');
                 return;
             }
             try {
-                const r = await postJSON('/start_recording', {});
-                const d = await r.json();
+                const d = await (await postJSON('/start_recording', {})).json();
                 enterRecordingUI(d.duration === undefined ? null : d.duration);
                 msg('Recording ' + d.filename);
             } catch (e) { msg('Recording failed: ' + e.message); }
@@ -206,39 +153,25 @@
         recordBtn.addEventListener('click', toggleRecording);
         if (mobileRecordBtn) mobileRecordBtn.addEventListener('click', toggleRecording);
 
-        // Local 1s countdown for smoothness; server poll corrects/detects end.
-        setInterval(() => {
-            if (!isRecording) return;
-            if (recRemaining != null) recRemaining = Math.max(0, recRemaining - 1);
-            renderTimer();
-        }, 1000);
-
+        setInterval(() => { if (!isRecording) return; if (recRemaining != null) recRemaining = Math.max(0, recRemaining - 1); renderTimer(); }, 1000);
         async function pollRecording() {
             try {
-                const r = await request('/recording_status');
-                const d = await r.json();
-                if (d.recording && !isRecording) {
-                    enterRecordingUI(d.remaining == null ? null : d.remaining);
-                } else if (d.recording && isRecording) {
-                    if (d.remaining != null) recRemaining = d.remaining;
-                } else if (!d.recording && isRecording) {
-                    exitRecordingUI('Recording saved.');
-                }
-            } catch (e) { /* transient */ }
+                const d = await (await request('/recording_status')).json();
+                if (d.recording && !isRecording) enterRecordingUI(d.remaining == null ? null : d.remaining);
+                else if (d.recording && isRecording) { if (d.remaining != null) recRemaining = d.remaining; }
+                else if (!d.recording && isRecording) exitRecordingUI('Recording saved.');
+            } catch (e) {}
         }
-        setInterval(pollRecording, 2000);
-        pollRecording();
+        setInterval(pollRecording, 2000); pollRecording();
 
         // ============================================================
-        //  Camera controls (rows: slider <-> editable number + arrows)
+        //  Camera controls
         // ============================================================
         const camMap = {
             redGain: 'red_gain', greenGain: 'green_gain', blueGain: 'blue_gain',
             colourGain: 'colour_gain', analogueGain: 'analogue_gain',
-            camContrast: 'contrast', camSaturation: 'saturation',
-            camBrightness: 'brightness', camSharpness: 'sharpness',
+            camContrast: 'contrast', camSaturation: 'saturation', camBrightness: 'brightness', camSharpness: 'sharpness',
         };
-
         let camDebounce = null;
         function sendCameraControls() {
             clearTimeout(camDebounce);
@@ -248,17 +181,13 @@
                 postJSON('/set_camera_controls', body).catch(e => msg(e.message));
             }, 80);
         }
-
         async function sendFramerate(fps) {
             try {
-                const r = await postJSON('/set_framerate', { fps: parseInt(fps, 10) });
-                const d = await r.json();
-                // The server derives exposure + brightness gain; reflect the gain.
+                const d = await (await postJSON('/set_framerate', { fps: parseInt(fps, 10) })).json();
                 setControlValue('analogueGain', d.analogue_gain, false);
             } catch (e) { msg(e.message); }
         }
-
-        function decimals(step) { const p = String(step).split('.')[1]; return p ? p.length : 0; }
+        const decimals = step => { const p = String(step).split('.')[1]; return p ? p.length : 0; };
         function setControlValue(id, value, send) {
             const sl = $(id), inp = $(id + 'Val');
             const min = parseFloat(sl.min), max = parseFloat(sl.max), step = parseFloat(sl.step) || 1;
@@ -269,48 +198,41 @@
         }
         function wireControl(id) {
             const sl = $(id), inp = $(id + 'Val');
-            sl.addEventListener('input', () => {
-                inp.value = sl.value;
-                id === 'framerate' ? sendFramerate(sl.value) : sendCameraControls();
-            });
+            sl.addEventListener('input', () => { inp.value = sl.value; id === 'framerate' ? sendFramerate(sl.value) : sendCameraControls(); });
             inp.addEventListener('change', () => setControlValue(id, inp.value, true));
             document.querySelectorAll('.cam-step[data-slider="' + id + '"]').forEach(b => {
-                b.addEventListener('click', () => {
-                    const step = parseFloat(sl.step) || 1;
-                    setControlValue(id, parseFloat(sl.value) + step * parseInt(b.dataset.dir, 10), true);
-                });
+                b.addEventListener('click', () => setControlValue(id, parseFloat(sl.value) + (parseFloat(sl.step) || 1) * parseInt(b.dataset.dir, 10), true));
             });
         }
         ['framerate', ...Object.keys(camMap)].forEach(wireControl);
-
         async function syncCameraControls() {
             try {
-                const r = await request('/get_camera_controls');
-                const cam = await r.json();
+                const cam = await (await request('/get_camera_controls')).json();
                 setControlValue('framerate', cam.framerate, false);
                 for (const id in camMap) setControlValue(id, cam[camMap[id]], false);
-            } catch (e) { /* non-fatal */ }
+            } catch (e) {}
         }
+
+        // Collapsible camera section
+        const camToggle = $('camToggle'), camBody = $('camBody');
+        camToggle.addEventListener('click', () => {
+            const collapsed = camBody.classList.toggle('collapsed');
+            camToggle.setAttribute('aria-expanded', String(!collapsed));
+        });
 
         // ============================================================
         //  Calibration (autofocus / white balance)
         // ============================================================
-        const autofocusBtn = $('autofocusBtn');
-        const whiteBalanceBtn = $('whiteBalanceBtn');
-
+        const autofocusBtn = $('autofocusBtn'), whiteBalanceBtn = $('whiteBalanceBtn');
         async function waitForCalibration(timeoutSec = 120) {
             for (let i = 0; i < timeoutSec; i++) {
                 await new Promise(r => setTimeout(r, 1000));
-                try {
-                    const r = await request('/calibration_status');
-                    if (!(await r.json()).running) return true;
-                } catch (e) { /* keep polling */ }
+                try { if (!(await (await request('/calibration_status')).json()).running) return true; } catch (e) {}
             }
             return false;
         }
         async function runCalibration(endpoint, button, label) {
-            autofocusBtn.disabled = true; whiteBalanceBtn.disabled = true;
-            button.classList.add('busy');
+            autofocusBtn.disabled = true; whiteBalanceBtn.disabled = true; button.classList.add('busy');
             msg(label + ' started…');
             try {
                 const resp = await fetch(endpoint, { method: 'POST' });
@@ -319,51 +241,289 @@
                 const finished = await waitForCalibration();
                 await syncCameraControls();
                 msg(finished ? label + ' complete.' : label + ' is taking unusually long — check the server log.');
-            } catch (e) {
-                msg(label + ' failed: ' + e.message);
-            } finally {
-                autofocusBtn.disabled = false; whiteBalanceBtn.disabled = false;
-                button.classList.remove('busy');
-            }
+            } catch (e) { msg(label + ' failed: ' + e.message); }
+            finally { autofocusBtn.disabled = false; whiteBalanceBtn.disabled = false; button.classList.remove('busy'); }
         }
         autofocusBtn.addEventListener('click', () => runCalibration('/autofocus', autofocusBtn, 'Autofocus'));
         whiteBalanceBtn.addEventListener('click', () => runCalibration('/white_balance', whiteBalanceBtn, 'White balance'));
 
         // ============================================================
-        //  Status
+        //  Telemetry HUD (position + real fps)
         // ============================================================
+        async function pollTelemetry() {
+            try {
+                const d = await (await request('/telemetry')).json();
+                $('posX').textContent = d.position.x;
+                $('posY').textContent = d.position.y;
+                $('posZ').textContent = d.position.z;
+                $('fpsVal').textContent = d.fps ? d.fps.toFixed(1) : '—';
+            } catch (e) {}
+        }
+        setInterval(pollTelemetry, 1000); pollTelemetry();
+
         async function refreshStatus() {
             try {
-                const r = await request('/status');
-                const d = await r.json();
+                const d = await (await request('/status')).json();
                 const txt = d.controller_connected ? 'Controller online' : 'Controller unavailable';
-                statusEl.textContent = txt;
-                statusEl.className = 'status ' + (d.controller_connected ? 'ok' : 'bad');
+                statusEl.textContent = txt; statusEl.className = 'status ' + (d.controller_connected ? 'ok' : 'bad');
                 if (mobileStatus) mobileStatus.textContent = txt;
             } catch (e) {
-                statusEl.textContent = 'Offline';
-                statusEl.className = 'status bad';
+                statusEl.textContent = 'Offline'; statusEl.className = 'status bad';
                 if (mobileStatus) mobileStatus.textContent = 'Offline';
             }
         }
-        refreshStatus();
-        setInterval(refreshStatus, 5000);
+        refreshStatus(); setInterval(refreshStatus, 5000);
+
+        // ============================================================
+        //  Recordings library
+        // ============================================================
+        const previewModal = $('previewModal'), previewVideo = $('previewVideo'), previewTitle = $('previewTitle');
+        function fmtSize(b) { if (!b) return '—'; const u = ['B', 'KB', 'MB', 'GB']; let i = 0; while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; } return b.toFixed(b < 10 && i > 0 ? 1 : 0) + ' ' + u[i]; }
+        function fmtDur(s) { if (s == null) return '—'; s = Math.round(s); const m = Math.floor(s / 60), sec = s % 60; return `${m}:${String(sec).padStart(2, '0')}`; }
+
+        function openPreview(name) {
+            previewTitle.textContent = name;
+            previewVideo.src = '/recordings/file/' + encodeURIComponent(name);
+            previewModal.classList.add('show');
+        }
+        function closePreview() { previewVideo.pause(); previewVideo.removeAttribute('src'); previewVideo.load(); previewModal.classList.remove('show'); }
+        $('previewClose').addEventListener('click', closePreview);
+        previewModal.addEventListener('click', e => { if (e.target === previewModal) closePreview(); });
+
+        async function loadRecordings() {
+            let items = [];
+            try { items = await (await request('/recordings')).json(); } catch (e) { return; }
+            const list = $('recordingsList');
+            list.querySelectorAll('.rec-item').forEach(n => n.remove());
+            $('recEmpty').style.display = items.length ? 'none' : '';
+            items.forEach(it => {
+                const el = document.createElement('div');
+                el.className = 'rec-item';
+
+                const del = document.createElement('button');
+                del.className = 'rec-del'; del.title = 'Delete'; del.textContent = '🗑';
+                del.addEventListener('click', async () => {
+                    if (!confirm('Delete "' + it.name + '"?')) return;
+                    try { await postJSON('/recordings/delete', { name: it.name }); loadRecordings(); }
+                    catch (e) { msg('Delete failed: ' + e.message); }
+                });
+
+                const play = document.createElement('button');
+                play.className = 'rec-play'; play.title = 'Preview'; play.textContent = '▶';
+                play.addEventListener('click', () => openPreview(it.name));
+
+                const name = document.createElement('input');
+                name.className = 'rec-name'; name.value = it.name.replace(/\.mp4$/i, ''); name.title = 'Click to rename';
+                name.addEventListener('change', async () => {
+                    try {
+                        const r = await (await postJSON('/recordings/rename', { name: it.name, new_name: name.value })).json();
+                        if (r.error) throw new Error(r.error);
+                        loadRecordings();
+                    } catch (e) { msg('Rename failed: ' + e.message); loadRecordings(); }
+                });
+                name.addEventListener('keydown', e => { if (e.key === 'Enter') name.blur(); });
+
+                const meta = document.createElement('div');
+                meta.className = 'rec-meta';
+                const fps = it.fps != null ? it.fps : '?';
+                meta.innerHTML = `⏱ <b>${fmtDur(it.duration)}</b> · <b>${fps}</b> fps · ${fmtSize(it.size)}`;
+
+                el.append(del, play, name, meta);
+                list.appendChild(el);
+            });
+        }
+        loadRecordings();
+        setInterval(loadRecordings, 15000);
+
+        // ============================================================
+        //  Calibration + Measure tools (overlay on the video)
+        // ============================================================
+        const videoFrame = $('videoFrame'), overlay = $('overlay'), octx = overlay.getContext('2d');
+        const streamImg = $('stream'), toolBanner = $('toolBanner');
+        const calibrateBtn = $('calibrateBtn'), measureBtn = $('measureBtn');
+        const scaleReadout = $('scaleReadout'), measureResult = $('measureResult');
+        let calibration = { um_per_px: null };
+        let tool = null;            // 'calibrate' | 'measure' | 'review' | null
+        let points = [];            // native-pixel coords {x,y}
+        let frozenCanvas = null;
+
+        function contentRect() {
+            const w = overlay.width, h = overlay.height;
+            const scale = Math.min(w / NATIVE_W, h / NATIVE_H);
+            const cw = NATIVE_W * scale, ch = NATIVE_H * scale;
+            return { scale, ox: (w - cw) / 2, oy: (h - ch) / 2, cw, ch };
+        }
+        function resizeOverlay() {
+            overlay.width = overlay.clientWidth;
+            overlay.height = overlay.clientHeight;
+            drawOverlay();
+        }
+        if (window.ResizeObserver) new ResizeObserver(resizeOverlay).observe(videoFrame);
+        window.addEventListener('resize', resizeOverlay);
+
+        function toNative(rect, x, y) {
+            return { x: Math.max(0, Math.min(NATIVE_W, (x - rect.ox) / rect.scale)),
+                     y: Math.max(0, Math.min(NATIVE_H, (y - rect.oy) / rect.scale)) };
+        }
+        const toDisp = (rect, p) => ({ x: rect.ox + p.x * rect.scale, y: rect.oy + p.y * rect.scale });
+        const distPx = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+        function niceNumber(x) {
+            const exp = Math.floor(Math.log10(x)), f = x / Math.pow(10, exp);
+            const nf = f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10;
+            return nf * Math.pow(10, exp);
+        }
+        function drawScaleBar(rect) {
+            const targetDisp = rect.cw * 0.18;
+            const targetUm = (targetDisp / rect.scale) * calibration.um_per_px;
+            const um = niceNumber(targetUm);
+            const dispLen = (um / calibration.um_per_px) * rect.scale;
+            const x0 = rect.ox + 16, y0 = rect.oy + rect.ch - 18;
+            octx.strokeStyle = '#fff'; octx.fillStyle = '#fff'; octx.lineWidth = 3;
+            octx.beginPath();
+            octx.moveTo(x0, y0); octx.lineTo(x0 + dispLen, y0);
+            octx.moveTo(x0, y0 - 6); octx.lineTo(x0, y0 + 6);
+            octx.moveTo(x0 + dispLen, y0 - 6); octx.lineTo(x0 + dispLen, y0 + 6);
+            octx.stroke();
+            const label = um >= 1000 ? (um / 1000) + ' mm' : um + ' µm';
+            octx.font = '600 13px Inter, sans-serif'; octx.textAlign = 'center';
+            octx.lineWidth = 3; octx.strokeStyle = 'rgba(0,0,0,.6)';
+            octx.strokeText(label, x0 + dispLen / 2, y0 - 10);
+            octx.fillText(label, x0 + dispLen / 2, y0 - 10);
+        }
+        function drawMeasure(rect) {
+            const pts = points.map(p => toDisp(rect, p));
+            octx.fillStyle = '#6ee7b7'; octx.strokeStyle = '#6ee7b7'; octx.lineWidth = 2;
+            pts.forEach(p => { octx.beginPath(); octx.arc(p.x, p.y, 5, 0, 7); octx.fill(); });
+            if (pts.length === 2) {
+                octx.beginPath(); octx.moveTo(pts[0].x, pts[0].y); octx.lineTo(pts[1].x, pts[1].y); octx.stroke();
+            }
+        }
+        function drawOverlay() {
+            octx.clearRect(0, 0, overlay.width, overlay.height);
+            const rect = contentRect();
+            if (frozenCanvas) {
+                octx.drawImage(frozenCanvas, rect.ox, rect.oy, rect.cw, rect.ch);
+                octx.fillStyle = 'rgba(6,14,10,.28)';
+                octx.fillRect(rect.ox, rect.oy, rect.cw, rect.ch);
+            }
+            if (calibration.um_per_px) drawScaleBar(rect);
+            if (points.length) drawMeasure(rect);
+        }
+
+        function freezeFrame() {
+            frozenCanvas = document.createElement('canvas');
+            frozenCanvas.width = NATIVE_W; frozenCanvas.height = NATIVE_H;
+            try { frozenCanvas.getContext('2d').drawImage(streamImg, 0, 0, NATIVE_W, NATIVE_H); }
+            catch (e) { frozenCanvas = null; }
+        }
+        function setBanner(text) { toolBanner.textContent = text; toolBanner.classList.toggle('show', !!text); }
+
+        function startTool(which) {
+            cancelTool();
+            tool = which; points = [];
+            freezeFrame();
+            overlay.classList.add('active');
+            (which === 'calibrate' ? calibrateBtn : measureBtn).classList.add('armed');
+            setBanner(which === 'calibrate' ? 'Calibration: click two points a known distance apart'
+                                            : 'Measure: click two points');
+            drawOverlay();
+        }
+        function cancelTool() {
+            if (!tool) return;
+            tool = null; points = []; frozenCanvas = null;
+            overlay.classList.remove('active');
+            calibrateBtn.classList.remove('armed'); measureBtn.classList.remove('armed');
+            setBanner('');
+            drawOverlay();
+        }
+
+        overlay.addEventListener('pointerdown', e => {
+            if (!tool) return;
+            if (tool === 'review') { cancelTool(); return; }
+            const r = overlay.getBoundingClientRect();
+            const rect = contentRect();
+            points.push(toNative(rect, e.clientX - r.left, e.clientY - r.top));
+            drawOverlay();
+            if (points.length === 2) finishTwoPoints();
+        });
+
+        function finishTwoPoints() {
+            const px = distPx(points[0], points[1]);
+            if (tool === 'calibrate') {
+                pendingCalibPx = px;
+                $('calibUm').value = '';
+                $('calibModal').classList.add('show');
+                $('calibUm').focus();
+            } else {
+                let txt = `${px.toFixed(1)} px`;
+                if (calibration.um_per_px) {
+                    const um = px * calibration.um_per_px;
+                    txt += um >= 1000 ? ` · ${(um / 1000).toFixed(3)} mm` : ` · ${um.toFixed(2)} µm`;
+                } else {
+                    txt += ' · (not calibrated)';
+                }
+                measureResult.textContent = txt;
+                setBanner(txt + '  — click video to dismiss');
+                tool = 'review';
+            }
+        }
+
+        // Calibration distance modal
+        let pendingCalibPx = 0;
+        const calibModal = $('calibModal');
+        $('calibCancel').addEventListener('click', () => { calibModal.classList.remove('show'); cancelTool(); });
+        $('calibSave').addEventListener('click', async () => {
+            const um = parseFloat($('calibUm').value);
+            if (!(um > 0)) { $('calibUm').focus(); return; }
+            try {
+                const rec = await (await postJSON('/set_calibration', { pixels: pendingCalibPx, micrometres: um })).json();
+                if (rec.error) throw new Error(rec.error);
+                calibration = rec;
+                updateScaleReadout();
+                msg('Calibration saved.');
+            } catch (e) { msg('Calibration failed: ' + e.message); }
+            calibModal.classList.remove('show');
+            cancelTool();
+        });
+        $('calibUm').addEventListener('keydown', e => { if (e.key === 'Enter') $('calibSave').click(); });
+
+        function updateScaleReadout() {
+            if (calibration.um_per_px) {
+                scaleReadout.textContent = `Scale: ${calibration.um_per_px.toFixed(4)} µm/px`
+                    + (calibration.ref_micrometres ? `  (${calibration.ref_micrometres} µm = ${calibration.ref_pixels.toFixed(0)} px)` : '');
+            } else {
+                scaleReadout.textContent = 'Not calibrated';
+            }
+            drawOverlay();
+        }
+
+        calibrateBtn.addEventListener('click', async () => {
+            if (tool === 'calibrate') { cancelTool(); return; }
+            if (isRecording) { try { await request('/stop_recording', { method: 'POST' }); exitRecordingUI('Recording stopped for calibration.'); } catch (e) {} }
+            startTool('calibrate');
+        });
+        measureBtn.addEventListener('click', () => { tool === 'measure' || tool === 'review' ? cancelTool() : startTool('measure'); });
+
+        async function loadCalibration() {
+            try { calibration = await (await request('/get_calibration')).json(); } catch (e) {}
+            updateScaleReadout();
+        }
+        streamImg.addEventListener('load', resizeOverlay);
+        loadCalibration();
+        resizeOverlay();
 
         // ============================================================
         //  Mobile mode
         // ============================================================
-        const mobileToggle = $('mobileToggle');
-        const mobileExit = $('mobileExit');
-        function enterMobile() {
+        $('mobileToggle').addEventListener('click', () => {
             document.body.classList.add('mobile-mode');
             const el = document.documentElement;
             if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
             if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
-        }
-        function exitMobile() {
+        });
+        $('mobileExit').addEventListener('click', () => {
             document.body.classList.remove('mobile-mode');
             if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
             if (screen.orientation && screen.orientation.unlock) { try { screen.orientation.unlock(); } catch (_) {} }
-        }
-        mobileToggle.addEventListener('click', enterMobile);
-        mobileExit.addEventListener('click', exitMobile);
+        });

@@ -1,29 +1,64 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>Microscope Control</title>
+    <title>SCOPIO — MatterLab Automated Microscope</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <style>
 __STYLE__
     </style>
 </head>
 <body>
+    <!-- ===== Splash / load-in ===== -->
+    <div id="splash" class="splash">
+        <div class="splash-inner">
+            __LOGO__
+            <div class="splash-brand">
+                <span class="splash-title">SCOPIO</span>
+                <span class="splash-sub">MatterLab Automated Microscope</span>
+            </div>
+        </div>
+    </div>
+
     <main>
+        <!-- ===== LEFT: recordings library ===== -->
+        <aside class="library">
+            <p class="section-title">Recordings</p>
+            <div class="rec-list" id="recordingsList">
+                <p class="rec-empty" id="recEmpty">No recordings yet.</p>
+            </div>
+        </aside>
+
+        <!-- ===== CENTER: live video ===== -->
         <section class="camera-pane">
             <div class="topbar">
-                <h1>Microscope</h1>
-                <span class="status" id="status">Connecting…</span>
+                <span class="brand">
+                    __LOGO__
+                    <span class="brand-text">
+                        <b>SCOPIO</b>
+                        <i>MatterLab Automated Microscope</i>
+                    </span>
+                </span>
                 <span class="spacer"></span>
+                <span class="status" id="status">Connecting…</span>
                 <button class="ghost-btn" id="mobileToggle">📱 Phone</button>
                 <a class="ghost-btn" href="/logout">🔒 Lock</a>
             </div>
-            <div class="video-frame">
+
+            <div class="video-frame" id="videoFrame">
                 <img src="/video_feed" alt="Microscope camera stream" id="stream">
+                <canvas class="overlay" id="overlay"></canvas>
+                <div class="hud" id="hud">
+                    <div class="hud-item"><span>X</span><b id="posX">—</b></div>
+                    <div class="hud-item"><span>Y</span><b id="posY">—</b></div>
+                    <div class="hud-item"><span>Z</span><b id="posZ">—</b></div>
+                    <div class="hud-item fps"><span>FPS</span><b id="fpsVal">—</b></div>
+                </div>
+                <div class="tool-banner" id="toolBanner"></div>
             </div>
         </section>
 
+        <!-- ===== RIGHT: controls ===== -->
         <aside class="panel">
-            <!-- ===== Top action buttons ===== -->
             <div class="top-actions">
                 <button id="recordBtn" class="record-btn">
                     <span class="rec-dot"></span>
@@ -36,7 +71,6 @@ __STYLE__
                 </div>
             </div>
 
-            <!-- ===== Movement ===== -->
             <section class="move-section">
                 <div class="jog">
                     <button class="hold" data-move="up">↑</button>
@@ -50,7 +84,6 @@ __STYLE__
                 </div>
             </section>
 
-            <!-- ===== Step size ===== -->
             <section class="step-section">
                 <p class="section-title">Step Size</p>
                 <div class="step-row">
@@ -73,137 +106,160 @@ __STYLE__
                 </div>
             </section>
 
-            <!-- ===== Recording settings ===== -->
             <section class="rec-section">
                 <p class="section-title">Recording Length</p>
                 <div class="duration-row">
-                    <label class="dur-field">
-                        <span>Hours</span>
-                        <input type="number" id="durH" min="0" max="99" step="1" value="0">
-                    </label>
-                    <label class="dur-field">
-                        <span>Minutes</span>
-                        <input type="number" id="durM" min="0" max="59" step="1" value="10">
-                    </label>
-                    <label class="dur-field">
-                        <span>Seconds</span>
-                        <input type="number" id="durS" min="0" max="59" step="1" value="0">
-                    </label>
+                    <label class="dur-field"><span>Hours</span>
+                        <input type="number" id="durH" min="0" max="99" step="1" value="0"></label>
+                    <label class="dur-field"><span>Minutes</span>
+                        <input type="number" id="durM" min="0" max="59" step="1" value="10"></label>
+                    <label class="dur-field"><span>Seconds</span>
+                        <input type="number" id="durS" min="0" max="59" step="1" value="0"></label>
                     <button id="infiniteBtn" class="infinite-btn" title="Record until stopped">∞</button>
                 </div>
             </section>
 
-            <!-- ===== Camera settings (rows) ===== -->
-            <section class="cam-section">
-                <p class="section-title">Camera</p>
-
-                <div class="ctrl-row" data-control="framerate">
-                    <span class="ctrl-name">🎞️ Frame rate</span>
-                    <input type="range" id="framerate" min="{{ min_fps }}" max="{{ max_fps }}" step="1" value="{{ cam.framerate|int }}">
-                    <input type="number" class="ctrl-val" id="framerateVal" min="{{ min_fps }}" max="{{ max_fps }}" step="1" value="{{ cam.framerate|int }}">
-                    <span class="ctrl-unit">fps</span>
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="framerate" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="framerate" data-dir="1">›</button>
+            <!-- Collapsible camera settings -->
+            <section class="cam-section collapsible">
+                <button class="section-toggle" id="camToggle" aria-expanded="true">
+                    <span>Camera</span><span class="chevron">⌄</span>
+                </button>
+                <div class="collapsible-body" id="camBody">
+                    <div class="ctrl-row" data-control="framerate">
+                        <span class="ctrl-name">Frame rate</span>
+                        <input type="range" id="framerate" min="{{ min_fps }}" max="{{ max_fps }}" step="1" value="{{ cam.framerate|int }}">
+                        <input type="number" class="ctrl-val" id="framerateVal" min="{{ min_fps }}" max="{{ max_fps }}" step="1" value="{{ cam.framerate|int }}">
+                        <span class="ctrl-unit">fps</span>
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="framerate" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="framerate" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name"><i class="swatch red"></i>Red</span>
+                        <input type="range" id="redGain" min="0" max="8" step="0.05" value="{{ cam.red_gain }}">
+                        <input type="number" class="ctrl-val" id="redGainVal" min="0" max="8" step="0.05" value="{{ cam.red_gain }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="redGain" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="redGain" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name"><i class="swatch green"></i>Green</span>
+                        <input type="range" id="greenGain" min="0" max="8" step="0.05" value="{{ cam.green_gain }}">
+                        <input type="number" class="ctrl-val" id="greenGainVal" min="0" max="8" step="0.05" value="{{ cam.green_gain }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="greenGain" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="greenGain" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name"><i class="swatch blue"></i>Blue</span>
+                        <input type="range" id="blueGain" min="0" max="8" step="0.05" value="{{ cam.blue_gain }}">
+                        <input type="number" class="ctrl-val" id="blueGainVal" min="0" max="8" step="0.05" value="{{ cam.blue_gain }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="blueGain" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="blueGain" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name">Colour</span>
+                        <input type="range" id="colourGain" min="0.1" max="4" step="0.05" value="{{ cam.colour_gain }}">
+                        <input type="number" class="ctrl-val" id="colourGainVal" min="0.1" max="4" step="0.05" value="{{ cam.colour_gain }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="colourGain" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="colourGain" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name">Brightness&nbsp;Gain</span>
+                        <input type="range" id="analogueGain" min="1" max="16" step="0.1" value="{{ cam.analogue_gain }}">
+                        <input type="number" class="ctrl-val" id="analogueGainVal" min="1" max="16" step="0.1" value="{{ cam.analogue_gain }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="analogueGain" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="analogueGain" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name">Contrast</span>
+                        <input type="range" id="camContrast" min="0" max="4" step="0.05" value="{{ cam.contrast }}">
+                        <input type="number" class="ctrl-val" id="camContrastVal" min="0" max="4" step="0.05" value="{{ cam.contrast }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="camContrast" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="camContrast" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name">Saturation</span>
+                        <input type="range" id="camSaturation" min="0" max="4" step="0.05" value="{{ cam.saturation }}">
+                        <input type="number" class="ctrl-val" id="camSaturationVal" min="0" max="4" step="0.05" value="{{ cam.saturation }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="camSaturation" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="camSaturation" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name">Brightness</span>
+                        <input type="range" id="camBrightness" min="-1" max="1" step="0.05" value="{{ cam.brightness }}">
+                        <input type="number" class="ctrl-val" id="camBrightnessVal" min="-1" max="1" step="0.05" value="{{ cam.brightness }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="camBrightness" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="camBrightness" data-dir="1">›</button>
+                        </div>
+                    </div>
+                    <div class="ctrl-row">
+                        <span class="ctrl-name">Sharpness</span>
+                        <input type="range" id="camSharpness" min="0" max="8" step="0.1" value="{{ cam.sharpness }}">
+                        <input type="number" class="ctrl-val" id="camSharpnessVal" min="0" max="8" step="0.1" value="{{ cam.sharpness }}">
+                        <div class="ctrl-arrows">
+                            <button class="cam-step" data-slider="camSharpness" data-dir="-1">‹</button>
+                            <button class="cam-step" data-slider="camSharpness" data-dir="1">›</button>
+                        </div>
                     </div>
                 </div>
+            </section>
 
-                <div class="ctrl-row">
-                    <span class="ctrl-name"><i class="swatch red"></i>Red</span>
-                    <input type="range" id="redGain" min="0" max="8" step="0.05" value="{{ cam.red_gain }}">
-                    <input type="number" class="ctrl-val" id="redGainVal" min="0" max="8" step="0.05" value="{{ cam.red_gain }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="redGain" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="redGain" data-dir="1">›</button>
-                    </div>
-                </div>
-
-                <div class="ctrl-row">
-                    <span class="ctrl-name"><i class="swatch green"></i>Green</span>
-                    <input type="range" id="greenGain" min="0" max="8" step="0.05" value="{{ cam.green_gain }}">
-                    <input type="number" class="ctrl-val" id="greenGainVal" min="0" max="8" step="0.05" value="{{ cam.green_gain }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="greenGain" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="greenGain" data-dir="1">›</button>
-                    </div>
-                </div>
-
-                <div class="ctrl-row">
-                    <span class="ctrl-name"><i class="swatch blue"></i>Blue</span>
-                    <input type="range" id="blueGain" min="0" max="8" step="0.05" value="{{ cam.blue_gain }}">
-                    <input type="number" class="ctrl-val" id="blueGainVal" min="0" max="8" step="0.05" value="{{ cam.blue_gain }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="blueGain" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="blueGain" data-dir="1">›</button>
-                    </div>
-                </div>
-
-                <div class="ctrl-row">
-                    <span class="ctrl-name">🌈 Colour</span>
-                    <input type="range" id="colourGain" min="0.1" max="4" step="0.05" value="{{ cam.colour_gain }}">
-                    <input type="number" class="ctrl-val" id="colourGainVal" min="0.1" max="4" step="0.05" value="{{ cam.colour_gain }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="colourGain" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="colourGain" data-dir="1">›</button>
-                    </div>
-                </div>
-
-                <div class="ctrl-row">
-                    <span class="ctrl-name">💡 Brightness&nbsp;Gain</span>
-                    <input type="range" id="analogueGain" min="1" max="16" step="0.1" value="{{ cam.analogue_gain }}">
-                    <input type="number" class="ctrl-val" id="analogueGainVal" min="1" max="16" step="0.1" value="{{ cam.analogue_gain }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="analogueGain" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="analogueGain" data-dir="1">›</button>
-                    </div>
-                </div>
-
-                <div class="ctrl-row">
-                    <span class="ctrl-name">◐ Contrast</span>
-                    <input type="range" id="camContrast" min="0" max="4" step="0.05" value="{{ cam.contrast }}">
-                    <input type="number" class="ctrl-val" id="camContrastVal" min="0" max="4" step="0.05" value="{{ cam.contrast }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="camContrast" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="camContrast" data-dir="1">›</button>
-                    </div>
-                </div>
-
-                <div class="ctrl-row">
-                    <span class="ctrl-name">🎨 Saturation</span>
-                    <input type="range" id="camSaturation" min="0" max="4" step="0.05" value="{{ cam.saturation }}">
-                    <input type="number" class="ctrl-val" id="camSaturationVal" min="0" max="4" step="0.05" value="{{ cam.saturation }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="camSaturation" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="camSaturation" data-dir="1">›</button>
-                    </div>
-                </div>
-
-                <div class="ctrl-row">
-                    <span class="ctrl-name">☀️ Brightness</span>
-                    <input type="range" id="camBrightness" min="-1" max="1" step="0.05" value="{{ cam.brightness }}">
-                    <input type="number" class="ctrl-val" id="camBrightnessVal" min="-1" max="1" step="0.05" value="{{ cam.brightness }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="camBrightness" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="camBrightness" data-dir="1">›</button>
-                    </div>
-                </div>
-
-                <div class="ctrl-row">
-                    <span class="ctrl-name">🔪 Sharpness</span>
-                    <input type="range" id="camSharpness" min="0" max="8" step="0.1" value="{{ cam.sharpness }}">
-                    <input type="number" class="ctrl-val" id="camSharpnessVal" min="0" max="8" step="0.1" value="{{ cam.sharpness }}">
-                    <div class="ctrl-arrows">
-                        <button class="cam-step" data-slider="camSharpness" data-dir="-1">‹</button>
-                        <button class="cam-step" data-slider="camSharpness" data-dir="1">›</button>
-                    </div>
-                </div>
+            <!-- Measurements -->
+            <section class="measure-section">
+                <p class="section-title">Measurements</p>
+                <button id="calibrateBtn" class="measure-btn">📐 Measure Calibration</button>
+                <button id="measureBtn" class="measure-btn">📏 Measure</button>
+                <div class="measure-readout" id="scaleReadout">Not calibrated</div>
+                <div class="measure-readout result" id="measureResult"></div>
             </section>
 
             <div class="message" id="message"></div>
         </aside>
     </main>
 
-    <!-- ===== Mobile control overlay (landscape) ===== -->
+    <!-- ===== Recording preview modal ===== -->
+    <div class="modal" id="previewModal">
+        <div class="modal-box">
+            <div class="modal-head">
+                <span id="previewTitle">Preview</span>
+                <button class="ghost-btn" id="previewClose">✕ Close</button>
+            </div>
+            <video id="previewVideo" controls preload="metadata"></video>
+        </div>
+    </div>
+
+    <!-- ===== Calibration distance prompt ===== -->
+    <div class="modal" id="calibModal">
+        <div class="modal-box small">
+            <div class="modal-head"><span>Set calibration distance</span></div>
+            <p class="modal-text">Enter the real-world distance of the line you drew.</p>
+            <div class="calib-input">
+                <input type="number" id="calibUm" min="0" step="0.1" placeholder="e.g. 100">
+                <span>µm</span>
+            </div>
+            <div class="modal-actions">
+                <button class="ghost-btn" id="calibCancel">Cancel</button>
+                <button class="action-btn primary" id="calibSave">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== Mobile control overlay ===== -->
     <div class="mobile-overlay" id="mobileOverlay">
         <button class="mobile-exit" id="mobileExit">✕ Exit</button>
         <div class="mobile-pad mobile-xy">

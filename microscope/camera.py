@@ -66,6 +66,11 @@ camera_use_lock = threading.Lock()
 current_jpeg = None
 _jpeg_lock = threading.Lock()
 
+# Real, measured frame rate (frames/sec) reported by the sensor metadata. This
+# is the *actual* rate the pipeline achieves, which can be well below the
+# requested rate (e.g. asking for 120 fps may only yield ~89 fps).
+measured_fps = 0.0
+
 # ========== Camera controls ==========
 # ``framerate`` drives exposure automatically (see apply_framerate). The
 # ``exposure`` value below is the *budget* upper bound: the brightest single
@@ -217,9 +222,10 @@ def _yuv_to_bgr(frame_yuv):
 def display_worker():
     """Continuously capture the main stream, convert to BGR, apply the
     software green gain, and publish a JPEG for the /video_feed route."""
-    global current_jpeg
+    global current_jpeg, measured_fps
     frame_interval = 1.0 / DISPLAY_FPS
     next_frame_time = time.perf_counter()
+    last_meta_time = 0.0
 
     while True:
         now = time.perf_counter()
@@ -240,6 +246,16 @@ def display_worker():
                     continue
                 with camera_lock:
                     frame_yuv = picam2.capture_array("main")
+                    # Sample the true frame duration roughly twice a second.
+                    if time.time() - last_meta_time >= 0.5:
+                        last_meta_time = time.time()
+                        try:
+                            md = picam2.capture_metadata()
+                            dur = md.get("FrameDuration")
+                            if dur:
+                                measured_fps = round(1_000_000.0 / dur, 1)
+                        except Exception:
+                            pass
             if frame_yuv is None:
                 continue
 

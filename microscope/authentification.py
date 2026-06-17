@@ -25,7 +25,10 @@ bp = Blueprint("auth", __name__)
 
 def _load_login_template():
     with open(os.path.join(_FRONTEND_DIR, "login.html"), encoding="utf-8") as f:
-        return f.read()
+        html = f.read()
+    with open(os.path.join(_FRONTEND_DIR, "logo.svg"), encoding="utf-8") as f:
+        logo = f.read()
+    return html.replace("__LOGO__", logo)
 
 
 def login_required(view):

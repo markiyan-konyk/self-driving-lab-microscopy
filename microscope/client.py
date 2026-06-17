@@ -7,10 +7,16 @@ namespace so cross-module updates stay visible.
 """
 
 import os
+import re
+import json
 import time
 import threading
+import subprocess
 
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import (
+    Flask, Response, jsonify, render_template_string, request,
+    send_from_directory, abort,
+)
 
 import camera
 import controls
@@ -20,6 +26,12 @@ import authentification as auth
 SERVER_PORT = int(os.environ.get("MICROSCOPE_PORT", 8000))
 
 _FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+RECORDINGS_DIR = "recordings"
+CALIBRATION_FILE = "calibration.json"
+
+# ffprobe cache: filename -> (mtime, size, duration_sec, fps)
+_probe_cache = {}
+_probe_lock = threading.Lock()
 
 app = Flask(__name__)
 app.secret_key = auth.SESSION_SECRET
@@ -32,7 +44,7 @@ def _read_frontend(name):
 
 
 def render_page():
-    """Stitch index.html + style.css + app.js, then render the Jinja vars.
+    """Stitch index.html + style.css + app.js (+ logo), then render Jinja vars.
 
     Stitching happens before render_template_string so every ``{{ }}``
     placeholder (in markup *and* in app.js) resolves in one pass.
@@ -40,7 +52,10 @@ def render_page():
     html = _read_frontend("index.html")
     css = _read_frontend("style.css")
     js = _read_frontend("app.js")
-    document = html.replace("__STYLE__", css).replace("__SCRIPT__", js)
+    logo = _read_frontend("logo.svg")
+    document = (html.replace("__STYLE__", css)
+                    .replace("__SCRIPT__", js)
+                    .replace("__LOGO__", logo))
     return render_template_string(
         document,
         steps=controls.steps,
@@ -49,6 +64,67 @@ def render_page():
         min_fps=camera.MIN_FPS,
         max_fps=camera.MAX_FPS,
     )
+
+
+# ========== Recording / calibration helpers ==========
+def _safe_recording_name(name):
+    """Return a safe basename for a file that must live in RECORDINGS_DIR, or
+    None if the name is unsafe (path traversal, wrong extension, etc.)."""
+    if not name or name != os.path.basename(name):
+        return None
+    if not name.lower().endswith(".mp4"):
+        return None
+    return name
+
+
+def _probe_recording(path):
+    """Return (duration_seconds, real_fps) for a video via ffprobe, cached by
+    file mtime+size. Falls back to (None, None) if ffprobe is unavailable."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None
+    key = os.path.basename(path)
+    with _probe_lock:
+        cached = _probe_cache.get(key)
+        if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+            return cached[2], cached[3]
+
+    duration, fps = None, None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=avg_frame_rate,nb_frames,duration",
+             "-show_entries", "format=duration", "-of", "json", path],
+            capture_output=True, text=True, timeout=20,
+        )
+        info = json.loads(out.stdout or "{}")
+        stream = (info.get("streams") or [{}])[0]
+        fmt = info.get("format") or {}
+        duration = float(stream.get("duration") or fmt.get("duration") or 0) or None
+        # Prefer frames/duration (true average) over the container's nominal rate.
+        nb = stream.get("nb_frames")
+        if nb and duration:
+            fps = round(int(nb) / duration, 1)
+        else:
+            afr = stream.get("avg_frame_rate", "0/0")
+            num, _, den = afr.partition("/")
+            if den and float(den) != 0:
+                fps = round(float(num) / float(den), 1)
+    except (subprocess.SubprocessError, ValueError, json.JSONDecodeError, OSError) as e:
+        print(f"ffprobe failed for {path}: {e}")
+
+    with _probe_lock:
+        _probe_cache[key] = (st.st_mtime, st.st_size, duration, fps)
+    return duration, fps
+
+
+def _load_calibration():
+    try:
+        with open(CALIBRATION_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"um_per_px": None}
 
 
 # ========== Pages ==========
@@ -249,6 +325,135 @@ def recording_status():
         "duration": camera.recording_duration,
         "remaining": remaining,
     })
+
+
+# ========== Telemetry ==========
+@app.route("/telemetry")
+@auth.login_required
+def telemetry():
+    """Absolute stage position + the real measured frame rate, for the HUD."""
+    return jsonify({
+        "position": controls.position,
+        "fps": camera.measured_fps,
+        "target_fps": camera.cam_controls["framerate"],
+        "controller_connected": controls.sb is not None,
+    })
+
+
+# ========== Recordings library ==========
+@app.route("/recordings")
+@auth.login_required
+def list_recordings():
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    items = []
+    for name in os.listdir(RECORDINGS_DIR):
+        if not name.lower().endswith(".mp4"):
+            continue
+        path = os.path.join(RECORDINGS_DIR, name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        duration, fps = _probe_recording(path)
+        items.append({
+            "name": name,
+            "duration": duration,
+            "fps": fps,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return jsonify(items)
+
+
+@app.route("/recordings/file/<path:name>")
+@auth.login_required
+def recording_file(name):
+    safe = _safe_recording_name(name)
+    if safe is None:
+        abort(404)
+    # send_from_directory supports HTTP Range, so the preview player can seek.
+    return send_from_directory(RECORDINGS_DIR, safe, conditional=True)
+
+
+@app.route("/recordings/delete", methods=["POST"])
+@auth.login_required
+def delete_recording():
+    name = (request.get_json() or {}).get("name", "")
+    safe = _safe_recording_name(name)
+    if safe is None:
+        return jsonify({"error": "Invalid name"}), 400
+    path = os.path.join(RECORDINGS_DIR, safe)
+    if camera.is_recording and camera.current_recording_filename == os.path.splitext(safe)[0]:
+        return jsonify({"error": "Cannot delete a recording in progress"}), 409
+    try:
+        os.remove(path)
+    except OSError as e:
+        return jsonify({"error": str(e)}), 404
+    with _probe_lock:
+        _probe_cache.pop(safe, None)
+    return jsonify({"message": "deleted"})
+
+
+@app.route("/recordings/rename", methods=["POST"])
+@auth.login_required
+def rename_recording():
+    data = request.get_json() or {}
+    safe = _safe_recording_name(data.get("name", ""))
+    if safe is None:
+        return jsonify({"error": "Invalid name"}), 400
+    raw_new = (data.get("new_name") or "").strip()
+    # Keep it a single safe .mp4 basename.
+    base = re.sub(r"[^A-Za-z0-9 _.\-]", "", os.path.splitext(os.path.basename(raw_new))[0]).strip()
+    if not base:
+        return jsonify({"error": "Empty name"}), 400
+    new_name = base + ".mp4"
+    src = os.path.join(RECORDINGS_DIR, safe)
+    dst = os.path.join(RECORDINGS_DIR, new_name)
+    if not os.path.exists(src):
+        return jsonify({"error": "Not found"}), 404
+    if os.path.exists(dst) and dst != src:
+        return jsonify({"error": "A recording with that name already exists"}), 409
+    try:
+        os.rename(src, dst)
+    except OSError as e:
+        return jsonify({"error": str(e)}), 400
+    with _probe_lock:
+        if safe in _probe_cache:
+            _probe_cache[new_name] = _probe_cache.pop(safe)
+    return jsonify({"name": new_name})
+
+
+# ========== Calibration (px <-> micrometres), persisted to disk ==========
+@app.route("/get_calibration")
+@auth.login_required
+def get_calibration():
+    return jsonify(_load_calibration())
+
+
+@app.route("/set_calibration", methods=["POST"])
+@auth.login_required
+def set_calibration():
+    data = request.get_json() or {}
+    try:
+        px = float(data["pixels"])
+        um = float(data["micrometres"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Need 'pixels' and 'micrometres'"}), 400
+    if px <= 0 or um <= 0:
+        return jsonify({"error": "Values must be positive"}), 400
+    record = {
+        "um_per_px": um / px,
+        "ref_pixels": px,
+        "ref_micrometres": um,
+        "updated": time.time(),
+    }
+    try:
+        with open(CALIBRATION_FILE, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2)
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify(record)
 
 
 # ========== Server ==========

@@ -22,6 +22,18 @@ move_lock = threading.Lock()
 
 steps = {"x": 40, "y": 40, "z": 40}
 
+# Absolute stage position, tracked cumulatively from every relative move (web
+# jog, keyboard jog, autofocus). Useful telemetry now and for closed-loop /
+# automated positioning later. Origin is wherever the stage was at startup.
+position = {"x": 0, "y": 0, "z": 0}
+
+
+def _track_move(displacement):
+    """Add a [dx, dy, dz] displacement to the tracked absolute position."""
+    position["x"] += int(displacement[0])
+    position["y"] += int(displacement[1])
+    position["z"] += int(displacement[2])
+
 
 def build_dir_map():
     """Map screen directions to relative stage moves [x, y, z].
@@ -71,6 +83,7 @@ class SangaboardWrapper:
         displacement = [int(delta.get(axis, 0)) for axis in ("x", "y", "z")]
         with move_lock:
             self._board.move_rel(displacement)
+            _track_move(displacement)
             for axis, d in delta.items():
                 if axis in self._pos:
                     self._pos[axis] += d
@@ -93,6 +106,7 @@ def move_motor(direction):
         return "Sangaboard unavailable", 503
     with move_lock:
         sb.move_rel(dir_map[direction])
+        _track_move(dir_map[direction])
     return "OK", 200
 
 
@@ -146,6 +160,7 @@ def start_keyboard_listener():
         with move_lock:
             if key in key_map_move and sb is not None:
                 sb.move_rel(key_map_move[key])
+                _track_move(key_map_move[key])
             if hasattr(key, "char") and key.char in ("x", "y", "z", "=", "-"):
                 pressed_keys.add(key.char)
             adjusted = False

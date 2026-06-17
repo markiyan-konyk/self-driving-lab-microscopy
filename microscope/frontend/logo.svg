@@ -1,0 +1,31 @@
+<svg class="ml-logo" viewBox="0 0 424 424" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MatterLab logo">
+  <!-- Recreated MatterLab dot-triangle mark. Each dot fades+scales in on load. -->
+  <g class="ml-dots">
+    <circle class="lg-dot" style="animation-delay:0ms"   cx="42"  cy="42"  r="11" fill="#2c7a59"/>
+    <circle class="lg-dot" style="animation-delay:40ms"  cx="110" cy="42"  r="14" fill="#39a072"/>
+    <circle class="lg-dot" style="animation-delay:80ms"  cx="178" cy="42"  r="12" fill="#2f855f"/>
+    <circle class="lg-dot" style="animation-delay:120ms" cx="246" cy="42"  r="15" fill="#42b07e"/>
+    <circle class="lg-dot" style="animation-delay:160ms" cx="314" cy="42"  r="15" fill="#46b884"/>
+    <circle class="lg-dot" style="animation-delay:200ms" cx="382" cy="42"  r="12" fill="#2f855f"/>
+
+    <circle class="lg-dot" style="animation-delay:120ms" cx="110" cy="110" r="11" fill="#2c7a59"/>
+    <circle class="lg-dot" style="animation-delay:160ms" cx="178" cy="110" r="25" fill="#3fc88c"/>
+    <circle class="lg-dot" style="animation-delay:200ms" cx="246" cy="110" r="26" fill="#4cd897"/>
+    <circle class="lg-dot" style="animation-delay:240ms" cx="314" cy="110" r="28" fill="#bff7df"/>
+    <circle class="lg-dot" style="animation-delay:280ms" cx="382" cy="110" r="12" fill="#39a072"/>
+
+    <circle class="lg-dot" style="animation-delay:240ms" cx="178" cy="178" r="10" fill="#2c7a59"/>
+    <circle class="lg-dot" style="animation-delay:280ms" cx="246" cy="178" r="12" fill="#39a072"/>
+    <circle class="lg-dot" style="animation-delay:320ms" cx="314" cy="178" r="23" fill="#4cd897"/>
+    <circle class="lg-dot" style="animation-delay:360ms" cx="382" cy="178" r="12" fill="#39a072"/>
+
+    <circle class="lg-dot" style="animation-delay:360ms" cx="246" cy="246" r="11" fill="#2c7a59"/>
+    <circle class="lg-dot" style="animation-delay:400ms" cx="314" cy="246" r="21" fill="#3fc88c"/>
+    <circle class="lg-dot" style="animation-delay:440ms" cx="382" cy="246" r="12" fill="#39a072"/>
+
+    <circle class="lg-dot" style="animation-delay:480ms" cx="314" cy="314" r="11" fill="#2c7a59"/>
+    <circle class="lg-dot" style="animation-delay:520ms" cx="382" cy="314" r="12" fill="#39a072"/>
+
+    <circle class="lg-dot" style="animation-delay:600ms" cx="382" cy="382" r="11" fill="#2c7a59"/>
+  </g>
+</svg>
