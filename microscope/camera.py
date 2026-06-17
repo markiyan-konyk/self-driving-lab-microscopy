@@ -375,7 +375,21 @@ def start_recording_async(duration_sec, output_path):
         except Exception as e:
             print(f"stop_encoder error: {e}")
 
+    # Rename the file so its name reflects the *actual* length recorded, not
+    # the planned duration (e.g. a 10-minute recording stopped after 3s is
+    # saved as ..._3s.mp4, not ..._600s.mp4).
+    elapsed = max(1, int(round(time.time() - recording_started_at)))
+    saved_path = output_path
+    try:
+        new_path = re.sub(r"_(\d+s|inf)\.mp4$", f"_{elapsed}s.mp4", output_path)
+        if new_path != output_path and os.path.exists(output_path):
+            os.rename(output_path, new_path)
+            saved_path = new_path
+    except OSError as e:
+        print(f"Could not rename recording to actual length: {e}")
+
     is_recording = False
     recording_started_at = None
     recording_duration = None
-    print(f"Recording saved: {output_path}")
+    current_recording_filename = os.path.splitext(os.path.basename(saved_path))[0]
+    print(f"Recording saved: {saved_path}")
