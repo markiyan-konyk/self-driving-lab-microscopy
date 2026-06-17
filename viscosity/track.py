@@ -171,7 +171,10 @@ def _print_progress(done, n, t0, last_count):
 
 def _finalize(all_feats, n):
     """Concatenate per-frame features; flag frames where nothing was detected."""
-    features = pd.concat(all_feats, ignore_index=True)
+    # Drop empty frames before concat -- keeping them is a no-op data-wise but trips a
+    # pandas FutureWarning about concatenating empty/all-NA entries.
+    non_empty = [f for f in all_feats if len(f)]
+    features = pd.concat(non_empty, ignore_index=True) if non_empty else all_feats[0]
     detected = features["frame"].nunique() if len(features) else 0
     empty = n - detected
     if empty:
@@ -234,7 +237,7 @@ def detect(frames, channel, diameter, minmass, invert, percentile="auto",
             done += 1
             if done % 25 == 0 or done == n:
                 _print_progress(done, n, t0, len(f))
-    return pd.concat(all_feats, ignore_index=True)
+    return _finalize(all_feats, n)
 
 
 def link(features, search_range, memory):
