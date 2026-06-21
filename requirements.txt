@@ -42,3 +42,12 @@ sangaboard
 # Physical keyboard jog control on the Pi itself (optional at runtime: the
 # program runs fine without a keyboard/display if this fails to load)
 pynput
+
+# Optical-tweezer galvo: SCPI/VISA control of the Rigol DG1022Z waveform
+# generator. pyvisa-py is the pure-Python backend (no NI-VISA needed); USB
+# instruments also need pyusb. On the Pi you may need a udev rule / the user in
+# a group for USB access. All optional at runtime: with no AWG attached (or
+# GALVO_RESOURCE unset) the laser controls just report "unavailable".
+pyvisa
+pyvisa-py
+pyusb

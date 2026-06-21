@@ -20,10 +20,15 @@ from flask import (
 
 import camera
 import controls
+import tweezer
 import authentification as auth
 
 # ========== Server config ==========
 SERVER_PORT = int(os.environ.get("MICROSCOPE_PORT", 8000))
+
+# Optical-tweezer galvo handle, set by main.connect_galvo() at startup. Stays
+# None when no AWG is attached; the laser routes degrade gracefully.
+galvo = None
 
 _FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
 RECORDINGS_DIR = "recordings"
@@ -164,6 +169,63 @@ def adjust(axis, op):
 def set_step(axis, value):
     body, code = controls.set_step(axis, value)
     return body, code
+
+
+# ========== Optical tweezer (galvo laser) ==========
+# Screen-direction -> (dvx, dvy) in volts, scaled by the current jog size. The
+# galvo axes/signs vs. the screen are unknown until galvo_tests/02_move.py is
+# run -- flip the signs here to match what you observe (same idea as the
+# stage's build_dir_map in controls.py).
+_GALVO_DIR_SIGNS = {
+    "up":    (0.0,  1.0),
+    "down":  (0.0, -1.0),
+    "left":  (-1.0, 0.0),
+    "right": (1.0,  0.0),
+}
+
+
+@app.route("/galvo/status")
+@auth.login_required
+def galvo_status():
+    return jsonify(tweezer.state(controls.position, galvo))
+
+
+@app.route("/galvo/move/<direction>", methods=["POST"])
+@auth.login_required
+def galvo_move(direction):
+    """Jog the laser by one step (clicks, not press-and-hold: a coarse volt
+    nudge on untested mirrors should be deliberate)."""
+    if galvo is None:
+        return jsonify({"error": "Galvo unavailable"}), 503
+    signs = _GALVO_DIR_SIGNS.get(direction)
+    if signs is None:
+        return jsonify({"error": "Unknown direction"}), 404
+    dvx, dvy = signs[0] * tweezer.jog_volts, signs[1] * tweezer.jog_volts
+    with tweezer.galvo_move_lock:
+        galvo.nudge(dvx, dvy)
+    return jsonify(tweezer.state(controls.position, galvo))
+
+
+@app.route("/galvo/zero", methods=["POST"])
+@auth.login_required
+def galvo_zero():
+    """Zero out the tweezers: make the current laser spot the home position."""
+    if galvo is None:
+        return jsonify({"error": "Galvo unavailable"}), 503
+    with tweezer.galvo_move_lock:
+        tweezer.set_home(galvo.vx, galvo.vy)
+    return jsonify(tweezer.state(controls.position, galvo))
+
+
+@app.route("/galvo/set_jog", methods=["POST"])
+@auth.login_required
+def galvo_set_jog():
+    data = request.get_json() or {}
+    try:
+        value = tweezer.set_jog_volts(data["volts"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Need numeric 'volts'"}), 400
+    return jsonify({"jog_volts": value})
 
 
 # ========== Recording settings ==========
@@ -337,6 +399,7 @@ def telemetry():
         "fps": camera.measured_fps,
         "target_fps": camera.cam_controls["framerate"],
         "controller_connected": controls.sb is not None,
+        "laser": tweezer.state(controls.position, galvo),
     })
 
 

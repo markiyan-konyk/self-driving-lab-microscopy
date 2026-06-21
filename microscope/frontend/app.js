@@ -257,6 +257,7 @@
                 $('posY').textContent = d.position.y;
                 $('posZ').textContent = d.position.z;
                 $('fpsVal').textContent = d.fps ? d.fps.toFixed(1) : '—';
+                if (d.laser) updateLaserUI(d.laser);
             } catch (e) {}
         }
         setInterval(pollTelemetry, 1000); pollTelemetry();
@@ -346,6 +347,7 @@
         let tool = null;            // 'calibrate' | 'measure' | 'review' | null
         let points = [];            // native-pixel coords {x,y}
         let frozenCanvas = null;
+        let crosshairOn = false;    // laser-aim crosshair at image centre
 
         function contentRect() {
             const w = overlay.width, h = overlay.height;
@@ -399,6 +401,18 @@
                 octx.beginPath(); octx.moveTo(pts[0].x, pts[0].y); octx.lineTo(pts[1].x, pts[1].y); octx.stroke();
             }
         }
+        function drawCrosshair(rect) {
+            // Centre of the native image, where the operator aims the laser to zero it.
+            const c = toDisp(rect, { x: NATIVE_W / 2, y: NATIVE_H / 2 });
+            octx.save();
+            octx.strokeStyle = 'rgba(248,113,113,.9)'; octx.lineWidth = 1.5;
+            octx.beginPath();
+            octx.moveTo(rect.ox, c.y); octx.lineTo(rect.ox + rect.cw, c.y);
+            octx.moveTo(c.x, rect.oy); octx.lineTo(c.x, rect.oy + rect.ch);
+            octx.stroke();
+            octx.beginPath(); octx.arc(c.x, c.y, 9, 0, 7); octx.stroke();
+            octx.restore();
+        }
         function drawOverlay() {
             octx.clearRect(0, 0, overlay.width, overlay.height);
             const rect = contentRect();
@@ -408,6 +422,7 @@
                 octx.fillRect(rect.ox, rect.oy, rect.cw, rect.ch);
             }
             if (calibration.um_per_px) drawScaleBar(rect);
+            if (crosshairOn) drawCrosshair(rect);
             if (points.length) drawMeasure(rect);
         }
 
@@ -512,6 +527,74 @@
         streamImg.addEventListener('load', resizeOverlay);
         loadCalibration();
         resizeOverlay();
+
+        // ============================================================
+        //  Optical tweezer (galvo laser)
+        // ============================================================
+        const tweezerSection = document.querySelector('.tweezer-section');
+        const twStatus = $('twStatus'), twReadout = $('twReadout'), galvoStep = $('galvoStep');
+        let laserConnected = false;
+
+        function fmtPt(p) { return p ? `${Math.round(p.x)}, ${Math.round(p.y)}` : '—'; }
+        function updateLaserUI(laser) {
+            laserConnected = !!laser.connected;
+            $('laserVx').textContent = laser.vx == null ? '—' : laser.vx.toFixed(3);
+            $('laserVy').textContent = laser.vy == null ? '—' : laser.vy.toFixed(3);
+            tweezerSection.classList.toggle('disabled', !laserConnected);
+            if (laserConnected) {
+                twStatus.textContent = 'Tweezer online';
+                twStatus.className = 'tweezer-status on';
+                twReadout.textContent = `spot ${fmtPt(laser.image_px)} px · global `
+                    + `${laser.global_um ? laser.global_um.x + ', ' + laser.global_um.y + ' µm' : '—'}`;
+            } else {
+                twStatus.textContent = 'Tweezer offline';
+                twStatus.className = 'tweezer-status off';
+                twReadout.textContent = '—';
+            }
+        }
+
+        // Collapsible
+        const twToggle = $('twToggle'), twBody = $('twBody');
+        twToggle.addEventListener('click', () => {
+            const collapsed = twBody.classList.toggle('collapsed');
+            twToggle.setAttribute('aria-expanded', String(!collapsed));
+        });
+
+        // Crosshair toggle (purely visual aiming aid)
+        $('crosshairBtn').addEventListener('click', () => {
+            crosshairOn = !crosshairOn;
+            $('crosshairBtn').classList.toggle('active', crosshairOn);
+            drawOverlay();
+        });
+
+        // Laser jog: click = one step (deliberate, not press-and-hold, for
+        // untested mirrors). Response carries the fresh laser state.
+        document.querySelectorAll('[data-galvo]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!laserConnected) { msg('Tweezer offline'); return; }
+                try {
+                    const d = await (await request('/galvo/move/' + btn.dataset.galvo, { method: 'POST' })).json();
+                    updateLaserUI(d); msg('');
+                } catch (e) { msg(e.message); }
+            });
+        });
+
+        // Zero out tweezers: current spot becomes home.
+        $('zeroTweezerBtn').addEventListener('click', async () => {
+            if (!laserConnected) { msg('Tweezer offline'); return; }
+            try {
+                const d = await (await request('/galvo/zero', { method: 'POST' })).json();
+                updateLaserUI(d); msg('Tweezers zeroed at current spot.');
+            } catch (e) { msg('Zero failed: ' + e.message); }
+        });
+
+        // Jog step size (volts)
+        galvoStep.addEventListener('change', async () => {
+            const v = Math.max(0.0001, parseFloat(galvoStep.value || '0.05'));
+            galvoStep.value = v;
+            try { await postJSON('/galvo/set_jog', { volts: v }); }
+            catch (e) { msg(e.message); }
+        });
 
         // ============================================================
         //  Mobile mode

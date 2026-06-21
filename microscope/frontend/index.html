@@ -52,6 +52,8 @@ __STYLE__
                     <div class="hud-item"><span>Y</span><b id="posY">—</b></div>
                     <div class="hud-item"><span>Z</span><b id="posZ">—</b></div>
                     <div class="hud-item fps"><span>FPS</span><b id="fpsVal">—</b></div>
+                    <div class="hud-item laser"><span>Vx</span><b id="laserVx">—</b></div>
+                    <div class="hud-item"><span>Vy</span><b id="laserVy">—</b></div>
                 </div>
                 <div class="tool-banner" id="toolBanner"></div>
             </div>
@@ -81,6 +83,32 @@ __STYLE__
                 <div class="z-grid">
                     <button class="hold" data-move="page_up">Focus +</button>
                     <button class="hold" data-move="page_down">Focus −</button>
+                </div>
+            </section>
+
+            <!-- Optical tweezer (galvo laser) -->
+            <section class="tweezer-section collapsible">
+                <button class="section-toggle" id="twToggle" aria-expanded="true">
+                    <span>Optical Tweezer</span><span class="chevron">⌄</span>
+                </button>
+                <div class="collapsible-body" id="twBody">
+                    <div class="tweezer-status" id="twStatus">Tweezer offline</div>
+                    <div class="jog tweezer-jog" id="twJog">
+                        <button class="hold" data-galvo="up">↑</button>
+                        <button class="hold" data-galvo="left">←</button>
+                        <button class="hold" data-galvo="down">↓</button>
+                        <button class="hold" data-galvo="right">→</button>
+                    </div>
+                    <div class="step-row">
+                        <span class="step-axis">Step</span>
+                        <input type="number" class="step-box" id="galvoStep" min="0.001" step="0.01" value="0.05">
+                        <span class="ctrl-unit">V</span>
+                    </div>
+                    <div class="action-row">
+                        <button id="crosshairBtn" class="action-btn">✛ Crosshair</button>
+                        <button id="zeroTweezerBtn" class="action-btn">🎯 Zero Tweezers</button>
+                    </div>
+                    <div class="measure-readout" id="twReadout">—</div>
                 </div>
             </section>
 

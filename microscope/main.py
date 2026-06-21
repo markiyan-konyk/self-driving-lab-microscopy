@@ -12,6 +12,7 @@ Module layout:
     frontend/            index.html, style.css, app.js, login.html
 """
 
+import os
 import threading
 
 from sangaboard import Sangaboard
@@ -19,6 +20,25 @@ from sangaboard import Sangaboard
 import camera
 import controls
 import client
+
+
+def connect_galvo():
+    """Open the optical-tweezer galvo (Rigol DG1022Z) if a resource is given.
+
+    The address comes from the GALVO_RESOURCE env var (find it with
+    galvosetup.py). Failure is non-fatal: the app runs fine with no AWG
+    attached -- the laser controls just report 'unavailable'.
+    """
+    resource = os.environ.get("GALVO_RESOURCE")
+    if not resource:
+        print("GALVO_RESOURCE not set; optical tweezer disabled.")
+        return None
+    try:
+        import galvo
+        return galvo.Galvo(resource)
+    except Exception as e:
+        print(f"Galvo unavailable: {e}")
+        return None
 
 
 def main():
@@ -41,6 +61,8 @@ def main():
 
     display_thread = threading.Thread(target=camera.display_worker, daemon=True)
     display_thread.start()
+
+    client.galvo = connect_galvo()
 
     try:
         with Sangaboard() as board:

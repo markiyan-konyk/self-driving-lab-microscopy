@@ -199,6 +199,22 @@ button:active, button.active { background: var(--accent-bright); border-color: v
 .z-grid button { min-height: 50px; font-size: 15px; }
 .hold.active, .hold:active { background: var(--accent-bright); border-color: var(--accent-bright); color: #07140f; }
 
+/* Optical tweezer */
+.tweezer-jog { grid-template-rows: repeat(2, 48px); }
+.tweezer-jog [data-galvo=up] { grid-column: 2; grid-row: 1; }
+.tweezer-jog [data-galvo=left] { grid-column: 1; grid-row: 2; }
+.tweezer-jog [data-galvo=down] { grid-column: 2; grid-row: 2; }
+.tweezer-jog [data-galvo=right] { grid-column: 3; grid-row: 2; }
+.tweezer-jog button { font-size: 20px; }
+.tweezer-section .step-row { grid-template-columns: 48px 1fr 22px; }
+.tweezer-status { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.tweezer-status.on { color: var(--accent-bright); }
+.tweezer-status.off { color: #fca5a5; }
+.tweezer-section.disabled .tweezer-jog button,
+.tweezer-section.disabled #zeroTweezerBtn { opacity: .45; cursor: not-allowed; }
+.hud-item.laser { margin-top: 3px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,.08); }
+.hud-item.laser b, #laserVy { color: #fca5a5; }
+
 /* Step size */
 .step-section { display: flex; flex-direction: column; gap: 8px; }
 .step-row { display: grid; grid-template-columns: 26px 38px 1fr 38px; align-items: center; gap: 8px; }
