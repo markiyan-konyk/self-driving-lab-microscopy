@@ -1,0 +1,7 @@
+# Start or stop a recording.
+bool start            # true => start, false => stop
+float32 duration_s    # used when start; <= 0 means "record until stopped"
+---
+bool success
+string filename
+string message

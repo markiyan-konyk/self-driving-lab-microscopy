@@ -1,0 +1,6 @@
+# Zero out the tweezers: make the laser's current command volts its home
+# (the operator aims the spot at image centre first). No request fields.
+---
+bool success
+float32 home_vx
+float32 home_vy

@@ -14,6 +14,39 @@ if _MICROSCOPE_DIR not in sys.path:
     sys.path.insert(0, _MICROSCOPE_DIR)
 
 
+def _prefer_libusb1_backend():
+    """Pin pyusb/pyvisa-py to the bundled libusb-1.0 backend (Windows).
+
+    Without this, pyusb can't find ``libusb-1.0.dll`` on the search path and
+    silently falls back to the libusb-win32 (libusb0) backend, whose USBTMC
+    control transfers fail with "a device attached to the system is not
+    functioning". We pin the DLL bundled by ``libusb-package`` so the device
+    (bound to libusbK/WinUSB via Zadig) is driven through libusb-1.0 instead.
+    No-op if those packages aren't installed (e.g. when NI-VISA is used).
+    """
+    try:
+        import libusb_package
+        import usb.core
+    except Exception:
+        return
+    backend = libusb_package.get_libusb1_backend()
+    if backend is None:
+        return
+    orig_find = usb.core.find
+    if getattr(orig_find, "_galvo_pinned", False):
+        return
+
+    def find(*args, **kwargs):
+        kwargs.setdefault("backend", backend)
+        return orig_find(*args, **kwargs)
+
+    find._galvo_pinned = True
+    usb.core.find = find
+
+
+_prefer_libusb1_backend()
+
+
 def resolve_resource(verbose=True):
     """Return the VISA resource string for the galvo's AWG.
 

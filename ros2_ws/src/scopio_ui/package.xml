@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>scopio_ui</name>
+  <version>0.1.0</version>
+  <description>
+    Web UI gateway for SCOPIO. A pure ROS 2 *client* node: it owns no hardware,
+    it subscribes to the driver nodes' topics and calls their services/actions,
+    and re-serves that to a browser over HTTP (telemetry + MJPEG + controls).
+    This is how the human UI and the external decision computer coexist on the
+    same ROS graph.
+  </description>
+  <maintainer email="mark.konyk@gmail.com">Mark Konyk</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>scopio_interfaces</exec_depend>
+  <exec_depend>scopio_microscope</exec_depend>
+  <!-- flask is a pip dependency (installed in the Docker image), not a ROS pkg -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

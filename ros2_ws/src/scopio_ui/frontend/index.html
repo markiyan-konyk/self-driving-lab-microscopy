@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SCOPIO — ROS Gateway</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; --bg:#0c1311; --panel:#121d19; --line:#25332c;
+          --text:#eaf2ee; --muted:#8fa69b; --accent:#34d399; --accent-b:#6ee7b7;
+          --rec:#ef4444; font-family:"Inter",system-ui,sans-serif; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:14px; padding:14px; height:100vh; }
+  h1 { font-size:16px; letter-spacing:3px; margin:0 0 10px; }
+  h1 b { background:linear-gradient(90deg,var(--accent-b),var(--accent));
+         -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .video { position:relative; background:#000; border-radius:10px; overflow:hidden;
+           display:flex; align-items:center; justify-content:center; }
+  .video img { width:100%; height:100%; object-fit:contain; }
+  .hud { position:absolute; top:10px; left:10px; padding:8px 10px; border-radius:8px;
+         background:rgba(10,18,15,.72); border:1px solid rgba(52,211,153,.25);
+         font-family:ui-monospace,monospace; font-size:12px; line-height:1.5; }
+  .hud span { color:var(--muted); } .hud b { color:var(--text); }
+  .panel { display:flex; flex-direction:column; gap:12px; overflow:auto;
+           background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .title { color:var(--accent-b); font-size:11px; font-weight:800; letter-spacing:2px;
+           text-transform:uppercase; margin:4px 0; }
+  button { border:1px solid var(--line); border-radius:9px; background:#18241f; color:var(--text);
+           font:inherit; font-weight:600; padding:10px; cursor:pointer; }
+  button:hover { background:#20302a; } button.on { background:var(--accent); color:#06140e; border-color:var(--accent); }
+  .row { display:flex; gap:8px; } .row button { flex:1; }
+  .jog { display:grid; grid-template-columns:repeat(3,1fr); grid-template-rows:repeat(2,44px); gap:6px; }
+  .jog [data-d=up]{grid-column:2;grid-row:1;} .jog [data-d=left]{grid-column:1;grid-row:2;}
+  .jog [data-d=down]{grid-column:2;grid-row:2;} .jog [data-d=right]{grid-column:3;grid-row:2;}
+  .rec.on { background:var(--rec); border-color:var(--rec); color:#fff; }
+  .msg { min-height:16px; color:var(--accent-b); font-size:12px; }
+  .status { font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+  <div class="video">
+    <img src="/video_feed" alt="camera">
+    <div class="hud" id="hud">connecting…</div>
+  </div>
+  <div class="panel">
+    <h1><b>SCOPIO</b> · ROS Gateway</h1>
+    <div class="status" id="status">—</div>
+
+    <div class="title">Tracker</div>
+    <button id="trackerBtn">Start tracking</button>
+
+    <div class="title">Recording</div>
+    <button id="recBtn" class="rec">Record</button>
+
+    <div class="title">Optical tweezer</div>
+    <div class="jog">
+      <button data-d="up">↑</button><button data-d="left">←</button>
+      <button data-d="down">↓</button><button data-d="right">→</button>
+    </div>
+    <button id="zeroBtn">🎯 Zero tweezers</button>
+    <button id="circleBtn">◯ Run circle (5s)</button>
+
+    <div class="msg" id="msg"></div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

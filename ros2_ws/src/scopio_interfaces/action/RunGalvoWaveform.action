@@ -1,0 +1,17 @@
+# Program the AWG to GENERATE a prolonged galvo waveform (one long command),
+# run it for `duration_s`, then return the mirrors to DC home. This is the
+# template for optical-trap "functions" driven from an external computer.
+string shape          # "sine" | "ramp" | "lissajous" | "circle" | "dc"
+float32 x_freq_hz
+float32 y_freq_hz
+float32 amplitude_vpp
+float32 x_phase_deg
+float32 y_phase_deg
+float32 duration_s    # 0 => run until canceled
+---
+# Result
+bool success
+string message
+---
+# Feedback
+float32 elapsed_s

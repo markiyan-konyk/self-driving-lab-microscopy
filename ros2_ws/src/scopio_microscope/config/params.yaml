@@ -1,0 +1,41 @@
+# SCOPIO node parameters. Loaded by microscope.launch.py.
+# Topic/namespace: everything lives under /scopio.
+
+/scopio/camera_node:
+  ros__parameters:
+    width: 640
+    height: 480
+    framerate: 30.0
+    publish_fps: 15.0        # rate of the compressed image topic
+    jpeg_quality: 70
+    recordings_dir: "recordings"
+
+/scopio/stage_node:
+  ros__parameters:
+    publish_rate: 5.0        # Hz, StagePosition
+    step_x: 40               # default jog/grid step (steps)
+    step_y: 40
+    step_z: 40
+
+/scopio/galvo_node:
+  ros__parameters:
+    # VISA resource of the DG1022Z. Empty => disabled (node still runs, reports
+    # connected=false). Overridden by the GALVO_RESOURCE env var if set.
+    resource: ""
+    publish_rate: 10.0       # Hz, LaserState
+    jog_volts: 0.05
+
+/scopio/tracker_node:
+  ros__parameters:
+    active_on_start: false   # tracking is on-demand (service-toggled)
+    # trackpy parameters -- kept in sync with viscosity/track.py DEFAULTS.
+    diameter: 11
+    minmass: 800.0
+    channel: 1               # 0=B 1=G 2=R
+    invert: false
+    percentile: 64.0         # fixed percentile for the live loop (no auto)
+    search_range: 5.0
+    memory: 3
+    roi_size: 31             # px crop per bead in track mode
+    acquire_every_n: 30      # full-frame re-acquisition cadence (frames)
+    clump_size_factor: 1.6   # size > factor*median => flagged as a clump

@@ -1,0 +1,40 @@
+# SCOPIO microscope node, all-in-one container.
+#
+#   cd ros2_ws
+#   GALVO_RESOURCE="USB0::0x1AB1::..." docker compose up --build
+#
+# Notes:
+#  * network_mode: host  -> the DDS graph is shared with any other ROS 2 node on
+#    the LAN (the external decision computer is just another node, no bespoke
+#    protocol). It also makes Foxglove/discovery trivial.
+#  * privileged + /run/udev -> camera (libcamera), USB galvo and serial stage are
+#    all reachable. For least-privilege, drop `privileged` and pass explicit
+#    `devices:` instead (see commented block).
+services:
+  scopio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: scopio-microscope:jazzy
+    container_name: scopio
+    network_mode: host
+    privileged: true
+    ipc: host
+    volumes:
+      - ..:/workspace                # repo root: microscope/, viscosity/, recordings/
+      - /run/udev:/run/udev:ro
+    environment:
+      - SCOPIO_REPO=/workspace
+      - GALVO_RESOURCE=${GALVO_RESOURCE:-}
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    working_dir: /workspace
+    # Full bring-up: 4 driver nodes + the web UI gateway (http://<pi>:8080).
+    command: ros2 launch scopio_ui scopio.launch.py
+    # Least-privilege alternative to `privileged: true` (uncomment and remove
+    # privileged once you've confirmed which nodes your rig needs):
+    # devices:
+    #   - /dev/dma_heap:/dev/dma_heap
+    #   - /dev/vchiq:/dev/vchiq
+    #   - /dev/video0:/dev/video0
+    #   - /dev/ttyACM0:/dev/ttyACM0   # Sangaboard
+    #   - /dev/bus/usb:/dev/bus/usb   # DG1022Z (USBTMC)

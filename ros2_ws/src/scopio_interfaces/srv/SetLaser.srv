@@ -1,0 +1,10 @@
+# Point the laser by commanding galvo volts. Used by an external computer to
+# steer the trap. For prolonged motion use the RunGalvoWaveform action instead.
+float32 vx          # volts (absolute, or delta if relative=true)
+float32 vy
+bool relative       # true => nudge by (vx, vy); false => absolute command
+---
+bool success
+float32 vx          # resulting commanded volts (after clamping)
+float32 vy
+string message

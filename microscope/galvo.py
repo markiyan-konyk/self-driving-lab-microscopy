@@ -13,16 +13,42 @@ lives in ``tweezer.py``.
 
 import pyvisa
 
-# Safe commanded-voltage envelope for the galvo driver. These are deliberately
-# conservative until galvo_tests/03_precision.py establishes the real
-# mechanical range -- clamping here protects untested mirrors from a bad
-# command. Widen once the hardware limits are known.
+# ABSOLUTE hardware ceiling: the galvo driver tolerates +/-15 V bipolar on its
+# command input. The DG1022Z can swing to ~+/-10 V (High-Z, up to 20 Vpp), so
+# this is the "never exceed, or you cook the mirrors" backstop. Nothing in this
+# module is allowed to command an instantaneous voltage outside +/-V_LIMIT.
+V_LIMIT = 15.0
+
+# Conservative *working* envelope for normal pointing/amplitudes. Deliberately
+# tighter than V_LIMIT until galvo_tests/03_precision.py establishes the real
+# mechanical range. Widen toward V_LIMIT once the hardware limits are known --
+# it can never be widened past V_LIMIT (clamp() enforces that).
 V_MIN, V_MAX = -5.0, 5.0
 
 
 def clamp(v, lo=V_MIN, hi=V_MAX):
-    """Clamp a commanded voltage into the safe envelope."""
+    """Clamp a commanded voltage into the working envelope, never exceeding the
+    absolute +/-V_LIMIT hardware ceiling even if lo/hi are widened."""
+    lo = max(lo, -V_LIMIT)
+    hi = min(hi, V_LIMIT)
     return max(lo, min(hi, float(v)))
+
+
+def clamp_sine(amplitude_vpp, offset_v, lo=V_MIN, hi=V_MAX):
+    """Clamp a sine's (amplitude_vpp, offset) so the *instantaneous* voltage
+    -- which peaks at ``offset +/- amplitude_vpp/2`` -- stays within [lo, hi]
+    and inside the absolute +/-V_LIMIT ceiling. Returns the safe (amp, offset).
+
+    This is the gap that a bare offset-clamp misses: a small/zero offset with a
+    huge amplitude would still drive the mirror past its limit on the peaks.
+    """
+    lo = max(lo, -V_LIMIT)
+    hi = min(hi, V_LIMIT)
+    offset_v = max(lo, min(hi, float(offset_v)))
+    amp = max(0.0, float(amplitude_vpp))
+    # Peak excursion above/below the offset is amp/2; cap it to the nearer rail.
+    headroom_vpp = 2.0 * min(hi - offset_v, offset_v - lo)
+    return min(amp, headroom_vpp), offset_v
 
 
 class Galvo:
@@ -75,14 +101,41 @@ class Galvo:
     # ------------------------------------------------------------------ #
     #  Prolonged waveforms (one long command -> the AWG generates motion)
     # ------------------------------------------------------------------ #
-    def apply_sine(self, channel, freq_hz, amplitude_vpp, offset_v=0.0):
+    def apply_sine(self, channel, freq_hz, amplitude_vpp, offset_v=0.0,
+                   phase_deg=0.0):
         """Drive one axis with a continuous sine. Used for circles/Lissajous
-        and as the template for Phase-2 'functions'. Offset is clamped; keep
-        amplitude within the driver's safe range."""
-        offset_v = clamp(offset_v)
+        and as the template for Phase-2 'functions'.
+
+        BOTH amplitude and offset are clamped together (see ``clamp_sine``) so
+        the instantaneous peak can never exceed the galvo's voltage limit.
+
+        ``phase_deg`` sets the start phase. For a circle, drive both axes at the
+        same freq/amp with CH1 at 0 deg and CH2 at 90 deg, then call
+        ``sync_phase()`` so the offset actually holds between the channels.
+        """
+        amplitude_vpp, offset_v = clamp_sine(amplitude_vpp, offset_v)
         self.awg.write(
             f":SOURce{channel}:APPLy:SINusoid {freq_hz},{amplitude_vpp},{offset_v}"
         )
+        # APPLy resets phase to 0, so set it afterwards.
+        self.awg.write(f":SOURce{channel}:PHASe {float(phase_deg)}")
+
+    def apply_ramp(self, channel, freq_hz, amplitude_vpp, offset_v=0.0,
+                   symmetry_pct=100.0):
+        """Drive one axis with a ramp/sawtooth. With a ramp on X and a sine on
+        Y you trace an actual sine *curve* on the screen. ``symmetry_pct`` is
+        100 for a rising sawtooth (fast flyback), 50 for a triangle."""
+        amplitude_vpp, offset_v = clamp_sine(amplitude_vpp, offset_v)
+        self.awg.write(
+            f":SOURce{channel}:APPLy:RAMP {freq_hz},{amplitude_vpp},{offset_v}"
+        )
+        self.awg.write(f":SOURce{channel}:FUNCtion:RAMP:SYMMetry {float(symmetry_pct)}")
+
+    def sync_phase(self):
+        """Re-align CH1/CH2 start phases so a programmed phase offset (e.g. the
+        90 deg that turns two equal sines into a circle) actually holds. The
+        two channels otherwise free-run independently."""
+        self.awg.write(":SOURce1:PHASe:SYNChronize")
 
     def apply_dc(self, channel, offset_v):
         """Put one channel in DC mode at a given offset."""
