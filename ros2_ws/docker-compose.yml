@@ -1,11 +1,16 @@
-# SCOPIO microscope node, all-in-one container.
+# SCOPIO ROS 2 BACKEND (hardware driver nodes only -- NO UI).
 #
 #   cd ros2_ws
 #   GALVO_RESOURCE="USB0::0x1AB1::..." docker compose up --build
 #
+# This brings up the sensor/effectuator graph (camera, stage, galvo, tracker,
+# calibration) under /scopio. The UI is a SEPARATE application (../ui), started
+# independently -- on this machine or another one on the LAN -- so the backend
+# stays a clean, headless, "sacred" ROS service.
+#
 # Notes:
 #  * network_mode: host  -> the DDS graph is shared with any other ROS 2 node on
-#    the LAN (the external decision computer is just another node, no bespoke
+#    the LAN (the UI and any external program are just more nodes, no bespoke
 #    protocol). It also makes Foxglove/discovery trivial.
 #  * privileged + /run/udev -> camera (libcamera), USB galvo and serial stage are
 #    all reachable. For least-privilege, drop `privileged` and pass explicit
@@ -28,8 +33,9 @@ services:
       - GALVO_RESOURCE=${GALVO_RESOURCE:-}
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
     working_dir: /workspace
-    # Full bring-up: 4 driver nodes + the web UI gateway (http://<pi>:8080).
-    command: ros2 launch scopio_ui scopio.launch.py
+    # Backend bring-up: driver nodes only (camera, stage, galvo, tracker,
+    # calibration). The UI lives in ../ui and is run separately.
+    command: ros2 launch scopio_microscope microscope.launch.py
     # Least-privilege alternative to `privileged: true` (uncomment and remove
     # privileged once you've confirmed which nodes your rig needs):
     # devices:

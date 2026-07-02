@@ -59,10 +59,11 @@ In a second terminal, run the smoke test **inside the container**:
 docker compose exec scopio bash -lc "source /entrypoint.sh true; bash /workspace/ros2_ws/scripts/smoke_test.sh"
 ```
 
-- [ ] All five nodes present: `camera_node stage_node galvo_node tracker_node ui_gateway`.
+- [ ] All five backend nodes present: `calibration_node camera_node stage_node
+      galvo_node tracker_node`. (The UI is a separate app — not a node here.)
 - [ ] Topics listed under `/scopio/...`.
-- [ ] `stage/position`, `laser/state`, `recording/status` are *publishing*
-      (they publish even with no hardware).
+- [ ] `stage/position`, `camera/state`, `awg/status`, `calibration` are
+      *publishing* (they publish even with no hardware).
 
 If a node is **MISSING**, it crashed — `docker compose logs` shows the traceback.
 Fix that before going on.
@@ -70,9 +71,10 @@ Fix that before going on.
 ## 3. Camera 🖥️
 
 - [ ] `ros2 topic hz /scopio/image/compressed` shows ~15 Hz.
-- [ ] Open the UI: 💻 browse to `http://<pi-ip>:8080` — you should see live video.
-- [ ] (Optional) `ros2 topic echo /scopio/recording/status` then start/stop a
-      recording from the UI; confirm an `.mp4` appears in `recordings/`.
+- [ ] Start the UI app (separate): `cd ../ui && docker compose up`, then browse
+      to `http://<pi-ip>:8080` — you should see live video.
+- [ ] (Optional) start/stop a recording from the UI; confirm an `.mp4` appears in
+      `ui/recordings/` on whatever machine runs the UI.
 
 If video is black: the camera node logged a warning — revisit the Camera caveat.
 
@@ -87,14 +89,17 @@ ros2 action send_goal /scopio/stage/move_path scopio_interfaces/action/MoveStage
 
 ## 5. Galvo / laser 🖥️ (uncalibrated is fine)
 
-- [ ] `ros2 topic echo /scopio/laser/state` shows `connected: true`.
-- [ ] Point it: `ros2 service call /scopio/laser/set scopio_interfaces/srv/SetLaser "{vx: 0.2, vy: 0.0, relative: false}"`.
-- [ ] Zero it (aim at image centre first): `ros2 service call /scopio/tweezers/zero scopio_interfaces/srv/ZeroTweezers "{}"`.
-- [ ] Run a waveform (scope or laser): 
+- [ ] `ros2 topic echo /scopio/awg/status` shows `connected: true`.
+- [ ] Point it (raw SCPI — the node is instrument-agnostic):
+      `ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite "{command: ':SOURce1:VOLTage:OFFSet 0.25'}"`.
+- [ ] Output on/off: `ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite "{command: ':OUTPut1 ON'}"`.
+- [ ] Run a waveform — same passthrough, a different SCPI string, e.g.
 ```bash
-ros2 action send_goal /scopio/galvo/run_waveform scopio_interfaces/action/RunGalvoWaveform \
-  "{shape: 'circle', x_freq_hz: 2.0, y_freq_hz: 2.0, amplitude_vpp: 1.0, y_phase_deg: 90.0, duration_s: 5.0}"
+ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite \
+  "{command: ':SOURce1:APPLy:SINusoid 2,1.0,0'}"
 ```
+      (Geometry/waveform meaning lives in client code, e.g. `GalvoClient` in
+      `../ui/galvo_geometry.py`.)
 
 ## 6. Tracker (the real-time question) 🖥️
 

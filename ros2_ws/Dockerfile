@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Python deps for tracking + hardware drivers. --break-system-packages because
 # Noble's Python is PEP-668 "externally managed"; fine inside a container.
+# NOTE: no Flask here -- this image is the headless BACKEND. The web UI is a
+# separate app (../ui) with its own image.
 RUN pip3 install --no-cache-dir --break-system-packages \
         trackpy \
         pandas \
@@ -35,8 +37,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
         pyvisa-py \
         pyusb \
         libusb-package \
-        sangaboard \
-        flask
+        sangaboard
 
 # Build the workspace (interfaces + nodes) into the image.
 WORKDIR /ros2_ws
@@ -51,4 +52,4 @@ ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["ros2", "launch", "scopio_ui", "scopio.launch.py"]
+CMD ["ros2", "launch", "scopio_microscope", "microscope.launch.py"]

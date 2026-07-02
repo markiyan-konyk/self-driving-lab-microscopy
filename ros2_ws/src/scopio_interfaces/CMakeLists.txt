@@ -30,6 +30,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # ---- Actions ----
   "action/MoveStagePath.action"
   "action/ScanRegion.action"
+  "action/Autofocus.action"
   DEPENDENCIES std_msgs
 )
 

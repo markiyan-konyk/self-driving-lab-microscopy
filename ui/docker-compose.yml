@@ -1,0 +1,29 @@
+# SCOPIO Web UI - standalone ROS 2 client.
+#
+#   cd ui
+#   docker compose up --build          # -> http://localhost:8080
+#
+# This is SEPARATE from the backend (../ros2_ws). Start the backend first (on the
+# Pi or anywhere), then start this. It finds the backend automatically over DDS
+# as long as both share the LAN and ROS_DOMAIN_ID.
+#
+#  * network_mode: host  -> join the same DDS graph as the backend nodes.
+#  * recordings are written to ./recordings on THIS machine (the UI host).
+#  * To run the UI on a DIFFERENT machine than the Pi, just run this there; set
+#    ROS_DOMAIN_ID to match the backend.
+services:
+  scopio-ui:
+    build:
+      context: ..                       # repo root (needs ros2_ws/src/scopio_interfaces)
+      dockerfile: ui/Dockerfile
+    image: scopio-ui:jazzy
+    container_name: scopio-ui
+    network_mode: host
+    ipc: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - SCOPIO_UI_PORT=${SCOPIO_UI_PORT:-8080}
+      - SCOPIO_UI_PASSWORD=${SCOPIO_UI_PASSWORD:-password}
+    volumes:
+      - ./recordings:/ui/recordings     # footage persists on the UI host

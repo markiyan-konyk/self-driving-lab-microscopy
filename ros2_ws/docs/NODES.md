@@ -4,11 +4,15 @@ All nodes run under the `/scopio` namespace and **degrade gracefully**: if their
 hardware is absent they still start and report `connected = false`, so the graph
 always comes up. See `INTERFACES.md` for the frozen field-level contract.
 
-Bring everything up:
+Bring the **backend** up (drivers only — the UI is a separate app, see below):
 ```bash
-ros2 launch scopio_ui scopio.launch.py        # drivers + the web UI gateway
-ros2 launch scopio_microscope microscope.launch.py   # drivers only (no UI)
+ros2 launch scopio_microscope microscope.launch.py
 ```
+
+The **web UI is a separate application** at repo-root `../ui` (a standalone ROS
+client, not a workspace package). Start it independently — on the Pi or another
+machine — once the backend is up: `cd ../ui && docker compose up` (or
+`python3 run_ui.py`). See `../ui/README.md`.
 
 To connect from your own program, you only need ROS 2 sourced and the same
 `ROS_DOMAIN_ID` (default 0) on the same network — discovery is automatic.
@@ -17,10 +21,14 @@ To connect from your own program, you only need ROS 2 sourced and the same
 
 ## camera_node — owns the Pi camera (picamera2)
 Pure sensor + control surface. **It does not record** (recording is a client
-job — see `ui_gateway`).
+job — the `../ui` app saves the stream to its own folder).
 
 - **Publishes:** `image/compressed` (JPEG), `camera/state` (settings + real fps).
-- **Services:** `camera/set_controls`, `camera/set_framerate`, `camera/white_balance`.
+- **Services:** `camera/set_controls`, `camera/set_framerate`, `camera/white_balance`
+  (one-shot hardware auto-white-balance).
+- **Actions:** `camera/autofocus` — sweeps Z (via the `stage/jog` service),
+  measures sharpness on its own frames, parks at the sharpest Z. Available to any
+  client, not just the UI.
 - **Params:** `width`, `height`, `framerate`, `publish_fps`, `jpeg_quality`.
 - One frame-rate knob: setting fps auto-derives exposure + analogue gain to hold
   brightness (the "exposure budget"), so high fps no longer goes dark.
@@ -89,17 +97,22 @@ Subscribes to `image/compressed`, runs trackpy, publishes `beads`. Off by
 default. (Kept in the contract; the standalone tracking *application* is a later
 project — for now the monolith UI is the debugging tool for tracking.)
 
-## ui_gateway — the web UI, as a ROS client (owns no hardware)
-Subscribes to the topics above, calls the services, and serves the rich SCOPIO
-frontend (read from `microscope/frontend/`) so the browser UI behaves as before.
-Two things it does itself, **on whatever machine runs it**:
+## The web UI — a SEPARATE app (`../ui`), not a node in this workspace
+The UI lives at repo-root `../ui` as a standalone ROS client (owns no hardware).
+It subscribes to the topics above, calls the services, and serves the SCOPIO
+frontend so the browser UI behaves as before. Two things it does itself, **on
+whatever machine runs it**:
 - **Recording:** saves the subscribed stream to mp4 in its *own* local
-  `recordings/` folder (the Pi never records).
+  `ui/recordings/` folder (the Pi never records).
 - **Galvo geometry:** turns UI jogs into SCPI via `GalvoClient` → `awg/write`.
 
 ```bash
-ros2 run scopio_ui ui_gateway          # then open http://<host>:8080
+cd ../ui && docker compose up          # then open http://<host>:8080
+#   or, natively:  python3 run_ui.py
 ```
+It is intentionally outside this backend workspace so it can run on a different
+machine and so the backend stays a clean, headless ROS service. See
+`../ui/README.md`.
 
 ### Minimal Python client (template for any external program)
 ```python

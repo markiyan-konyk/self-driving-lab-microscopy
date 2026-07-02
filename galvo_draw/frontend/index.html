@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Galvo Draw — laser vector display</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+  body { margin: 0; background: #0c1311; color: #eaf2ee; display: flex; gap: 18px; padding: 18px; }
+  h1 { font-size: 17px; margin: 0 0 2px; letter-spacing: 1px; }
+  .sub { color: #8fa69b; font-size: 12px; margin-bottom: 14px; }
+  canvas { background: #05080a; border: 1px solid #25332c; border-radius: 10px; touch-action: none; cursor: crosshair; }
+  .panel { width: 240px; display: flex; flex-direction: column; gap: 14px; }
+  .row { display: flex; flex-direction: column; gap: 5px; }
+  .row label { font-size: 12px; color: #8fa69b; text-transform: uppercase; letter-spacing: .6px; }
+  .val { color: #6ee7b7; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #34d399; }
+  button { min-height: 40px; border: 1px solid #25332c; border-radius: 8px; background: #18241f;
+           color: #eaf2ee; font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover { background: #20302a; }
+  button.active { background: #34d399; border-color: #34d399; color: #06140e; }
+  .seg { display: flex; gap: 8px; }
+  .seg button { flex: 1; }
+  .enable { display: flex; align-items: center; gap: 10px; }
+  .enable input { width: 20px; height: 20px; accent-color: #ef4444; }
+  .status { font-size: 12px; color: #8fa69b; min-height: 32px; font-family: ui-monospace, monospace; }
+  .warn { color: #fca5a5; font-size: 11px; }
+</style>
+</head>
+<body>
+  <canvas id="cv" width="600" height="600"></canvas>
+
+  <div class="panel">
+    <div>
+      <h1>GALVO DRAW</h1>
+      <div class="sub">draw → the laser traces it</div>
+    </div>
+
+    <div class="seg">
+      <button id="modeDraw" class="active">✎ Draw</button>
+      <button id="modeCube">⬚ Cube</button>
+    </div>
+
+    <div class="row">
+      <label>Amplitude (size) <span class="val" id="vppVal">1.0</span> Vpp</label>
+      <input type="range" id="vpp" min="0" max="5" step="0.05" value="1.0">
+    </div>
+    <div class="row">
+      <label>Loop rate <span class="val" id="freqVal">60</span> Hz</label>
+      <input type="range" id="freq" min="10" max="200" step="1" value="60">
+    </div>
+
+    <label class="enable"><input type="checkbox" id="enable"> Enable laser output</label>
+
+    <div class="seg">
+      <button id="clearBtn">Clear</button>
+      <button id="testBtn">Test link</button>
+    </div>
+    <button id="stopBtn">■ Stop (park dot)</button>
+
+    <div class="status" id="status">idle</div>
+    <div class="warn">The laser can't blank, so separate strokes are joined by
+      visible lines — it's a single continuous loop (vector display).</div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+let mode = 'draw';
+let strokes = [];          // draw mode: array of strokes, each an array of [x,y] canvas px
+let cur = null;            // current stroke being drawn
+let down = false, lastXY = null;
+
+// cube state
+let yaw = 0.6, pitch = -0.5;
+const CUBE = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
+// closed walk covering all 12 edges (some retraced — fine for a laser cube)
+const SEQ = [0,1,2,3,0,4,5,6,7,4,5,1,2,6,7,3,0];
+
+function setMode(m) {
+  mode = m;
+  $('modeDraw').classList.toggle('active', m === 'draw');
+  $('modeCube').classList.toggle('active', m === 'cube');
+  cv.style.cursor = m === 'draw' ? 'crosshair' : 'grab';
+  render(); scheduleSend();
+}
+$('modeDraw').onclick = () => setMode('draw');
+$('modeCube').onclick = () => setMode('cube');
+
+// ---- pointer ----
+cv.addEventListener('pointerdown', e => {
+  down = true; cv.setPointerCapture(e.pointerId);
+  const p = pos(e);
+  if (mode === 'draw') { cur = [p]; strokes.push(cur); }
+  lastXY = p;
+});
+cv.addEventListener('pointermove', e => {
+  if (!down) return;
+  const p = pos(e);
+  if (mode === 'draw') { cur.push(p); render(); }
+  else { yaw += (p[0] - lastXY[0]) * 0.01; pitch += (p[1] - lastXY[1]) * 0.01; lastXY = p; render(); scheduleSend(); }
+});
+cv.addEventListener('pointerup', () => { down = false; cur = null; if (mode === 'draw') scheduleSend(); });
+function pos(e) { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+
+// ---- cube projection ----
+function project(v) {
+  let [x,y,z] = v;
+  let x1 = x*Math.cos(yaw) - z*Math.sin(yaw), z1 = x*Math.sin(yaw) + z*Math.cos(yaw);
+  let y1 = y*Math.cos(pitch) - z1*Math.sin(pitch);            // ortho projection
+  return [x1, y1];
+}
+function cubePath() { return SEQ.map(i => project(CUBE[i])); }   // in [-~1.7, 1.7] units
+
+// ---- gather the path to draw (canvas px) ----
+function pathCanvas() {
+  if (mode === 'cube') {
+    const pts = cubePath();
+    const s = 180;                                              // units -> px
+    return pts.map(([x,y]) => [W/2 + x*s, H/2 + y*s]);
+  }
+  // draw: concatenate all strokes
+  const out = [];
+  for (const st of strokes) for (const p of st) out.push(p);
+  return out;
+}
+
+// ---- normalize canvas px -> [-1,1], y up ----
+function normalize(pts) {
+  if (pts.length < 2) return [];
+  let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;
+  for (const [x,y] of pts){ minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y); }
+  const cx=(minX+maxX)/2, cy=(minY+maxY)/2, half=Math.max((maxX-minX),(maxY-minY))/2 || 1;
+  return pts.map(([x,y]) => [ (x-cx)/half, -(y-cy)/half ]);     // flip y
+}
+
+// ---- render preview ----
+function render() {
+  ctx.fillStyle = '#05080a'; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle = '#1f2c26'; ctx.beginPath();
+  ctx.moveTo(W/2,0); ctx.lineTo(W/2,H); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
+  const pts = pathCanvas();
+  if (pts.length < 2) return;
+  ctx.strokeStyle = '#34d399'; ctx.lineWidth = 2; ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (const p of pts) ctx.lineTo(p[0], p[1]);
+  if (mode === 'cube') ctx.lineTo(pts[0][0], pts[0][1]);
+  ctx.stroke();
+}
+
+// ---- send (debounced) ----
+let timer = null;
+function scheduleSend() { clearTimeout(timer); timer = setTimeout(send, 150); }
+async function send() {
+  const points = normalize(pathCanvas());
+  try {
+    await fetch('/set_path', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ points, vpp: +$('vpp').value, freq: +$('freq').value, enabled: $('enable').checked }) });
+  } catch(e) {}
+}
+
+function fmt(v){ return (+v).toFixed(2); }
+$('vpp').oninput = () => { $('vppVal').textContent = fmt($('vpp').value); scheduleSend(); };
+$('freq').oninput = () => { $('freqVal').textContent = $('freq').value; scheduleSend(); };
+$('enable').onchange = send;
+$('clearBtn').onclick = async () => {
+  strokes = []; render();
+  await fetch('/set_path', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ clear:true }) });
+};
+$('stopBtn').onclick = () => { $('enable').checked = false; fetch('/stop', {method:'POST'}); };
+$('testBtn').onclick = async () => {
+  const r = await (await fetch('/test', {method:'POST'})).json();
+  $('status').textContent = r.ok ? 'test point sent (check the beam moved)' : 'test failed: ' + (r.error||'');
+};
+
+async function poll() {
+  try { const s = await (await fetch('/status')).json(); $('status').textContent = (s.connected?'● ':'○ ') + s.message; } catch(e){}
+}
+setInterval(poll, 1000); poll();
+render();
+</script>
+</body>
+</html>

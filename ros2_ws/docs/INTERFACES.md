@@ -53,11 +53,14 @@ topics.
 |--------|------|--------|---------|
 | `stage/move_path` | `MoveStagePath` | stage_node | Visit a list of absolute targets, report progress. |
 | `scan_region` | `ScanRegion` | stage_node | Boustrophedon grid scan, report bead count per stop. |
+| `camera/autofocus` | `Autofocus` | camera_node | Sweep Z (via `stage/jog`), measure sharpness on the node's own frames, park at the sharpest Z. |
 
-> **Autofocus is intentionally NOT an action.** It is policy (move Z + measure
-> sharpness), composable from `image/compressed` + `stage/jog`, so it lives in
-> client code (the gateway runs it client-side). Keeping it out of the drivers
-> keeps them pure.
+> **Autofocus is a backend action** (`camera/autofocus`), so every client — the
+> UI *and* any external program — gets the same one-call autofocus, instead of
+> each reimplementing the Z-sweep. The camera node hosts it because it has the
+> frames; it drives Z through the stage's `stage/jog` service. (Auto white
+> balance is similarly first-class: the `camera/white_balance` service runs the
+> hardware AWB and returns the gains it locked in.)
 
 ---
 

@@ -1,0 +1,21 @@
+# galvo_draw - laser vector-drawing app (standalone ROS 2 client).
+#
+#   cd galvo_draw
+#   docker compose up --build          # -> http://localhost:8090
+#
+# Needs the SCOPIO backend (../ros2_ws) running so /scopio/awg/write exists.
+# Joins the same DDS graph (host networking + matching ROS_DOMAIN_ID), so it can
+# run on the Pi or any machine on the LAN.
+services:
+  galvo-draw:
+    build:
+      context: ..                       # repo root (needs ros2_ws/src/scopio_interfaces)
+      dockerfile: galvo_draw/Dockerfile
+    image: scopio-galvo-draw:jazzy
+    container_name: galvo-draw
+    network_mode: host
+    ipc: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - GALVO_DRAW_PORT=${GALVO_DRAW_PORT:-8090}

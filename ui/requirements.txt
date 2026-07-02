@@ -1,0 +1,9 @@
+# SCOPIO UI (standalone ROS 2 client) Python deps.
+#
+# NOTE: rclpy and the scopio_interfaces message package are NOT pip-installable.
+# They come from your ROS 2 install + the backend workspace you source before
+# running (see README.md). These are the extra pure-Python bits the UI needs.
+flask
+opencv-python
+numpy
+simplejpeg

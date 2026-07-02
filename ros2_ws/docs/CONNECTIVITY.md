@@ -21,7 +21,9 @@ If you run several rigs on one LAN, give each a distinct `ROS_DOMAIN_ID` so they
 don't cross-talk.
 
 ## Now: same-LAN clients (works today)
-- The UI (`ui_gateway`) runs on the Pi and is reached at `http://<pi-ip>:8080`.
+- The UI (the separate `../ui` app) is itself just a LAN client — run it on the
+  Pi or any other machine; it reaches the browser at `http://<host>:8080` and the
+  backend over DDS. It is the proof-of-concept of "UI on a different machine."
 - Any **other** program (a galvo app, a controller) runs on any LAN machine,
   joins the graph, and calls services / subscribes to topics. Nothing special is
   required — this is the intended way to build side-apps now.

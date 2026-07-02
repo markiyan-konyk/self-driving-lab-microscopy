@@ -23,7 +23,10 @@ and unchanged. Hardware has a single owner at a time — run *either* the ROS st
 |---|---|---|
 | `scopio_interfaces` | ament_cmake | The contract: msgs / srvs / **actions** |
 | `scopio_microscope` | ament_python | The driver nodes (camera, stage, galvo, calibration, tracker) |
-| `scopio_ui` | ament_python | Web UI **gateway** — a ROS *client* (owns no hardware); serves the browser UI at `http://<pi>:8080` |
+
+> The **web UI is no longer in this workspace.** It is a separate standalone app
+> at repo-root [`../ui`](../ui) — a ROS *client* that owns no hardware and can run
+> on the Pi or any other machine. This backend brings up drivers only.
 
 ### Nodes (all under the `/scopio` namespace)
 
@@ -69,8 +72,10 @@ export GALVO_RESOURCE="USB0::0x1AB1::0x0642::DG1ZA...::INSTR"
 docker compose up --build
 ```
 
-That brings up the whole graph. From any machine on the LAN (with ROS 2 sourced)
-you can then inspect/drive it:
+That brings up the **backend graph (drivers only)**. The web UI is a separate
+app — start it from [`../ui`](../ui) (`cd ../ui && docker compose up`), on the Pi
+or another machine. From any machine on the LAN (with ROS 2 sourced) you can then
+inspect/drive the backend directly:
 
 ```bash
 ros2 topic list
@@ -125,11 +130,12 @@ ros2 launch scopio_microscope microscope.launch.py
 
 ## Status
 
-Interfaces frozen at **v1.0**. The driver nodes are hardened and the UI gateway
-is a full ROS client that re-serves the rich SCOPIO frontend (from
-`microscope/frontend/`) and records client-side. Built/structured on a Windows
-dev box (Python syntax verified); **the ROS build (`colcon`), Docker image and
-hardware bring-up must be validated on the Pi.** Galvo geometry constants are
+Interfaces frozen at **v1.0**. The driver nodes are hardened (camera controls +
+framerate/exposure budget, white balance, autofocus action, stage jog/move,
+galvo SCPI passthrough, calibration store). The UI is now a **separate standalone
+app** ([`../ui`](../ui)) that serves the SCOPIO frontend and records client-side.
+Built/structured on a Windows dev box (Python syntax verified); **the ROS build
+(`colcon`), Docker image and hardware bring-up must be validated on the Pi.** Galvo geometry constants are
 placeholders in `microscope/galvo_geometry.py` — a numbers-only fix once
 `galvo_tests/03_precision.py` measures them. See [../DECISIONS.md](../DECISIONS.md)
 for the full rationale and [docs/INTERFACES.md](docs/INTERFACES.md) for the

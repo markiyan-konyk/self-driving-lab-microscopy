@@ -29,15 +29,18 @@ import threading
 import time
 
 import rclpy
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from sensor_msgs.msg import CompressedImage
 from scopio_interfaces.msg import CameraState
-from scopio_interfaces.srv import SetCameraControls, SetFramerate, WhiteBalance
+from scopio_interfaces.srv import SetCameraControls, SetFramerate, WhiteBalance, StageJog
+from scopio_interfaces.action import Autofocus
 
 MIN_FPS, MAX_FPS = 1.0, 120.0
+AF_BACKLASH = 256          # steps; every Z approached from below by this much
 
 
 class CameraNode(Node):
@@ -69,6 +72,7 @@ class CameraNode(Node):
         self._encode = None
         self._yuv2bgr = None
         self._np = None
+        self._cv2 = None
         self._last_meta = 0.0
 
         self.image_pub = self.create_publisher(CompressedImage, "image/compressed", 5)
@@ -78,6 +82,16 @@ class CameraNode(Node):
         self.create_service(SetCameraControls, "camera/set_controls", self._on_set_controls, callback_group=cb)
         self.create_service(SetFramerate, "camera/set_framerate", self._on_set_framerate, callback_group=cb)
         self.create_service(WhiteBalance, "camera/white_balance", self._on_white_balance, callback_group=cb)
+
+        # Autofocus coordinates this camera's focus metric with the stage's Z.
+        self._af_cb = ReentrantCallbackGroup()
+        self.cli_jog = self.create_client(StageJog, "stage/jog", callback_group=self._af_cb)
+        self._af_server = ActionServer(
+            self, Autofocus, "camera/autofocus",
+            execute_callback=self._execute_autofocus,
+            goal_callback=lambda g: GoalResponse.ACCEPT,
+            cancel_callback=lambda c: CancelResponse.ACCEPT,
+            callback_group=self._af_cb)
 
         self._start_camera()
 
@@ -94,6 +108,7 @@ class CameraNode(Node):
             import cv2
             import numpy as np
             self._np = np
+            self._cv2 = cv2
             self._yuv2bgr = lambda f: cv2.cvtColor(f, cv2.COLOR_YUV2BGR_I420)
             try:
                 from simplejpeg import encode_jpeg
@@ -272,6 +287,92 @@ class CameraNode(Node):
             response.message = str(e)
         return response
 
+    # ------------------------------------------------------------------ #
+    #  Action: autofocus (camera focus metric + stage Z moves)
+    # ------------------------------------------------------------------ #
+    def _call_jog(self, dx, dy, dz, timeout=8.0):
+        """Synchronously call the stage's jog service from this thread."""
+        if not self.cli_jog.wait_for_service(timeout_sec=1.0):
+            raise RuntimeError("stage/jog unavailable")
+        req = StageJog.Request()
+        req.dx, req.dy, req.dz = int(dx), int(dy), int(dz)
+        future = self.cli_jog.call_async(req)
+        done = threading.Event()
+        future.add_done_callback(lambda _f: done.set())
+        if not done.wait(timeout):
+            raise RuntimeError("stage/jog timed out")
+        res = future.result()
+        if not res.success:
+            raise RuntimeError(res.message or "jog failed")
+        return res
+
+    def _focus_score(self, flush=2):
+        """Sharpness of a freshly captured frame (variance of the Laplacian);
+        higher = sharper. Flush in-flight frames exposed before the last move."""
+        with self._lock:
+            for _ in range(flush):
+                self.picam2.capture_array("main")
+            frame_yuv = self.picam2.capture_array("main")
+        bgr = self._yuv2bgr(frame_yuv)
+        gray = self._cv2.cvtColor(bgr, self._cv2.COLOR_BGR2GRAY)
+        return float(self._cv2.Laplacian(gray, self._cv2.CV_64F).var())
+
+    def _execute_autofocus(self, goal_handle):
+        req = goal_handle.request
+        result = Autofocus.Result()
+        if self.picam2 is None:
+            goal_handle.abort()
+            result.success = False
+            result.message = "Camera unavailable"
+            return result
+
+        n = max(3, int(req.steps))
+        z_range = max(1, int(req.z_range))
+        settle = max(0.0, float(req.settle_s))
+        np = self._np
+        try:
+            z0 = self._call_jog(0, 0, 0).z                     # read current Z
+            targets = [int(z) for z in np.linspace(z0 - z_range, z0 + z_range, n)]
+            current = z0
+
+            def goto(z):
+                nonlocal current
+                self._call_jog(0, 0, (z - AF_BACKLASH) - current)   # approach from below
+                self._call_jog(0, 0, z - (z - AF_BACKLASH))
+                current = z
+                if settle:
+                    time.sleep(settle)
+
+            scores = []
+            for i, z in enumerate(targets):
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    result.success = False
+                    result.message = "canceled"
+                    return result
+                goto(z)
+                s = self._focus_score()
+                scores.append(s)
+                fb = Autofocus.Feedback()
+                fb.index = i
+                fb.z = z
+                fb.score = s
+                goal_handle.publish_feedback(fb)
+
+            best_i = int(np.argmax(scores))
+            best_z = targets[best_i]
+            goto(best_z)                                       # park at the sharpest Z
+            goal_handle.succeed()
+            result.success = True
+            result.best_z = int(best_z)
+            result.best_score = float(scores[best_i])
+            result.message = "ok"
+        except Exception as e:
+            goal_handle.abort()
+            result.success = False
+            result.message = str(e)
+        return result
+
     def destroy_node(self):
         try:
             if self.picam2 is not None:
@@ -284,7 +385,7 @@ class CameraNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = CameraNode()
-    executor = MultiThreadedExecutor()
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
