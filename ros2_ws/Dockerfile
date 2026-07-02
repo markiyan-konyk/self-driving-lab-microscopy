@@ -19,10 +19,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         ros-jazzy-sensor-msgs \
         ros-jazzy-std-srvs \
-        python3-picamera2 \
-        python3-libcamera \
-        python3-kms++ \
     && rm -rf /var/lib/apt/lists/*
+
+# NOTE: picamera2 / libcamera are NOT in Ubuntu's ARM repos -- they ship from
+# Raspberry Pi OS (Debian). So they are intentionally NOT installed here: the
+# camera node degrades gracefully without them (logs a warning, idles), and the
+# rest of the graph (stage, galvo, calibration, tracker) comes up fine. To get
+# live video, wire the camera in via one of the routes in README "Camera caveat"
+# (e.g. run the camera node natively on the Pi, or base a camera image on Pi OS).
 
 # Python deps for tracking + hardware drivers. --break-system-packages because
 # Noble's Python is PEP-668 "externally managed"; fine inside a container.
