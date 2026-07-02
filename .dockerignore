@@ -1,0 +1,15 @@
+# Keep the Docker build context small for the ui/ and galvo_draw/ images
+# (their build context is the repo root). They only COPY ros2_ws/src/
+# scopio_interfaces and their own app folder, so everything else is noise.
+.git
+.vscode
+CAD_files
+galvo_tests
+viscosity
+microscope
+**/__pycache__
+**/*.pyc
+**/recordings
+**/*.mp4
+**/*.mov
+*.md

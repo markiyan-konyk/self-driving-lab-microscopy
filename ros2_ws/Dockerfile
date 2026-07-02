@@ -32,10 +32,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Noble's Python is PEP-668 "externally managed"; fine inside a container.
 # NOTE: no Flask here -- this image is the headless BACKEND. The web UI is a
 # separate app (../ui) with its own image.
+# trackpy/pandas/scipy (the bead-TRACKER deps) are intentionally omitted: on the
+# Pi they pull a newer numpy that pip can't swap in over the apt-managed numpy
+# (it fails to uninstall the debian numpy). tracker_node degrades gracefully
+# without them. Re-add them later with a proper numpy strategy (e.g. a venv, or
+# a pinned numpy) when you actually wire up tracking.
 RUN pip3 install --no-cache-dir --break-system-packages \
-        trackpy \
-        pandas \
-        scipy \
         simplejpeg \
         pyvisa \
         pyvisa-py \
