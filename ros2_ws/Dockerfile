@@ -17,9 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-colcon-common-extensions \
         python3-opencv \
         ffmpeg \
+        libusb-1.0-0 \
         ros-jazzy-sensor-msgs \
         ros-jazzy-std-srvs \
     && rm -rf /var/lib/apt/lists/*
+# libusb-1.0-0 is REQUIRED for pyvisa-py/pyusb to enumerate the USB-TMC AWG (the
+# Rigol galvo). Without it the container sees only serial ports and galvo_node
+# reports "AWG unavailable" -- the host has libusb so galvo_tests work there, but
+# the Ubuntu container needs it installed explicitly.
 
 # NOTE: picamera2 / libcamera are NOT in Ubuntu's ARM repos -- they ship from
 # Raspberry Pi OS (Debian). So they are intentionally NOT installed here: the
