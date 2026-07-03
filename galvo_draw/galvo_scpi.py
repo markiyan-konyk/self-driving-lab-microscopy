@@ -33,8 +33,11 @@ def arb_upload_cmds(ch, norm_values):
 
 def arb_apply_cmds(ch, vpp, freq_hz, offset_v=0.0):
     """Select the loaded volatile arb and run it at a given size (Vpp) and loop
-    rate (Hz)."""
+    rate (Hz). Sets High-Z impedance first -- the galvo driver is high-impedance,
+    and without this the AWG assumes a 50 ohm load and outputs half the requested
+    voltage (matches microscope/galvo.py, which sets INFinity at startup)."""
     return [
+        f":OUTPut{ch}:IMPedance INFinity",
         f":SOURce{ch}:FUNCtion USER",
         f":SOURce{ch}:FREQuency {float(freq_hz):.3f}",
         f":SOURce{ch}:VOLTage {clamp_vpp(vpp):.4f}",
@@ -61,3 +64,25 @@ def test_point_cmds(vx=0.5, vy=0.0):
     """A known-good sanity command (plain DC offset) to confirm the ROS->AWG link
     independently of the arbitrary-waveform path."""
     return park_cmds(vx, vy)
+
+
+def test_circle_cmds(freq_hz=2.0, amp_vpp=1.0):
+    """Draw a slow circle using ONLY the proven sine path (the exact command family
+    from galvo_tests/04_waveform.py). X = sine, Y = sine at +90 deg -> a circle.
+
+    This is the strongest link test: if the beam draws a circle, then the ROS->AWG
+    pipe, the instrument connection, and waveform *generation* all work -- so any
+    remaining 'my drawing doesn't appear' is isolated to the arbitrary-waveform
+    (:DATA VOLATILE / :FUNCtion USER) path only. If even this fails, the backend
+    galvo_node isn't connected to the AWG (check /scopio/awg/status)."""
+    return [
+        ":OUTPut1:IMPedance INFinity",
+        ":OUTPut2:IMPedance INFinity",
+        f":SOURce1:APPLy:SINusoid {float(freq_hz)},{float(amp_vpp)},0",
+        f":SOURce2:APPLy:SINusoid {float(freq_hz)},{float(amp_vpp)},0",
+        ":SOURce1:PHASe 0",
+        ":SOURce2:PHASe 90",
+        ":SOURce1:PHASe:SYNChronize",
+        ":OUTPut1 ON",
+        ":OUTPut2 ON",
+    ]

@@ -171,7 +171,7 @@ $('clearBtn').onclick = async () => {
 $('stopBtn').onclick = () => { $('enable').checked = false; fetch('/stop', {method:'POST'}); };
 $('testBtn').onclick = async () => {
   const r = await (await fetch('/test', {method:'POST'})).json();
-  $('status').textContent = r.ok ? 'test point sent (check the beam moved)' : 'test failed: ' + (r.error||'');
+  $('status').textContent = r.ok ? 'test circle sent (look for a circle on the beam)' : 'test failed: ' + (r.error||'');
 };
 
 async function poll() {

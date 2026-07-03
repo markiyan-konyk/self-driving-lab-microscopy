@@ -30,7 +30,7 @@ from scopio_interfaces.srv import AwgWrite
 from flask import Flask, request, jsonify, send_from_directory
 
 from galvo_scpi import (
-    arb_upload_cmds, arb_apply_cmds, phase_sync_cmds, park_cmds, test_point_cmds,
+    arb_upload_cmds, arb_apply_cmds, phase_sync_cmds, park_cmds, test_circle_cmds,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -156,9 +156,11 @@ def stop():
 
 @app.route("/test", methods=["POST"])
 def test():
-    """Known-good link check: a static DC offset (independent of arb upload)."""
+    """Known-good link check using ONLY the proven sine path: draws a slow circle.
+    If this works but a drawing doesn't, the fault is isolated to the arb-waveform
+    path; if this fails too, the backend isn't connected to the AWG (awg/status)."""
     try:
-        node.send(test_point_cmds(0.5, 0.0))
+        node.send(test_circle_cmds())
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503

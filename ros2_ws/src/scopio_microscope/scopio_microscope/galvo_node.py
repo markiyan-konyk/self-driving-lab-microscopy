@@ -60,12 +60,22 @@ class GalvoNode(Node):
     # ------------------------------------------------------------------ #
     def _connect(self):
         resource = os.environ.get("GALVO_RESOURCE") or self.get_parameter("resource").value
-        if not resource:
-            self.get_logger().warning("No galvo VISA resource set; AWG disabled.")
-            return
         try:
             import pyvisa
             rm = pyvisa.ResourceManager()
+            if not resource:
+                # Auto-discover the first USB instrument, matching how the proven
+                # standalone tests find it (galvo_tests/_common.resolve_resource).
+                # Without this the node silently stayed disabled unless the operator
+                # remembered to export GALVO_RESOURCE.
+                usb = [r for r in rm.list_resources() if r.upper().startswith("USB")]
+                if usb:
+                    resource = usb[0]
+                    self.get_logger().info(f"Auto-selected AWG resource: {resource}")
+            if not resource:
+                self.get_logger().warning(
+                    "No galvo VISA resource found (set GALVO_RESOURCE); AWG disabled.")
+                return
             self.awg = rm.open_resource(resource)
             self.awg.timeout = int(self.get_parameter("timeout_ms").value)
             self.idn = self.awg.query("*IDN?").strip()
