@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast-DDS unicast discovery profile for the PI BACKEND side.
+
+  Mirror of dds/client_peers.xml: points discovery back at the CLIENT machine
+  (the laptop) so replies are unicast and no multicast is needed. The address is
+  the laptop over the direct ethernet cable (10.42.0.2).
+
+  Use it on the Pi by exporting, before `docker compose up` in ros2_ws:
+      export FASTRTPS_DEFAULT_PROFILES_FILE=$PWD/../dds/pi_peers.xml
+  (or add the same env+volume to ros2_ws/docker-compose.yml). Over a direct cable
+  multicast usually works, so this is a safety net — apply it only if the client
+  can't see /scopio/... topics.
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <participant profile_name="pi_unicast" is_default_profile="true">
+      <rtps>
+        <builtin>
+          <!-- Only initialPeers: everything else stays default. -->
+          <initialPeersList>
+            <!-- Laptop / UI host over the direct ethernet cable -->
+            <locator><udpv4><address>10.42.0.2</address></udpv4></locator>
+          </initialPeersList>
+        </builtin>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

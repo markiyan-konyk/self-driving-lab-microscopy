@@ -1,0 +1,11 @@
+# Windows-client override for galvo_draw. Docker Compose auto-merges this on top
+# of docker-compose.yml, so just run the usual `docker compose up --build`.
+#
+# Feeds the Fast-DDS unicast peers file in so discovery goes straight to the Pi by
+# IP (no multicast). Delete/rename to fall back to plain multicast on a LAN.
+services:
+  galvo-draw:
+    environment:
+      - FASTRTPS_DEFAULT_PROFILES_FILE=/dds/peers.xml
+    volumes:
+      - ../dds/client_peers.xml:/dds/peers.xml:ro

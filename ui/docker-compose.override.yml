@@ -1,0 +1,12 @@
+# Windows-client override for the UI. Docker Compose auto-merges this on top of
+# docker-compose.yml, so just run the usual `docker compose up --build`.
+#
+# It feeds the Fast-DDS unicast peers file into the container so discovery goes
+# straight to the Pi by IP (no multicast). Delete/rename this file to go back to
+# plain multicast behaviour (e.g. when running on a Linux host on the same LAN).
+services:
+  scopio-ui:
+    environment:
+      - FASTRTPS_DEFAULT_PROFILES_FILE=/dds/peers.xml
+    volumes:
+      - ../dds/client_peers.xml:/dds/peers.xml:ro
