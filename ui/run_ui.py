@@ -65,6 +65,32 @@ PASSWORD = os.environ.get("SCOPIO_UI_PASSWORD", "password")
 CAMERA_MJPEG_URL = os.environ.get("CAMERA_MJPEG_URL", "").strip()
 NAN = float("nan")
 
+
+def _derive_cam_ctrl_base():
+    """The camera control API lives on the same host:port as the MJPEG stream,
+    e.g. http://10.42.0.1:8081/stream.mjpg -> http://10.42.0.1:8081. When set, the
+    UI drives the real Pi camera over HTTP instead of the (camera-less) ROS node."""
+    if not CAMERA_MJPEG_URL:
+        return None
+    from urllib.parse import urlsplit
+    p = urlsplit(CAMERA_MJPEG_URL)
+    return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else None
+
+
+CAM_CTRL_BASE = _derive_cam_ctrl_base()
+_stream_fps = 0.0                        # measured fps of the ingested MJPEG stream
+
+
+def _cam_http(path, method="GET", payload=None, timeout=8.0):
+    """Call the Pi camera server's control API and return the parsed JSON."""
+    import urllib.request
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        CAM_CTRL_BASE + path, data=data, method=method,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
 MIN_FPS, MAX_FPS = 1, 120
 
 # Screen-direction -> stage displacement, mirrors the backend's convention
@@ -198,7 +224,9 @@ def _mjpeg_ingest_loop(url):
     makes the live view AND client-side recording work even when the ROS camera
     topic is empty (no camera inside the container). Frames are split by JPEG
     markers, so any MJPEG boundary format works."""
+    global _stream_fps
     import urllib.request
+    last_t = time.time()
     while True:
         try:
             with urllib.request.urlopen(url, timeout=5) as r:
@@ -217,6 +245,11 @@ def _mjpeg_ingest_loop(url):
                         buf = buf[end + 2:]
                         with node._lock:
                             node.jpeg = frame
+                        now = time.time()
+                        dt = now - last_t
+                        last_t = now
+                        if dt > 0:
+                            _stream_fps = 0.85 * _stream_fps + 0.15 * (1.0 / dt)
                     if len(buf) > 4_000_000:                     # guard runaway buffer
                         buf = buf[-1_000_000:]
         except Exception as e:
@@ -315,9 +348,10 @@ def telemetry():
     laser = galvo.state()
     laser["connected"] = bool(node.awg and node.awg.connected)
     laser["global_um"] = {k: round(v, 1) for k, v in galvo.global_um(stage_um).items()}
+    fps = round(_stream_fps, 1) if CAMERA_MJPEG_URL else (cs.measured_fps if cs else 0.0)
     return jsonify({
         "position": pos,
-        "fps": cs.measured_fps if cs else 0.0,
+        "fps": fps,
         "target_fps": cs.target_fps if cs else 0.0,
         "controller_connected": bool(st and st.connected),
         "laser": laser,
@@ -363,6 +397,11 @@ def set_step(axis, value):
 @app.route("/get_camera_controls")
 @login_required
 def get_camera_controls():
+    if CAM_CTRL_BASE:
+        try:
+            return jsonify(_cam_http("/controls"))
+        except Exception:
+            pass          # fall back to defaults if the camera server is down
     return jsonify(_cam_dict())
 
 
@@ -370,6 +409,12 @@ def get_camera_controls():
 @login_required
 def set_camera_controls():
     d = request.get_json() or {}
+    if CAM_CTRL_BASE:
+        try:
+            _cam_http("/controls", "POST", d)
+            return "OK"
+        except Exception as e:
+            return str(e), 503
     req = SetCameraControls.Request()
     for f in ("red_gain", "green_gain", "blue_gain", "colour_gain", "analogue_gain",
               "contrast", "saturation", "brightness", "sharpness"):
@@ -385,7 +430,16 @@ def set_camera_controls():
 @login_required
 def set_framerate():
     d = request.get_json() or {}
-    req = SetFramerate.Request(); req.fps = float(d.get("fps", 30))
+    fps = float(d.get("fps", 30))
+    if CAM_CTRL_BASE:
+        try:
+            res = _cam_http("/controls", "POST", {"framerate": fps})
+            return jsonify({"framerate": res.get("framerate", fps),
+                            "exposure": res.get("exposure", 0),
+                            "analogue_gain": res.get("analogue_gain", 1.0)})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 503
+    req = SetFramerate.Request(); req.fps = fps
     try:
         res = node.call(node.cli_framerate, req)
     except Exception as e:
@@ -405,7 +459,11 @@ def white_balance():
     def run():
         global _wb_running
         try:
-            node.call(node.cli_wb, WhiteBalance.Request(), timeout=12.0)
+            if CAM_CTRL_BASE:
+                res = _cam_http("/white_balance", "POST", {}, timeout=8.0)
+                node.get_logger().info(f"white balance: {res}")
+            else:
+                node.call(node.cli_wb, WhiteBalance.Request(), timeout=12.0)
         except Exception as e:
             node.get_logger().warning(f"white balance failed: {e}")
         finally:
@@ -421,6 +479,55 @@ def calibration_status():
     return jsonify({"running": _wb_running or _af_running})
 
 
+def _focus_metric():
+    """Sharpness of the current frame: variance of the Laplacian (higher = sharper).
+    Uses the live frame the UI already has (ROS topic or ingested MJPEG)."""
+    with node._lock:
+        j = node.jpeg
+    if not j:
+        return 0.0
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return 0.0
+    return float(cv2.Laplacian(img, cv2.CV_64F).var())
+
+
+def _jog_z(dz):
+    """Relative Z jog over ROS (drives the real stepper). Returns True if applied."""
+    req = StageJog.Request(); req.dx = 0; req.dy = 0; req.dz = int(dz)
+    try:
+        res = node.call(node.cli_jog, req)
+        return bool(getattr(res, "success", True))
+    except Exception as e:
+        node.get_logger().warning(f"autofocus jog failed: {e}")
+        return False
+
+
+def _run_autofocus(z_range=2000, steps=15, settle_s=0.35):
+    """Sweep Z over a range, measure sharpness at each step, return to the sharpest.
+    Approaches from below so mechanical backlash is taken up in one direction."""
+    half = int(z_range // 2)
+    step = max(1, int(z_range // max(1, steps)))
+    if not _jog_z(-half):
+        raise RuntimeError("stage not responding (is the controller connected?)")
+    time.sleep(settle_s)
+    best_m, best_z = -1.0, None
+    for i in range(steps + 1):
+        time.sleep(settle_s)
+        m = _focus_metric()
+        z = node.stage.z if node.stage else i * step
+        if m > best_m:
+            best_m, best_z = m, z
+        if i < steps:
+            _jog_z(step)
+    if best_z is not None:                       # return to the sharpest plane
+        cur = node.stage.z if node.stage else 0
+        _jog_z(best_z - cur)
+    return best_m, best_z
+
+
 @app.route("/autofocus", methods=["POST"])
 @login_required
 def autofocus():
@@ -432,8 +539,12 @@ def autofocus():
     def run():
         global _af_running
         try:
-            res = node.run_autofocus()
-            node.get_logger().info(f"autofocus: {res.message} (best_z={res.best_z})")
+            if CAM_CTRL_BASE:                     # UI-orchestrated: real frames + ROS stage
+                metric, z = _run_autofocus()
+                node.get_logger().info(f"autofocus done: best sharpness {metric:.0f} at z={z}")
+            else:                                 # backend action (ROS camera present)
+                res = node.run_autofocus()
+                node.get_logger().info(f"autofocus: {res.message} (best_z={res.best_z})")
         except Exception as e:
             node.get_logger().warning(f"autofocus failed: {e}")
         finally:
