@@ -15,7 +15,14 @@
         });
 
         // ===== Splash =====
-        window.addEventListener('load', () => setTimeout(() => $('splash').classList.add('hidden'), 1500));
+        // Hide shortly after the DOM is ready. Do NOT wait for window 'load':
+        // the MJPEG video <img> stream never finishes loading (and produces
+        // nothing when no camera is attached), which would pin the splash open.
+        (function hideSplash() {
+            const go = () => setTimeout(() => $('splash').classList.add('hidden'), 1200);
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', go);
+            else go();
+        })();
 
         // ============================================================
         //  Movement (continuous press-and-hold)
