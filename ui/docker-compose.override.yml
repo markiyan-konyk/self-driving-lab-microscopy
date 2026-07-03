@@ -8,5 +8,9 @@ services:
   scopio-ui:
     environment:
       - FASTRTPS_DEFAULT_PROFILES_FILE=/dds/peers.xml
+      # Live view via the Pi's native MJPEG server (pi_camera_server.py) over the
+      # cable, since the camera can't run inside the ROS container. Comment out to
+      # go back to the ROS image topic once a container-camera route exists.
+      - CAMERA_MJPEG_URL=http://10.42.0.1:8081/stream.mjpg
     volumes:
       - ../dds/client_peers.xml:/dds/peers.xml:ro

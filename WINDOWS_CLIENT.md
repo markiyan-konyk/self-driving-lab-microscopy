@@ -152,6 +152,27 @@ docker exec -it scopio-ui bash -lc \
 ```
 Topics appear → open the browser, you're done.
 
+## Camera feed
+
+The camera can't run inside the Ubuntu ROS container (picamera2/libcamera would
+have to match the Pi kernel — fragile). So the live view comes from a tiny native
+MJPEG server on the Pi, which the UI ingests. Stage/galvo control still go over ROS.
+
+On the **Pi host** (not in Docker — picamera2 is native to Raspberry Pi OS):
+```bash
+cd ~/self-driving-lab
+python3 pi_camera_server.py            # serves http://<pi>:8081/stream.mjpg
+```
+The UI override (`ui/docker-compose.override.yml`) already sets
+`CAMERA_MJPEG_URL=http://10.42.0.1:8081/stream.mjpg`, so after the UI container
+starts it pulls that stream into the normal `/video_feed` (live view **and**
+recording work). If you reach the Pi at a different IP, change that URL.
+
+> This is a pragmatic bridge so the camera works today. The "proper" path —
+> camera frames published on the ROS graph — is a follow-up. The camera-setting
+> sliders (framerate/gains) still target the ROS camera node, so they won't affect
+> this MJPEG feed yet.
+
 ## Troubleshooting
 - **Container `hostname -I` shows only `192.168.65.x` / `172.x`** → you're still on
   Docker Desktop's engine. Quit Docker Desktop / disable its WSL integration, and make

@@ -59,6 +59,10 @@ RECORDINGS_DIR = os.path.join(HERE, "recordings")
 NS = os.environ.get("SCOPIO_NAMESPACE", "/scopio").rstrip("/")
 PORT = int(os.environ.get("SCOPIO_UI_PORT", 8080))
 PASSWORD = os.environ.get("SCOPIO_UI_PASSWORD", "password")
+# Optional: pull the live view from a Pi-hosted MJPEG server instead of the ROS
+# image topic (used when the camera can't run inside the ROS container -- see
+# pi_camera_server.py / WINDOWS_CLIENT.md). e.g. http://10.42.0.1:8081/stream.mjpg
+CAMERA_MJPEG_URL = os.environ.get("CAMERA_MJPEG_URL", "").strip()
 NAN = float("nan")
 
 MIN_FPS, MAX_FPS = 1, 120
@@ -186,6 +190,39 @@ _probe_cache = {}
 def _read(name):
     with open(os.path.join(FRONTEND_DIR, name), encoding="utf-8") as f:
         return f.read()
+
+
+def _mjpeg_ingest_loop(url):
+    """Pull an external MJPEG stream (e.g. the Pi's pi_camera_server.py) and push
+    each JPEG into node.jpeg -- exactly where ROS image frames would land. This
+    makes the live view AND client-side recording work even when the ROS camera
+    topic is empty (no camera inside the container). Frames are split by JPEG
+    markers, so any MJPEG boundary format works."""
+    import urllib.request
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                buf = b""
+                while True:
+                    chunk = r.read(8192)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while True:
+                        start = buf.find(b"\xff\xd8")            # JPEG SOI
+                        end = buf.find(b"\xff\xd9", start + 2)   # JPEG EOI
+                        if start < 0 or end < 0:
+                            break
+                        frame = buf[start:end + 2]
+                        buf = buf[end + 2:]
+                        with node._lock:
+                            node.jpeg = frame
+                    if len(buf) > 4_000_000:                     # guard runaway buffer
+                        buf = buf[-1_000_000:]
+        except Exception as e:
+            if node:
+                node.get_logger().warning(f"MJPEG ingest ({url}) failed: {e}; retrying in 2s")
+            time.sleep(2)
 
 
 # ---- auth ----
@@ -691,6 +728,9 @@ def main():
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     threading.Thread(target=executor.spin, daemon=True).start()
+    if CAMERA_MJPEG_URL:
+        node.get_logger().info(f"Ingesting camera from MJPEG stream {CAMERA_MJPEG_URL}")
+        threading.Thread(target=_mjpeg_ingest_loop, args=(CAMERA_MJPEG_URL,), daemon=True).start()
     node.get_logger().info(f"SCOPIO UI on http://0.0.0.0:{PORT} (ROS namespace {NS})")
     try:
         app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False, threaded=True)
