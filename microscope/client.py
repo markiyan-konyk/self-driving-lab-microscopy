@@ -296,10 +296,30 @@ def autofocus():
 @app.route("/white_balance", methods=["POST"])
 @auth.login_required
 def white_balance():
+    """
+    Start an asynchronous white-balance calibration run.
+
+    The calibration thread will briefly enable the hardware AWB, let it
+    converge, read the resulting colour gains, and then re-disable AWB
+    while compensating for the current colour_gain multiplier.
+    """
+    # Prevent multiple concurrent calibration runs.
     if not camera._try_acquire_calibration():
         return jsonify({"error": "Calibration already in progress"}), 409
-    thread = threading.Thread(target=camera.run_white_balance_thread, daemon=True)
+
+    # Read the current colour_gain multiplier from the global camera controls.
+    # This value must be passed to the calibration thread so that the
+    # returned red/blue gains are properly compensated before they are stored.
+    current_colour_gain = cam_controls.get("colour_gain", 1.0)
+
+    # Start the calibration thread, passing the current colour_gain.
+    thread = threading.Thread(
+        target=camera.run_white_balance_thread,
+        args=(current_colour_gain,),  # colour_gain is passed as an argument
+        daemon=True
+    )
     thread.start()
+
     return jsonify({"message": "White balance started"})
 
 
