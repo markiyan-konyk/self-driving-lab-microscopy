@@ -310,7 +310,8 @@ def white_balance():
     # Read the current colour_gain multiplier from the global camera controls.
     # This value must be passed to the calibration thread so that the
     # returned red/blue gains are properly compensated before they are stored.
-    current_colour_gain = cam_controls.get("colour_gain", 1.0)
+    # 🔥 FIX: Use camera.cam_controls (not a bare cam_controls).
+    current_colour_gain = camera.cam_controls.get("colour_gain", 1.0)
 
     # Start the calibration thread, passing the current colour_gain.
     thread = threading.Thread(
