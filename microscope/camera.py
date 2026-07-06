@@ -108,7 +108,7 @@ def apply_camera_controls():
     """Apply hardware camera parameters to picamera2."""
     if picam2 is None:
         return
-    cg = cam_controls["colour_gain"]
+    cg = 1.0
     picam2.set_controls({
         "AwbEnable": False,
         "AeEnable": False,
@@ -220,8 +220,7 @@ def _yuv_to_bgr(frame_yuv):
 
 
 def display_worker():
-    """Continuously capture the main stream, convert to BGR, apply the
-    software green gain, and publish a JPEG for the /video_feed route."""
+    """Continuously capture the main stream, convert to BGR, and publish a JPEG for the /video_feed route."""
     global current_jpeg, measured_fps
     frame_interval = 1.0 / DISPLAY_FPS
     next_frame_time = time.perf_counter()
@@ -260,13 +259,7 @@ def display_worker():
                 continue
 
             frame = _yuv_to_bgr(frame_yuv)
-
-            gg = cam_controls.get("green_gain", 1.0)
-            if abs(gg - 1.0) > 0.005:
-                green = frame[:, :, 1].astype("float32")
-                green *= gg
-                frame[:, :, 1] = green.clip(0, 255).astype("uint8")
-
+         
             jpeg = encode_jpeg(frame, quality=70, colorspace="BGR")
             with _jpeg_lock:
                 current_jpeg = jpeg
