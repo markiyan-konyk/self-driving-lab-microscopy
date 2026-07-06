@@ -50,7 +50,7 @@ body { background: var(--bg); overflow: hidden; }
 /* ===== Layout ===== */
 main {
     display: grid;
-    grid-template-columns: 250px minmax(0, 1fr) 360px;
+    grid-template-columns:  minmax(0, 1fr) 360px;
     height: 100vh; height: 100dvh; width: 100%;
     padding: 14px; gap: 14px;
 }
