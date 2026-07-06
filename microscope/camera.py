@@ -315,13 +315,17 @@ def run_white_balance_thread(colour_gain):
     try:
         # 1. Run the calibration WITHOUT holding any camera locks.
         #    calibration_running == True ensures display_worker skips capture.
-        gains = run_white_balance(
-            picam2,
-            current_colour_gain=colour_gain
-        )
 
-        if gains is not None:
+        gains = run_white_balance(picam2, current_colour_gain=colour_gain)
+        if gains is not None and None not in gains:
             red_gain, blue_gain = gains
+            cam_controls["red_gain"] = red_gain
+            cam_controls["blue_gain"] = blue_gain
+            with camera_lock:
+                apply_camera_controls()
+            print(f"White balance: red_gain={red_gain}, blue_gain={blue_gain}")
+        else:
+            print("White balance: 게인 계산 실패 — 기존 설정 유지")
             # 2. Update the control dictionary.
             cam_controls["red_gain"] = red_gain
             cam_controls["blue_gain"] = blue_gain
