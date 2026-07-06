@@ -137,7 +137,7 @@
             renderTimer();
         }
         function enterRecordingUI(remaining) { isRecording = true; recRemaining = (remaining === undefined ? null : remaining); recStartObserved = Date.now(); renderRecordState(); }
-        function exitRecordingUI(text) { isRecording = false; recRemaining = null; renderRecordState(); if (text) msg(text); loadRecordings(); }
+        function exitRecordingUI(text) { isRecording = false; recRemaining = null; renderRecordState(); if (text) msg(text); }
         async function toggleRecording() {
             if (isRecording) {
                 try { await request('/stop_recording', { method: 'POST' }); } catch (e) { msg('Stop failed: ' + e.message); }
@@ -275,66 +275,6 @@
         }
         refreshStatus(); setInterval(refreshStatus, 5000);
 
-        // ============================================================
-        //  Recordings library
-        // ============================================================
-        const previewModal = $('previewModal'), previewVideo = $('previewVideo'), previewTitle = $('previewTitle');
-        function fmtSize(b) { if (!b) return '—'; const u = ['B', 'KB', 'MB', 'GB']; let i = 0; while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; } return b.toFixed(b < 10 && i > 0 ? 1 : 0) + ' ' + u[i]; }
-        function fmtDur(s) { if (s == null) return '—'; s = Math.round(s); const m = Math.floor(s / 60), sec = s % 60; return `${m}:${String(sec).padStart(2, '0')}`; }
-
-        function openPreview(name) {
-            previewTitle.textContent = name;
-            previewVideo.src = '/recordings/file/' + encodeURIComponent(name);
-            previewModal.classList.add('show');
-        }
-        function closePreview() { previewVideo.pause(); previewVideo.removeAttribute('src'); previewVideo.load(); previewModal.classList.remove('show'); }
-        $('previewClose').addEventListener('click', closePreview);
-        previewModal.addEventListener('click', e => { if (e.target === previewModal) closePreview(); });
-
-        async function loadRecordings() {
-            let items = [];
-            try { items = await (await request('/recordings')).json(); } catch (e) { return; }
-            const list = $('recordingsList');
-            list.querySelectorAll('.rec-item').forEach(n => n.remove());
-            $('recEmpty').style.display = items.length ? 'none' : '';
-            items.forEach(it => {
-                const el = document.createElement('div');
-                el.className = 'rec-item';
-
-                const del = document.createElement('button');
-                del.className = 'rec-del'; del.title = 'Delete'; del.textContent = '🗑';
-                del.addEventListener('click', async () => {
-                    if (!confirm('Delete "' + it.name + '"?')) return;
-                    try { await postJSON('/recordings/delete', { name: it.name }); loadRecordings(); }
-                    catch (e) { msg('Delete failed: ' + e.message); }
-                });
-
-                const play = document.createElement('button');
-                play.className = 'rec-play'; play.title = 'Preview'; play.textContent = '▶';
-                play.addEventListener('click', () => openPreview(it.name));
-
-                const name = document.createElement('input');
-                name.className = 'rec-name'; name.value = it.name.replace(/\.mp4$/i, ''); name.title = 'Click to rename';
-                name.addEventListener('change', async () => {
-                    try {
-                        const r = await (await postJSON('/recordings/rename', { name: it.name, new_name: name.value })).json();
-                        if (r.error) throw new Error(r.error);
-                        loadRecordings();
-                    } catch (e) { msg('Rename failed: ' + e.message); loadRecordings(); }
-                });
-                name.addEventListener('keydown', e => { if (e.key === 'Enter') name.blur(); });
-
-                const meta = document.createElement('div');
-                meta.className = 'rec-meta';
-                const fps = it.fps != null ? it.fps : '?';
-                meta.innerHTML = `⏱ <b>${fmtDur(it.duration)}</b> · <b>${fps}</b> fps · ${fmtSize(it.size)}`;
-
-                el.append(del, play, name, meta);
-                list.appendChild(el);
-            });
-        }
-        loadRecordings();
-        setInterval(loadRecordings, 15000);
 
         // ============================================================
         //  Calibration + Measure tools (overlay on the video)
