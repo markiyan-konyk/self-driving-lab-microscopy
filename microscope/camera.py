@@ -108,7 +108,7 @@ def apply_camera_controls():
     """Apply hardware camera parameters to picamera2."""
     if picam2 is None:
         return
-    cg = 1.0
+    cg = cam_controls.get("colour_gain", 1.0)
     picam2.set_controls({
         "AwbEnable": False,
         "AeEnable": False,
