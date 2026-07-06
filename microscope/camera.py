@@ -310,37 +310,43 @@ def run_autofocus_thread(stage_wrapper):
         _release_calibration()
 
 
-def run_white_balance_thread():
-    """Calibrate the red/blue colour gains using the camera's own (hardware)
-    auto-white-balance algorithm, then lock the result in.
+def run_white_balance_thread(colour_gain):
+    """
+    Calibrate the red/blue colour gains using the camera's hardware AWB.
 
-    The camera stays running throughout: we briefly enable AWB, let it
-    converge on the current scene, read back the colour gains it chose, then
-    disable AWB and keep those gains fixed. This is far more robust than the
-    old hand-rolled grey-world loop, which could converge to a wrong (blue)
-    result and "revert" after appearing correct mid-iteration.
+    The calibration routine (run_white_balance) loops for up to ~8 seconds
+    while reading metadata. During that time display_worker is paused by the
+    calibration_running flag, so we do NOT hold camera_lock or camera_use_lock
+    during the loop. This prevents the video feed from freezing.
     """
     try:
-        with camera_use_lock:
+        # 1. Run the calibration WITHOUT holding any camera locks.
+        #    calibration_running == True ensures display_worker skips capture.
+        gains = run_white_balance(
+            picam2,
+            current_colour_gain=colour_gain
+        )
+
+        if gains is not None:
+            red_gain, blue_gain = gains
+            # 2. Update the control dictionary.
+            cam_controls["red_gain"] = red_gain
+            cam_controls["blue_gain"] = blue_gain
+            # Do NOT change colour_gain – the compensation was already applied
+            # inside run_white_balance.
+
+            # 3. Apply the new gains to the hardware (brief lock only).
             with camera_lock:
-                gains = run_white_balance(picam2)
-            if gains is not None:
-                red_gain, blue_gain = gains
-                cam_controls["red_gain"] = red_gain
-                cam_controls["blue_gain"] = blue_gain
-                # The calibrated gains are absolute, so the colour multiplier
-                # must be neutral for them to be applied as measured.
-                cam_controls["colour_gain"] = 1.0
-                with camera_lock:
-                    apply_camera_controls()
-                print(f"White balance: red_gain={red_gain}, blue_gain={blue_gain}")
-            else:
-                print("White balance: camera did not report colour gains")
+                apply_camera_controls()
+
+            print(f"White balance: red_gain={red_gain}, blue_gain={blue_gain}")
+        else:
+            print("White balance: camera did not report colour gains")
     except Exception as e:
         print(f"White balance error: {e}")
     finally:
+        # 4. Always release the calibration flag so display_worker resumes.
         _release_calibration()
-
 
 # ========== Recording ==========
 def get_next_recording_index():
