@@ -64,3 +64,6 @@ def run_white_balance(picam2, current_colour_gain=1.0,
     print(f"[white_balance] Stored gains (compensated for colour_gain={current_colour_gain:.2f}): R={red_to_store:.2f} B={blue_to_store:.2f}")
 
     return round(red_to_store, 2), round(blue_to_store, 2)
+
+# fixed
+
