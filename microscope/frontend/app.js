@@ -168,8 +168,8 @@
         //  Camera controls
         // ============================================================
         const camMap = {
-            redGain: 'red_gain', greenGain: 'green_gain', blueGain: 'blue_gain',
-            colourGain: 'colour_gain', analogueGain: 'analogue_gain',
+            redGain: 'red_gain', blueGain: 'blue_gain',
+            analogueGain: 'analogue_gain',
             camContrast: 'contrast', camSaturation: 'saturation', camBrightness: 'brightness', camSharpness: 'sharpness',
         };
         let camDebounce = null;
