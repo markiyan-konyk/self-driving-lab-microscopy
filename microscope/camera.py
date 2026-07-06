@@ -326,19 +326,7 @@ def run_white_balance_thread(colour_gain):
             print(f"White balance: red_gain={red_gain}, blue_gain={blue_gain}")
         else:
             print("White balance: 게인 계산 실패 — 기존 설정 유지")
-            # 2. Update the control dictionary.
-            cam_controls["red_gain"] = red_gain
-            cam_controls["blue_gain"] = blue_gain
-            # Do NOT change colour_gain – the compensation was already applied
-            # inside run_white_balance.
-
-            # 3. Apply the new gains to the hardware (brief lock only).
-            with camera_lock:
-                apply_camera_controls()
-
-            print(f"White balance: red_gain={red_gain}, blue_gain={blue_gain}")
-        else:
-            print("White balance: camera did not report colour gains")
+           
     except Exception as e:
         print(f"White balance error: {e}")
     finally:
