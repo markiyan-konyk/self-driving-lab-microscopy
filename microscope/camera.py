@@ -195,7 +195,7 @@ def _start_camera_unlocked():
     full_fov_mode = picam2.sensor_modes[0]
     config = picam2.create_video_configuration(
         sensor={"output_size": full_fov_mode["size"], "bit_depth": full_fov_mode["bit_depth"]},
-        main={"size": (640, 480), "format": "YUV420"},
+        main={"size": (1280, 960), "format": "YUV420"},
         controls={"FrameRate": cam_controls["framerate"]},
     )
     picam2.configure(config)
@@ -369,7 +369,7 @@ def start_recording_async(duration_sec, output_path):
     with camera_lock:
         if picam2 is None:
             _start_camera_unlocked()
-        encoder = H264Encoder(bitrate=10_000_000)
+        encoder = H264Encoder(bitrate=30_000_000)
         output = FfmpegOutput(output_path)
         picam2.start_encoder(encoder, output)
 
