@@ -1,9 +1,9 @@
 """
-Step 5 - Smooth S-Curve point-to-point movement using Arbitrary Waveform.
+Step 5 - Smooth S-Curve point-to-point movement using Binary Block Transfer.
 
 This script moves the laser from point A to point B over N seconds using a
-tanh S-curve profile. This minimizes mechanical jerk and ensures the smoothest
-possible motion for the galvo mirrors.
+tanh S-curve profile. Uses IEEE 488.2 binary block data for maximum USB speed
+and stability.
 
 Usage:
     python galvo_tests/05_s_curve_move.py
@@ -16,20 +16,38 @@ import pyvisa
 from _common import resolve_resource
 
 
+def dac_to_binary_block(dac_values):
+    """
+    Convert a numpy array of DAC integers (0~16383) to an IEEE 488.2 binary block.
+    Format: #<digit><len><data> where each point is 2 bytes (Big Endian, MSB first).
+    """
+    # 1. Convert to 16-bit unsigned integers (Big Endian)
+    byte_data = bytearray()
+    for val in dac_values:
+        # High byte first, Low byte second
+        byte_data.append((val >> 8) & 0xFF)
+        byte_data.append(val & 0xFF)
+    
+    total_len = len(byte_data)
+    # Header: #9XXXXXXXXX (9 indicates the next 9 digits are the length)
+    header = f"#9{total_len:09d}".encode()
+    return header + byte_data
+
+
 def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
                         sample_rate_hz=200, s_factor=4.0, volt_per_deg=1.0):
     """
     Move the galvo from (x1, y1) to (x2, y2) using a tanh S-curve profile.
 
-    This function uploads a custom arbitrary waveform to the DG1000Z to
-    generate a smooth, vibration-free motion.
+    This function uploads a custom arbitrary waveform using binary block transfer
+    for lightning-fast, timeout-free USB communication.
 
     Parameters:
         awg (pyvisa.Resource): The open VISA resource of the DG1000Z.
         x1, y1 (float): Starting coordinates in degrees.
         x2, y2 (float): Target coordinates in degrees.
         duration_sec (float): Total travel time in seconds.
-        sample_rate_hz (int): Output update rate (Hz). Default 200 (safe for USB).
+        sample_rate_hz (int): Output update rate (Hz). Default 200.
         s_factor (float): Steepness of the S-curve. 4.0 is optimal.
         volt_per_deg (float): Galvo scaling factor (1.0, 0.8, or 0.5).
     """
@@ -73,27 +91,28 @@ def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
     x_dac = volts_to_dac(x_volts)
     y_dac = volts_to_dac(y_volts)
 
-    # 5. Convert DAC arrays to comma-separated strings
-    x_data_str = ",".join(map(str, x_dac))
-    y_data_str = ",".join(map(str, y_dac))
+    # 5. Convert DAC arrays to binary blocks (THIS IS THE MAGIC FIX!)
+    x_block = dac_to_binary_block(x_dac)
+    y_block = dac_to_binary_block(y_dac)
     
-    print(f"X-channel data size: {len(x_data_str)} characters")
-    print(f"Y-channel data size: {len(y_data_str)} characters")
+    print(f"X-channel binary data size: {len(x_block)} bytes")
+    print(f"Y-channel binary data size: {len(y_block)} bytes")
 
-    # 6. Upload and play waveforms on both channels
+    # 6. Upload binary waveforms (using write_raw to send raw bytes)
     print(f"Moving S-curve: ({x1:.2f}, {y1:.2f}) -> ({x2:.2f}, {y2:.2f}) in {duration_sec}s...")
 
     # Channel 1 (X-axis)
     awg.write(':SOUR1:FUNC:SHAP ARB')
     awg.write(f':SOUR1:FUNC:ARB:SRATE {sample_rate_hz:.0f}')
-    awg.write(f':SOUR1:TRACE:DATA VOLATILE,{x_data_str}')
+    # Send the binary block - Note the space after VOLATILE, is required
+    awg.write_raw(b':SOUR1:TRACE:DATA VOLATILE,' + x_block)
     awg.write('*OPC?')  # Wait for the operation to complete
     awg.read()          # Read the '1' response
 
     # Channel 2 (Y-axis)
     awg.write(':SOUR2:FUNC:SHAP ARB')
     awg.write(f':SOUR2:FUNC:ARB:SRATE {sample_rate_hz:.0f}')
-    awg.write(f':SOUR2:TRACE:DATA VOLATILE,{y_data_str}')
+    awg.write_raw(b':SOUR2:TRACE:DATA VOLATILE,' + y_block)
     awg.write('*OPC?')
     awg.read()
 
@@ -127,7 +146,8 @@ def main():
     print(f"Connecting to {res} ...")
     rm = pyvisa.ResourceManager()
     awg = rm.open_resource(res)
-    awg.timeout = 30000  # 30 seconds timeout for safe USB bulk transfers
+    # Even 5 seconds is enough now, but we keep 15s to be safe.
+    awg.timeout = 15000  
 
     try:
         # =====================================================
@@ -139,7 +159,7 @@ def main():
             x1=0.0, y1=0.0,       # Start point (degrees)
             x2=5.0, y2=3.0,       # End point (degrees)
             duration_sec=2.0,     # Total time (seconds)
-            sample_rate_hz=200,   # Safe USB rate (200 Hz = 400 points for 2 sec)
+            sample_rate_hz=200,   # Rock solid with binary transfer
             s_factor=4.0,         # S-curve steepness
             volt_per_deg=1.0      # Match your GVS002 jumper setting
         )
@@ -167,7 +187,6 @@ def main():
         return 1
     finally:
         # Safety: Turn off both outputs and close the connection
-        # Wrap each write in try-except to avoid timeout errors during shutdown
         print("Shutting down outputs...")
         try:
             awg.write(':OUTP1 OFF')
