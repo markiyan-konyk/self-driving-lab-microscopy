@@ -17,7 +17,7 @@ from _common import resolve_resource
 
 
 def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
-                        sample_rate_hz=500, s_factor=4.0, volt_per_deg=1.0):
+                        sample_rate_hz=200, s_factor=4.0, volt_per_deg=1.0):
     """
     Move the galvo from (x1, y1) to (x2, y2) using a tanh S-curve profile.
 
@@ -29,7 +29,7 @@ def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
         x1, y1 (float): Starting coordinates in degrees.
         x2, y2 (float): Target coordinates in degrees.
         duration_sec (float): Total travel time in seconds.
-        sample_rate_hz (int): Output update rate (Hz). Default 500 (safe for USB).
+        sample_rate_hz (int): Output update rate (Hz). Default 200 (safe for USB).
         s_factor (float): Steepness of the S-curve. 4.0 is optimal.
         volt_per_deg (float): Galvo scaling factor (1.0, 0.8, or 0.5).
     """
@@ -73,20 +73,27 @@ def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
     x_dac = volts_to_dac(x_volts)
     y_dac = volts_to_dac(y_volts)
 
-    # 5. Upload and play waveforms on both channels
+    # 5. Convert DAC arrays to comma-separated strings
+    x_data_str = ",".join(map(str, x_dac))
+    y_data_str = ",".join(map(str, y_dac))
+    
+    print(f"X-channel data size: {len(x_data_str)} characters")
+    print(f"Y-channel data size: {len(y_data_str)} characters")
+
+    # 6. Upload and play waveforms on both channels
     print(f"Moving S-curve: ({x1:.2f}, {y1:.2f}) -> ({x2:.2f}, {y2:.2f}) in {duration_sec}s...")
 
     # Channel 1 (X-axis)
     awg.write(':SOUR1:FUNC:SHAP ARB')
     awg.write(f':SOUR1:FUNC:ARB:SRATE {sample_rate_hz:.0f}')
-    awg.write(f':SOUR1:TRACE:DATA VOLATILE,{",".join(map(str, x_dac))}')
+    awg.write(f':SOUR1:TRACE:DATA VOLATILE,{x_data_str}')
     awg.write('*OPC?')  # Wait for the operation to complete
     awg.read()          # Read the '1' response
 
     # Channel 2 (Y-axis)
     awg.write(':SOUR2:FUNC:SHAP ARB')
     awg.write(f':SOUR2:FUNC:ARB:SRATE {sample_rate_hz:.0f}')
-    awg.write(f':SOUR2:TRACE:DATA VOLATILE,{",".join(map(str, y_dac))}')
+    awg.write(f':SOUR2:TRACE:DATA VOLATILE,{y_data_str}')
     awg.write('*OPC?')
     awg.read()
 
@@ -99,10 +106,10 @@ def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
     awg.write(':SOUR2:VOLT:OFFS 0')
     awg.write(':OUTP2 ON')
 
-    # 6. Wait for the motion to complete
+    # 7. Wait for the motion to complete
     time.sleep(duration_sec + 0.05)
 
-    # 7. Stop the loop and hold the final position (DC mode)
+    # 8. Stop the loop and hold the final position (DC mode)
     awg.write(':SOUR1:FUNC:SHAP DC')
     awg.write(f':SOUR1:VOLT:OFFS {vx_end}')
     awg.write(':SOUR2:FUNC:SHAP DC')
@@ -120,7 +127,7 @@ def main():
     print(f"Connecting to {res} ...")
     rm = pyvisa.ResourceManager()
     awg = rm.open_resource(res)
-    awg.timeout = 15000  # 15 seconds timeout for large data transfers
+    awg.timeout = 30000  # 30 seconds timeout for safe USB bulk transfers
 
     try:
         # =====================================================
@@ -132,7 +139,8 @@ def main():
             x1=0.0, y1=0.0,       # Start point (degrees)
             x2=5.0, y2=3.0,       # End point (degrees)
             duration_sec=2.0,     # Total time (seconds)
-            sample_rate_hz=500,   # Safe USB rate (500 Hz = 1000 points for 2 sec)
+            sample_rate_hz=200,   # Safe USB rate (200 Hz = 400 points for 2 sec)
+            s_factor=4.0,         # S-curve steepness
             volt_per_deg=1.0      # Match your GVS002 jumper setting
         )
 
@@ -144,7 +152,8 @@ def main():
             x1=5.0, y1=3.0,
             x2=0.0, y2=0.0,
             duration_sec=1.5,
-            sample_rate_hz=500,
+            sample_rate_hz=200,
+            s_factor=4.0,
             volt_per_deg=1.0
         )
 
