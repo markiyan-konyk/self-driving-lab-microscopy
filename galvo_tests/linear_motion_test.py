@@ -62,5 +62,6 @@ def move_s_curve(galvo_controller, x1, y1, x2, y2, duration_sec,
     galvo_controller.set_static_angle(1, x2)
     galvo_controller.set_static_angle(2, y2)
     print("S-curve movement completed and held at target.")
-
+                   
+galvo = GalvoController(resource_string)
 move_s_curve(galvo, x1=0, y1=0, x2=5, y2=3, duration_sec=2.0, s_factor=4.0)
