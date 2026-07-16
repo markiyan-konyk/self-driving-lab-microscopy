@@ -7,7 +7,6 @@ possible motion for the galvo mirrors.
 
 Usage:
     python galvo_tests/05_s_curve_move.py
-    # Or set GALVO_RESOURCE env var if needed.
 """
 
 import sys
@@ -18,7 +17,7 @@ from _common import resolve_resource
 
 
 def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
-                        sample_rate_hz=2000, s_factor=4.0, volt_per_deg=1.0):
+                        sample_rate_hz=500, s_factor=4.0, volt_per_deg=1.0):
     """
     Move the galvo from (x1, y1) to (x2, y2) using a tanh S-curve profile.
 
@@ -30,7 +29,7 @@ def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
         x1, y1 (float): Starting coordinates in degrees.
         x2, y2 (float): Target coordinates in degrees.
         duration_sec (float): Total travel time in seconds.
-        sample_rate_hz (int): Output update rate (Hz). Default 2000.
+        sample_rate_hz (int): Output update rate (Hz). Default 500 (safe for USB).
         s_factor (float): Steepness of the S-curve. 4.0 is optimal.
         volt_per_deg (float): Galvo scaling factor (1.0, 0.8, or 0.5).
     """
@@ -51,6 +50,8 @@ def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
     elif total_points < 10:
         total_points = 10
         sample_rate_hz = total_points / duration_sec
+
+    print(f"Total waveform points: {total_points} (sample rate: {sample_rate_hz:.0f} Hz)")
 
     # 2. Generate tanh S-curve weights (ranging from 0 to 1)
     t = np.linspace(-s_factor, s_factor, total_points)
@@ -79,14 +80,21 @@ def move_s_curve_direct(awg, x1, y1, x2, y2, duration_sec,
     awg.write(':SOUR1:FUNC:SHAP ARB')
     awg.write(f':SOUR1:FUNC:ARB:SRATE {sample_rate_hz:.0f}')
     awg.write(f':SOUR1:TRACE:DATA VOLATILE,{",".join(map(str, x_dac))}')
-    awg.write(':SOUR1:VOLT 20')          # 20 Vpp = ±10V full scale
-    awg.write(':SOUR1:VOLT:OFFS 0')
-    awg.write(':OUTP1 ON')
+    awg.write('*OPC?')  # Wait for the operation to complete
+    awg.read()          # Read the '1' response
 
     # Channel 2 (Y-axis)
     awg.write(':SOUR2:FUNC:SHAP ARB')
     awg.write(f':SOUR2:FUNC:ARB:SRATE {sample_rate_hz:.0f}')
     awg.write(f':SOUR2:TRACE:DATA VOLATILE,{",".join(map(str, y_dac))}')
+    awg.write('*OPC?')
+    awg.read()
+
+    # Set amplitude and offset (full scale ±10V)
+    awg.write(':SOUR1:VOLT 20')
+    awg.write(':SOUR1:VOLT:OFFS 0')
+    awg.write(':OUTP1 ON')
+
     awg.write(':SOUR2:VOLT 20')
     awg.write(':SOUR2:VOLT:OFFS 0')
     awg.write(':OUTP2 ON')
@@ -112,7 +120,7 @@ def main():
     print(f"Connecting to {res} ...")
     rm = pyvisa.ResourceManager()
     awg = rm.open_resource(res)
-    awg.timeout = 5000
+    awg.timeout = 15000  # 15 seconds timeout for large data transfers
 
     try:
         # =====================================================
@@ -124,6 +132,7 @@ def main():
             x1=0.0, y1=0.0,       # Start point (degrees)
             x2=5.0, y2=3.0,       # End point (degrees)
             duration_sec=2.0,     # Total time (seconds)
+            sample_rate_hz=500,   # Safe USB rate (500 Hz = 1000 points for 2 sec)
             volt_per_deg=1.0      # Match your GVS002 jumper setting
         )
 
@@ -135,6 +144,7 @@ def main():
             x1=5.0, y1=3.0,
             x2=0.0, y2=0.0,
             duration_sec=1.5,
+            sample_rate_hz=500,
             volt_per_deg=1.0
         )
 
@@ -143,12 +153,25 @@ def main():
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
         return 1
+    except Exception as e:
+        print(f"\nError during motion: {e}")
+        return 1
     finally:
         # Safety: Turn off both outputs and close the connection
+        # Wrap each write in try-except to avoid timeout errors during shutdown
         print("Shutting down outputs...")
-        awg.write(':OUTP1 OFF')
-        awg.write(':OUTP2 OFF')
-        awg.close()
+        try:
+            awg.write(':OUTP1 OFF')
+        except Exception:
+            pass
+        try:
+            awg.write(':OUTP2 OFF')
+        except Exception:
+            pass
+        try:
+            awg.close()
+        except Exception:
+            pass
         print("Done.")
 
 
