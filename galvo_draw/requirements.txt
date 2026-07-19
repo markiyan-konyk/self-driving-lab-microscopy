@@ -1,3 +1,4 @@
-# galvo_draw deps (rclpy + scopio_interfaces come from ROS, not pip).
+# galvo_draw deps -- pure API client, no ROS.
 flask
 numpy
+-e ../scopio_client

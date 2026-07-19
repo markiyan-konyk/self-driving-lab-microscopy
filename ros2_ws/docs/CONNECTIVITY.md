@@ -1,65 +1,62 @@
-# Connecting to the SCOPIO ROS graph (now and later)
+# Connecting to SCOPIO
 
-The whole point of the rewrite is that **any program can drive the rig** by
-joining the ROS 2 graph and speaking `scopio_interfaces` (see `INTERFACES.md`).
-This doc explains how a program connects today and the path to running it off
-the Pi later.
+**External programs connect through the API gateway** — HTTP/WebSocket on
+port 8000 with an API key. That is the supported, documented, authenticated
+path, and it works from any OS on any network that can reach the Pi:
 
-## How ROS 2 discovery works (the one thing to understand)
-ROS 2 uses DDS. Nodes on the **same network** with the **same `ROS_DOMAIN_ID`**
-(default `0`) find each other **automatically** — no IP addresses, no broker.
-The container runs with `network_mode: host`, so the Pi's nodes are on the LAN
-directly. That is why a second computer "just sees" `/scopio/...`.
+- Manual: [`../../docs/API.md`](../../docs/API.md)
+- SDK: [`../../scopio_client`](../../scopio_client)
+- Interactive docs: `http://<pi>:8000/docs`
+- Discovery: `GET /api/v1/interfaces`
 
 ```bash
-# on any machine with ROS 2 installed + sourced, same LAN, same domain:
-export ROS_DOMAIN_ID=0
-ros2 topic list            # should show /scopio/...
-ros2 topic echo /scopio/camera/state
+curl http://<pi>:8000/api/v1/health
+curl -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+     -d '{"command": ":OUTPut1 OFF"}' \
+     http://<pi>:8000/api/v1/service/awg/write
 ```
-If you run several rigs on one LAN, give each a distinct `ROS_DOMAIN_ID` so they
-don't cross-talk.
 
-## Now: same-LAN clients (works today)
-- The UI (the separate `../ui` app) is itself just a LAN client — run it on the
-  Pi or any other machine; it reaches the browser at `http://<host>:8080` and the
-  backend over DDS. It is the proof-of-concept of "UI on a different machine."
-- Any **other** program (a galvo app, a controller) runs on any LAN machine,
-  joins the graph, and calls services / subscribes to topics. Nothing special is
-  required — this is the intended way to build side-apps now.
-- Verify external control end-to-end:
-  ```bash
-  ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite \
-    "{command: ':OUTPut1 OFF'}"
-  ```
+Nothing below this line is needed to *use* the microscope. The rest of this
+doc is about the raw DDS layer, which is now an implementation detail.
 
-## Now: over a USB cable (point-to-point, no network)
-Put the Pi in **USB-Ethernet gadget** mode so a laptop connected by USB shares a
-private link the DDS traffic rides on:
-1. Enable the gadget (`dtoverlay=dwc2`, `modules-load=dwc2,g_ether` on the Pi).
-2. The cable then presents a `usb0` network interface on both ends with
-   link-local IPs.
-3. With ROS 2 sourced and the same `ROS_DOMAIN_ID` on both, discovery works over
-   that interface exactly like a LAN. (If multicast is flaky on the link, set a
-   unicast `ROS_STATIC_PEERS` / a Fast DDS peers file — documented when needed.)
+## The DDS graph (on-Pi / backend development only)
 
-This is the planned "connect over USB" path; only the link changes, not the ROS
-interfaces.
+Inside the Pi, the driver nodes and the gateway share one host-network DDS
+graph (`ROS_DOMAIN_ID` 0, Fast-DDS). Because everything that needs the graph
+runs on the same machine, discovery is trivially localhost — none of the old
+cross-machine DDS ceremony (unicast peer XMLs, UDP 7400-7600 firewall holes,
+WSL2 mirrored networking) exists anymore.
 
-## Later: off-site / cloud / cluster (documented, not yet implemented)
-DDS multicast does not cross the open internet. Two clean options when we get
-there:
-- **Mesh VPN** (Tailscale / Husarnet / ZeroTier): puts the remote machine on the
-  same *virtual* LAN, so DDS "just works" with no ROS changes. Simplest.
-- **`zenoh-bridge-ros2dds`**: a bridge process on each side that carries the ROS
-  graph over a single TCP/QUIC connection — better for lossy/WAN links and
-  firewalls.
+For backend development you can still poke the graph directly *on the Pi*:
 
-Either way the **interfaces do not change** — that is the payoff of freezing the
-contract. A cloud controller is just another client.
+```bash
+docker exec -it scopio bash
+ros2 topic list                              # /scopio/...
+ros2 topic echo /scopio/stage/position
+ros2 service call /scopio/stage/jog scopio_interfaces/srv/StageJog "{dx: 40}"
+```
 
-## Security note
-There is currently **no auth on the ROS graph** — anyone on the network/domain
-can command the hardware. Keep it on a trusted LAN/VPN. The web UI keeps its own
-password; the raw ROS layer does not. Add DDS Security (SROS2) or keep it behind
-the VPN before exposing it more widely.
+A second machine with ROS 2 on the same LAN *can* still join the graph (same
+domain ID, multicast permitting) — occasionally handy for Foxglove or
+debugging — but it is unauthenticated and unsupported as a client path. If
+you find yourself wiring DDS peers files again, stop: add what you need to
+the gateway instead.
+
+## Off-site access (when it comes up)
+
+The gateway is ordinary HTTP, so remote access is ordinary web plumbing:
+put the Pi on a mesh VPN (Tailscale is the easy one) and use
+`http://<tailscale-ip>:8000` exactly as on the LAN, or front it with a TLS
+reverse proxy. Do **not** port-forward it raw to the internet — the API key
+would travel unencrypted.
+
+## Security model
+
+- The **gateway is the only LAN-facing surface** (port 8000): API-key auth on
+  every route except `/api/v1/health`, keys in `ros2_ws/secrets/api_keys.json`
+  (generate/revoke with `scripts/generate_api_key.py`; hot-reloaded).
+- The **camera server binds to loopback** (127.0.0.1:8081) — reachable only
+  through the gateway's authenticated proxy.
+- The **DDS graph has no auth** — which is acceptable precisely because it no
+  longer needs to face the network; it's localhost plumbing between the
+  drivers and the gateway. Keep it that way.

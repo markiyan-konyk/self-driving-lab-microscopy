@@ -1,97 +1,65 @@
 #!/usr/bin/env python3
-"""SCOPIO Web UI - a standalone ROS 2 CLIENT application.
+"""SCOPIO Web UI - a standalone API CLIENT application.
 
-This program owns NO hardware. It is the reference UI for the SCOPIO microscope
-and it talks to the backend (the ros2_ws driver nodes) purely over ROS:
+This program owns NO hardware and speaks NO ROS. It is the reference UI for
+the SCOPIO microscope and talks to the Pi's API gateway over plain HTTP/
+WebSocket through the scopio_client SDK:
 
-  subscribes:  image/compressed, camera/state, stage/position, awg/status,
-               beads, calibration
-  calls srv:   camera/set_controls, camera/set_framerate, camera/white_balance,
-               stage/jog, calibration/set, awg/write
+  subscribes (WS):  camera/state, stage/position, awg/status, beads, calibration
+  video (MJPEG):    /api/v1/stream.mjpg  -> live view + client-side recording
+  services (HTTP):  stage/jog, calibration/set, awg/write, camera controls
+  action (WS):      camera/autofocus (runs on the backend)
 
-Because it is a plain ROS client, it can run on the Pi OR on any other machine
-on the same ROS graph -- that is the whole point of the backend/UI split.
+Because it is a plain HTTP client it runs on ANY machine that can reach the
+Pi -- no Docker, no WSL2, no DDS, no firewall rules. Several people can run
+their own UI against the same microscope at once.
 
-Recording happens HERE, client-side: the subscribed JPEG stream is written to
+Recording happens HERE, client-side: the ingested JPEG stream is written to
 MP4 in THIS app's own ./recordings folder, so footage lives with whoever runs
-the UI (Pi or laptop), and the Pi takes no recording/disk load.
+the UI, and the Pi takes no recording/disk load.
 
-Run (after sourcing ROS 2 and the backend's scopio_interfaces):
-    python3 run_ui.py                 # serves http://0.0.0.0:8080
-Env: SCOPIO_UI_PORT (8080), SCOPIO_UI_PASSWORD ("password"),
-     SCOPIO_NAMESPACE ("/scopio").
+Run:
+    pip install -r requirements.txt        # includes -e ../scopio_client
+    set SCOPIO_URL=http://<pi-ip>:8000
+    set SCOPIO_API_KEY=<key from ros2_ws/scripts/generate_api_key.py>
+    python run_ui.py                       # serves http://0.0.0.0:8080
+
+Env: SCOPIO_URL, SCOPIO_API_KEY (required); SCOPIO_UI_PORT (8080),
+     SCOPIO_UI_PASSWORD ("password").
 """
 
 import os
 import re
 import json
 import time
-import math
 import secrets
+import logging
 import threading
 import subprocess
 from functools import wraps
-
-import rclpy
-from rclpy.node import Node
-from rclpy.action import ActionClient
-from rclpy.executors import MultiThreadedExecutor
-from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy
-
-from sensor_msgs.msg import CompressedImage
-from scopio_interfaces.msg import CameraState, StagePosition, AwgStatus, BeadArray, Calibration
-from scopio_interfaces.srv import (
-    SetCameraControls, SetFramerate, WhiteBalance, StageJog, CalibrationSet, AwgWrite,
-)
-from scopio_interfaces.action import Autofocus
 
 from flask import (
     Flask, Response, jsonify, render_template_string, request, session,
     redirect, url_for, send_from_directory, abort,
 )
 
+from scopio_client import Scopio, ScopioError
 from galvo_geometry import GalvoClient
 
 # ========== Config ==========
 HERE = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(HERE, "frontend")
 RECORDINGS_DIR = os.path.join(HERE, "recordings")
-NS = os.environ.get("SCOPIO_NAMESPACE", "/scopio").rstrip("/")
 PORT = int(os.environ.get("SCOPIO_UI_PORT", 8080))
 PASSWORD = os.environ.get("SCOPIO_UI_PASSWORD", "password")
-# Optional: pull the live view from a Pi-hosted MJPEG server instead of the ROS
-# image topic (used when the camera can't run inside the ROS container -- see
-# pi_camera_server.py / WINDOWS_CLIENT.md). e.g. http://10.42.0.1:8081/stream.mjpg
-CAMERA_MJPEG_URL = os.environ.get("CAMERA_MJPEG_URL", "").strip()
-NAN = float("nan")
-
-
-def _derive_cam_ctrl_base():
-    """The camera control API lives on the same host:port as the MJPEG stream,
-    e.g. http://10.42.0.1:8081/stream.mjpg -> http://10.42.0.1:8081. When set, the
-    UI drives the real Pi camera over HTTP instead of the (camera-less) ROS node."""
-    if not CAMERA_MJPEG_URL:
-        return None
-    from urllib.parse import urlsplit
-    p = urlsplit(CAMERA_MJPEG_URL)
-    return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else None
-
-
-CAM_CTRL_BASE = _derive_cam_ctrl_base()
-_stream_fps = 0.0                        # measured fps of the ingested MJPEG stream
-
-
-def _cam_http(path, method="GET", payload=None, timeout=8.0):
-    """Call the Pi camera server's control API and return the parsed JSON."""
-    import urllib.request
-    data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(
-        CAM_CTRL_BASE + path, data=data, method=method,
-        headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+SCOPIO_URL = os.environ.get("SCOPIO_URL", "http://127.0.0.1:8000")
+SCOPIO_API_KEY = os.environ.get("SCOPIO_API_KEY", "")
 
 MIN_FPS, MAX_FPS = 1, 120
+
+log = logging.getLogger("scopio_ui")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
+
 
 # Screen-direction -> stage displacement, mirrors the backend's convention
 # (camera mounted 90 deg to the stage: screen up/down = stage X, left/right = Y).
@@ -106,101 +74,23 @@ def dir_delta(direction, steps):
     }.get(direction)
 
 
-class UiClient(Node):
-    """The ROS half: caches subscribed topics, holds service clients."""
+class State:
+    """Live microscope state, fed by SDK subscriptions + the MJPEG ingest."""
 
     def __init__(self):
-        super().__init__("scopio_ui")
-        self._lock = threading.Lock()
-        self.jpeg = None
-        self.camera_state = None
-        self.stage = None
-        self.awg = None
-        self.beads = None
-        self.calibration = None
-
-        def t(name):
-            return f"{NS}/{name}"
-
-        self.create_subscription(CompressedImage, t("image/compressed"), self._on_image, 5)
-        self.create_subscription(CameraState, t("camera/state"), self._on_camera, 5)
-        self.create_subscription(StagePosition, t("stage/position"), self._on_stage, 5)
-        self.create_subscription(AwgStatus, t("awg/status"), self._on_awg, 5)
-        self.create_subscription(BeadArray, t("beads"), self._on_beads, 5)
-        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                             history=HistoryPolicy.KEEP_LAST)
-        self.create_subscription(Calibration, t("calibration"), self._on_calibration, latched)
-
-        self.cli_controls = self.create_client(SetCameraControls, t("camera/set_controls"))
-        self.cli_framerate = self.create_client(SetFramerate, t("camera/set_framerate"))
-        self.cli_wb = self.create_client(WhiteBalance, t("camera/white_balance"))
-        self.cli_jog = self.create_client(StageJog, t("stage/jog"))
-        self.cli_calib = self.create_client(CalibrationSet, t("calibration/set"))
-        self.cli_awg = self.create_client(AwgWrite, t("awg/write"))
-        self.act_autofocus = ActionClient(self, Autofocus, t("camera/autofocus"))
-
-    # --- subscription callbacks ---
-    def _on_image(self, m):
-        with self._lock:
-            self.jpeg = bytes(m.data)
-
-    def _on_camera(self, m):
-        with self._lock:
-            self.camera_state = m
-
-    def _on_stage(self, m):
-        with self._lock:
-            self.stage = m
-
-    def _on_awg(self, m):
-        with self._lock:
-            self.awg = m
-
-    def _on_beads(self, m):
-        with self._lock:
-            self.beads = m
-
-    def _on_calibration(self, m):
-        with self._lock:
-            self.calibration = m
-
-    # --- synchronous service call from a Flask thread ---
-    def call(self, client, req, timeout=5.0):
-        if not client.wait_for_service(timeout_sec=1.0):
-            raise RuntimeError(f"service {client.srv_name} unavailable")
-        future = client.call_async(req)
-        done = threading.Event()
-        future.add_done_callback(lambda _f: done.set())
-        if not done.wait(timeout):
-            raise RuntimeError("service call timed out")
-        return future.result()
-
-    @staticmethod
-    def wait_future(future, timeout):
-        done = threading.Event()
-        future.add_done_callback(lambda _f: done.set())
-        if not done.wait(timeout):
-            raise RuntimeError("ROS future timed out")
-        return future.result()
-
-    def run_autofocus(self, z_range=2000, steps=15, settle_s=0.2):
-        if not self.act_autofocus.wait_for_server(timeout_sec=3.0):
-            raise RuntimeError("autofocus action unavailable")
-        goal = Autofocus.Goal()
-        goal.z_range = int(z_range)
-        goal.steps = int(steps)
-        goal.settle_s = float(settle_s)
-        handle = self.wait_future(self.act_autofocus.send_goal_async(goal), 5.0)
-        if not handle.accepted:
-            raise RuntimeError("autofocus goal rejected")
-        return self.wait_future(handle.get_result_async(), 180.0).result
+        self.lock = threading.Lock()
+        self.jpeg = None            # newest JPEG frame (live view + recording)
+        self.stream_fps = 0.0       # measured fps of the ingested stream
+        self.camera = None          # camera/state message dict
+        self.stage = None           # stage/position message dict
+        self.awg = None             # awg/status message dict
+        self.beads = None           # beads message dict
+        self.calibration = None     # calibration message dict (latched)
+        self.connected = False      # gateway subscriptions established
 
 
-# ========== Flask app ==========
-app = Flask(__name__)
-app.secret_key = os.environ.get("SCOPIO_UI_SESSION_SECRET") or secrets.token_hex(16)
-
-node = None          # set in main()
+state = State()
+scope = None      # set in main()
 galvo = GalvoClient()
 steps = {"x": 40, "y": 40, "z": 40}     # client-side step sizes
 record_duration = 600                    # seconds, or None for infinite
@@ -218,44 +108,54 @@ def _read(name):
         return f.read()
 
 
-def _mjpeg_ingest_loop(url):
-    """Pull an external MJPEG stream (e.g. the Pi's pi_camera_server.py) and push
-    each JPEG into node.jpeg -- exactly where ROS image frames would land. This
-    makes the live view AND client-side recording work even when the ROS camera
-    topic is empty (no camera inside the container). Frames are split by JPEG
-    markers, so any MJPEG boundary format works."""
-    global _stream_fps
-    import urllib.request
+# ---- background workers ----
+def _subscribe_loop():
+    """Establish the WS subscriptions; retry until the gateway is reachable
+    (so the UI comes up fine even if the Pi boots later)."""
+    def store(attr):
+        def cb(msg, _envelope):
+            with state.lock:
+                setattr(state, attr, msg)
+        return cb
+
+    while True:
+        try:
+            scope.subscribe("camera/state", store("camera"), rate_hz=4)
+            scope.subscribe("stage/position", store("stage"), rate_hz=10)
+            scope.subscribe("awg/status", store("awg"), rate_hz=2)
+            scope.subscribe("beads", store("beads"), rate_hz=5)
+            scope.subscribe("calibration", store("calibration"))
+            state.connected = True
+            log.info("subscribed to microscope telemetry")
+            return
+        except ScopioError as e:
+            log.warning(f"cannot subscribe yet ({e}); retrying in 3 s")
+            time.sleep(3)
+
+
+def _frame_ingest_loop():
+    """Pull the live MJPEG stream through the gateway into state.jpeg -- feeds
+    /video_feed, recording and the focus display. Reconnects forever."""
     last_t = time.time()
     while True:
         try:
-            with urllib.request.urlopen(url, timeout=5) as r:
-                buf = b""
-                while True:
-                    chunk = r.read(8192)
-                    if not chunk:
-                        break
-                    buf += chunk
-                    while True:
-                        start = buf.find(b"\xff\xd8")            # JPEG SOI
-                        end = buf.find(b"\xff\xd9", start + 2)   # JPEG EOI
-                        if start < 0 or end < 0:
-                            break
-                        frame = buf[start:end + 2]
-                        buf = buf[end + 2:]
-                        with node._lock:
-                            node.jpeg = frame
-                        now = time.time()
-                        dt = now - last_t
-                        last_t = now
-                        if dt > 0:
-                            _stream_fps = 0.85 * _stream_fps + 0.15 * (1.0 / dt)
-                    if len(buf) > 4_000_000:                     # guard runaway buffer
-                        buf = buf[-1_000_000:]
-        except Exception as e:
-            if node:
-                node.get_logger().warning(f"MJPEG ingest ({url}) failed: {e}; retrying in 2s")
+            for frame in scope.stream_frames():
+                with state.lock:
+                    state.jpeg = frame
+                now = time.time()
+                dt = now - last_t
+                last_t = now
+                if dt > 0:
+                    state.stream_fps = 0.85 * state.stream_fps + 0.15 * (1.0 / dt)
+        except ScopioError as e:
+            state.stream_fps = 0.0
+            log.warning(f"camera stream unavailable ({e}); retrying in 2 s")
             time.sleep(2)
+
+
+# ========== Flask app ==========
+app = Flask(__name__)
+app.secret_key = os.environ.get("SCOPIO_UI_SESSION_SECRET") or secrets.token_hex(16)
 
 
 # ---- auth ----
@@ -303,16 +203,18 @@ def index():
 # ---- camera state helpers ----
 def _cam_dict():
     """Current camera controls as a plain dict for the template / API."""
-    cs = node.camera_state if node else None
+    with state.lock:
+        cs = state.camera
     if cs is None:
         return {"red_gain": 2.4, "green_gain": 1.0, "blue_gain": 2.5, "framerate": 30,
                 "exposure": 20000, "analogue_gain": 1.0, "colour_gain": 1.0,
                 "contrast": 1.0, "saturation": 1.0, "brightness": 0.0, "sharpness": 1.0}
-    return {"red_gain": cs.red_gain, "green_gain": cs.green_gain, "blue_gain": cs.blue_gain,
-            "framerate": cs.target_fps, "exposure": cs.exposure_us,
-            "analogue_gain": cs.analogue_gain, "colour_gain": cs.colour_gain,
-            "contrast": cs.contrast, "saturation": cs.saturation,
-            "brightness": cs.brightness, "sharpness": cs.sharpness}
+    return {"red_gain": cs["red_gain"], "green_gain": cs["green_gain"],
+            "blue_gain": cs["blue_gain"], "framerate": cs["target_fps"],
+            "exposure": cs["exposure_us"], "analogue_gain": cs["analogue_gain"],
+            "colour_gain": cs["colour_gain"], "contrast": cs["contrast"],
+            "saturation": cs["saturation"], "brightness": cs["brightness"],
+            "sharpness": cs["sharpness"]}
 
 
 @app.route("/video_feed")
@@ -320,8 +222,8 @@ def _cam_dict():
 def video_feed():
     def gen():
         while True:
-            with node._lock:
-                jpeg = node.jpeg
+            with state.lock:
+                jpeg = state.jpeg
             if jpeg is None:
                 time.sleep(0.05)
                 continue
@@ -334,26 +236,29 @@ def video_feed():
 @app.route("/status")
 @login_required
 def status():
-    connected = bool(node.stage and node.stage.connected)
-    return jsonify({"controller_connected": connected, "steps": steps})
+    with state.lock:
+        st = state.stage
+    return jsonify({"controller_connected": bool(st and st["connected"]),
+                    "steps": steps})
 
 
 @app.route("/telemetry")
 @login_required
 def telemetry():
-    st = node.stage
-    cs = node.camera_state
-    pos = {"x": st.x, "y": st.y, "z": st.z} if st else {"x": 0, "y": 0, "z": 0}
-    stage_um = {"x": st.x_um, "y": st.y_um, "z": st.z_um} if st else {"x": 0, "y": 0, "z": 0}
+    with state.lock:
+        st, cs, awg = state.stage, state.camera, state.awg
+    pos = {"x": st["x"], "y": st["y"], "z": st["z"]} if st else {"x": 0, "y": 0, "z": 0}
+    stage_um = ({"x": st["x_um"], "y": st["y_um"], "z": st["z_um"]}
+                if st else {"x": 0, "y": 0, "z": 0})
     laser = galvo.state()
-    laser["connected"] = bool(node.awg and node.awg.connected)
+    laser["connected"] = bool(awg and awg["connected"])
     laser["global_um"] = {k: round(v, 1) for k, v in galvo.global_um(stage_um).items()}
-    fps = round(_stream_fps, 1) if CAMERA_MJPEG_URL else (cs.measured_fps if cs else 0.0)
+    fps = round(state.stream_fps, 1) or (cs["measured_fps"] if cs else 0.0)
     return jsonify({
         "position": pos,
         "fps": fps,
-        "target_fps": cs.target_fps if cs else 0.0,
-        "controller_connected": bool(st and st.connected),
+        "target_fps": cs["target_fps"] if cs else 0.0,
+        "controller_connected": bool(st and st["connected"]),
         "laser": laser,
     })
 
@@ -366,11 +271,10 @@ def move(direction):
     if delta is None:
         return "Unknown direction", 404
     try:
-        req = StageJog.Request(); req.dx, req.dy, req.dz = delta
-        res = node.call(node.cli_jog, req)
-        if not res.success:
-            return res.message or "jog failed", 503
-    except Exception as e:
+        res = scope.stage.jog(*delta)
+        if not res.get("success"):
+            return res.get("message") or "jog failed", 503
+    except ScopioError as e:
         return str(e), 503
     return "OK", 200
 
@@ -393,35 +297,23 @@ def set_step(axis, value):
     return str(steps[axis]), 200
 
 
-# ---- camera ----
+# ---- camera (curated gateway endpoints -> the Pi camera server) ----
 @app.route("/get_camera_controls")
 @login_required
 def get_camera_controls():
-    if CAM_CTRL_BASE:
-        try:
-            return jsonify(_cam_http("/controls"))
-        except Exception:
-            pass          # fall back to defaults if the camera server is down
-    return jsonify(_cam_dict())
+    try:
+        return jsonify(scope.camera.get_controls())
+    except ScopioError:
+        return jsonify(_cam_dict())     # fall back to cached ROS state
 
 
 @app.route("/set_camera_controls", methods=["POST"])
 @login_required
 def set_camera_controls():
     d = request.get_json() or {}
-    if CAM_CTRL_BASE:
-        try:
-            _cam_http("/controls", "POST", d)
-            return "OK"
-        except Exception as e:
-            return str(e), 503
-    req = SetCameraControls.Request()
-    for f in ("red_gain", "green_gain", "blue_gain", "colour_gain", "analogue_gain",
-              "contrast", "saturation", "brightness", "sharpness"):
-        setattr(req, f, float(d[f]) if f in d else NAN)
     try:
-        node.call(node.cli_controls, req)
-    except Exception as e:
+        scope.camera.set_controls(**d)
+    except ScopioError as e:
         return str(e), 503
     return "OK"
 
@@ -431,21 +323,13 @@ def set_camera_controls():
 def set_framerate():
     d = request.get_json() or {}
     fps = float(d.get("fps", 30))
-    if CAM_CTRL_BASE:
-        try:
-            res = _cam_http("/controls", "POST", {"framerate": fps})
-            return jsonify({"framerate": res.get("framerate", fps),
-                            "exposure": res.get("exposure", 0),
-                            "analogue_gain": res.get("analogue_gain", 1.0)})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 503
-    req = SetFramerate.Request(); req.fps = fps
     try:
-        res = node.call(node.cli_framerate, req)
-    except Exception as e:
+        res = scope.camera.set_controls(framerate=fps)
+    except ScopioError as e:
         return jsonify({"error": str(e)}), 503
-    return jsonify({"framerate": res.framerate, "exposure": res.exposure_us,
-                    "analogue_gain": res.analogue_gain})
+    return jsonify({"framerate": res.get("framerate", fps),
+                    "exposure": res.get("exposure", 0),
+                    "analogue_gain": res.get("analogue_gain", 1.0)})
 
 
 @app.route("/white_balance", methods=["POST"])
@@ -459,13 +343,10 @@ def white_balance():
     def run():
         global _wb_running
         try:
-            if CAM_CTRL_BASE:
-                res = _cam_http("/white_balance", "POST", {}, timeout=8.0)
-                node.get_logger().info(f"white balance: {res}")
-            else:
-                node.call(node.cli_wb, WhiteBalance.Request(), timeout=12.0)
-        except Exception as e:
-            node.get_logger().warning(f"white balance failed: {e}")
+            res = scope.camera.white_balance()
+            log.info(f"white balance: {res}")
+        except ScopioError as e:
+            log.warning(f"white balance failed: {e}")
         finally:
             _wb_running = False
 
@@ -479,55 +360,6 @@ def calibration_status():
     return jsonify({"running": _wb_running or _af_running})
 
 
-def _focus_metric():
-    """Sharpness of the current frame: variance of the Laplacian (higher = sharper).
-    Uses the live frame the UI already has (ROS topic or ingested MJPEG)."""
-    with node._lock:
-        j = node.jpeg
-    if not j:
-        return 0.0
-    import cv2
-    import numpy as np
-    img = cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        return 0.0
-    return float(cv2.Laplacian(img, cv2.CV_64F).var())
-
-
-def _jog_z(dz):
-    """Relative Z jog over ROS (drives the real stepper). Returns True if applied."""
-    req = StageJog.Request(); req.dx = 0; req.dy = 0; req.dz = int(dz)
-    try:
-        res = node.call(node.cli_jog, req)
-        return bool(getattr(res, "success", True))
-    except Exception as e:
-        node.get_logger().warning(f"autofocus jog failed: {e}")
-        return False
-
-
-def _run_autofocus(z_range=2000, steps=15, settle_s=0.35):
-    """Sweep Z over a range, measure sharpness at each step, return to the sharpest.
-    Approaches from below so mechanical backlash is taken up in one direction."""
-    half = int(z_range // 2)
-    step = max(1, int(z_range // max(1, steps)))
-    if not _jog_z(-half):
-        raise RuntimeError("stage not responding (is the controller connected?)")
-    time.sleep(settle_s)
-    best_m, best_z = -1.0, None
-    for i in range(steps + 1):
-        time.sleep(settle_s)
-        m = _focus_metric()
-        z = node.stage.z if node.stage else i * step
-        if m > best_m:
-            best_m, best_z = m, z
-        if i < steps:
-            _jog_z(step)
-    if best_z is not None:                       # return to the sharpest plane
-        cur = node.stage.z if node.stage else 0
-        _jog_z(best_z - cur)
-    return best_m, best_z
-
-
 @app.route("/autofocus", methods=["POST"])
 @login_required
 def autofocus():
@@ -539,14 +371,14 @@ def autofocus():
     def run():
         global _af_running
         try:
-            if CAM_CTRL_BASE:                     # UI-orchestrated: real frames + ROS stage
-                metric, z = _run_autofocus()
-                node.get_logger().info(f"autofocus done: best sharpness {metric:.0f} at z={z}")
-            else:                                 # backend action (ROS camera present)
-                res = node.run_autofocus()
-                node.get_logger().info(f"autofocus: {res.message} (best_z={res.best_z})")
-        except Exception as e:
-            node.get_logger().warning(f"autofocus failed: {e}")
+            # Backend action: the camera node sweeps Z with the stage and
+            # measures sharpness on its own frames -- works for ANY client.
+            res = scope.camera.autofocus(z_range=2000, steps=15, settle_s=0.2)
+            r = res.get("result") or {}
+            log.info(f"autofocus {res.get('status')}: {r.get('message')} "
+                     f"(best_z={r.get('best_z')})")
+        except ScopioError as e:
+            log.warning(f"autofocus failed: {e}")
         finally:
             _af_running = False
 
@@ -558,10 +390,11 @@ def autofocus():
 @app.route("/get_calibration")
 @login_required
 def get_calibration():
-    c = node.calibration
-    if c is None or not c.has_um_per_px:
+    with state.lock:
+        c = state.calibration
+    if c is None or not c.get("has_um_per_px"):
         return jsonify({"um_per_px": None})
-    return jsonify({"um_per_px": c.um_per_px})
+    return jsonify({"um_per_px": c["um_per_px"]})
 
 
 @app.route("/set_calibration", methods=["POST"])
@@ -574,33 +407,20 @@ def set_calibration():
         return jsonify({"error": "Need 'pixels' and 'micrometres'"}), 400
     if px <= 0 or um <= 0:
         return jsonify({"error": "Values must be positive"}), 400
-    req = CalibrationSet.Request()
-    req.um_per_px = um / px
-    req.steps_per_um_x = req.steps_per_um_y = req.steps_per_um_z = NAN
     try:
-        node.call(node.cli_calib, req)
-    except Exception as e:
+        scope.calibration.set(um_per_px=um / px)
+    except ScopioError as e:
         return jsonify({"error": str(e)}), 503
     return jsonify({"um_per_px": um / px, "ref_pixels": px, "ref_micrometres": um})
 
 
 # ---- galvo (compose SCPI client-side, send via awg/write) ----
-def _send_awg(cmds):
-    sent = 0
-    for c in cmds:
-        res = node.call(node.cli_awg, AwgWrite.Request(command=c))
-        if not res.success:
-            raise RuntimeError(res.error or "awg/write failed")
-        sent += 1
-    return sent
-
-
 @app.route("/galvo/move/<direction>", methods=["POST"])
 @login_required
 def galvo_move(direction):
     try:
-        _send_awg(galvo.jog_cmds(direction))
-    except Exception as e:
+        scope.galvo.write_all(galvo.jog_cmds(direction))
+    except ScopioError as e:
         return jsonify({"error": str(e)}), 503
     return jsonify(_laser_state())
 
@@ -624,10 +444,12 @@ def galvo_set_jog():
 
 
 def _laser_state():
-    st = node.stage
-    stage_um = {"x": st.x_um, "y": st.y_um, "z": st.z_um} if st else {"x": 0, "y": 0, "z": 0}
+    with state.lock:
+        st, awg = state.stage, state.awg
+    stage_um = ({"x": st["x_um"], "y": st["y_um"], "z": st["z_um"]}
+                if st else {"x": 0, "y": 0, "z": 0})
     s = galvo.state()
-    s["connected"] = bool(node.awg and node.awg.connected)
+    s["connected"] = bool(awg and awg["connected"])
     s["global_um"] = {k: round(v, 1) for k, v in galvo.global_um(stage_um).items()}
     return s
 
@@ -641,7 +463,7 @@ def _next_index():
 
 
 def _record_loop(path, fps, duration):
-    """Write the subscribed JPEG stream to an MP4 until stopped / duration up."""
+    """Write the ingested JPEG stream to an MP4 until stopped / duration up."""
     import cv2
     import numpy as np
     writer = None
@@ -651,8 +473,8 @@ def _record_loop(path, fps, duration):
         while not _rec["stop"].is_set():
             if duration and time.time() - start >= duration:
                 break
-            with node._lock:
-                jpeg = node.jpeg
+            with state.lock:
+                jpeg = state.jpeg
             if jpeg is not None:
                 frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
                 if frame is not None:
@@ -693,8 +515,10 @@ def set_recording_setting():
 def start_recording():
     if _rec["active"]:
         return jsonify({"error": "Already recording"}), 409
-    cs = node.camera_state
-    fps = round(cs.measured_fps or cs.target_fps) if cs else 15
+    with state.lock:
+        cs = state.camera
+    fps = round(state.stream_fps) or (round(cs["measured_fps"] or cs["target_fps"])
+                                      if cs else 15)
     fps = fps or 15
     idx = _next_index()
     dur = record_duration
@@ -833,21 +657,15 @@ def recordings_rename():
 
 # ========== main ==========
 def main():
-    global node
-    rclpy.init()
-    node = UiClient()
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
-    threading.Thread(target=executor.spin, daemon=True).start()
-    if CAMERA_MJPEG_URL:
-        node.get_logger().info(f"Ingesting camera from MJPEG stream {CAMERA_MJPEG_URL}")
-        threading.Thread(target=_mjpeg_ingest_loop, args=(CAMERA_MJPEG_URL,), daemon=True).start()
-    node.get_logger().info(f"SCOPIO UI on http://0.0.0.0:{PORT} (ROS namespace {NS})")
-    try:
-        app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False, threaded=True)
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    global scope
+    if not SCOPIO_API_KEY:
+        raise SystemExit("Set SCOPIO_API_KEY (generate one on the Pi with "
+                         "ros2_ws/scripts/generate_api_key.py) and SCOPIO_URL.")
+    scope = Scopio(SCOPIO_URL, api_key=SCOPIO_API_KEY)
+    threading.Thread(target=_subscribe_loop, daemon=True).start()
+    threading.Thread(target=_frame_ingest_loop, daemon=True).start()
+    log.info(f"SCOPIO UI on http://0.0.0.0:{PORT} -> microscope {SCOPIO_URL}")
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False, threaded=True)
 
 
 if __name__ == "__main__":

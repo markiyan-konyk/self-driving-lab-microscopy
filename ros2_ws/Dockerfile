@@ -27,16 +27,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the Ubuntu container needs it installed explicitly.
 
 # NOTE: picamera2 / libcamera are NOT in Ubuntu's ARM repos -- they ship from
-# Raspberry Pi OS (Debian). So they are intentionally NOT installed here: the
-# camera node degrades gracefully without them (logs a warning, idles), and the
-# rest of the graph (stage, galvo, calibration, tracker) comes up fine. To get
-# live video, wire the camera in via one of the routes in README "Camera caveat"
-# (e.g. run the camera node natively on the Pi, or base a camera image on Pi OS).
+# Raspberry Pi OS (Debian). So they are intentionally NOT installed here. The
+# camera is owned by the separate `camera` compose service (camera_server/,
+# Debian bookworm + the Raspberry Pi apt archive) and camera_node falls back to
+# BRIDGE MODE: it ingests the camera server's MJPEG stream over loopback HTTP,
+# republishes frames on image/compressed, and forwards the camera services to
+# the camera server's HTTP API. See camera_server/README.md.
 
 # Python deps for tracking + hardware drivers. --break-system-packages because
 # Noble's Python is PEP-668 "externally managed"; fine inside a container.
 # NOTE: no Flask here -- this image is the headless BACKEND. The web UI is a
-# separate app (../ui) with its own image.
+# separate app (../ui) that talks to the gateway over plain HTTP.
 # trackpy/pandas/scipy (the bead-TRACKER deps) are intentionally omitted: on the
 # Pi they pull a newer numpy that pip can't swap in over the apt-managed numpy
 # (it fails to uninstall the debian numpy). tracker_node degrades gracefully
@@ -48,7 +49,13 @@ RUN pip3 install --no-cache-dir --break-system-packages \
         pyvisa-py \
         pyusb \
         libusb-package \
-        sangaboard
+        sangaboard \
+        fastapi \
+        "uvicorn[standard]" \
+        httpx
+# fastapi/uvicorn/httpx power the scopio_gateway package (the HTTP/WebSocket
+# API that external clients use instead of joining the DDS graph). They are
+# pure-python and light -- fine on the Pi.
 
 # Build the workspace (interfaces + nodes) into the image.
 WORKDIR /ros2_ws

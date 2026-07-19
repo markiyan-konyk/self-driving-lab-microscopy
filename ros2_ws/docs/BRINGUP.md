@@ -1,17 +1,11 @@
 # SCOPIO on-Pi bring-up checklist
 
-> ⚠️ **Some commands below predate the v1.0 interface freeze** (e.g.
-> `laser/state`, `recording/status`, `tweezers/zero`). The authoritative,
-> current contract is [INTERFACES.md](INTERFACES.md); connection examples that
-> match the frozen interfaces are in [NODES.md](NODES.md). Update steps here to
-> those names as you go.
-
 Do these **in order**. Each step isolates one layer, so when something breaks
 you know exactly where. The nodes degrade gracefully (no camera/stage/galvo =
-node still runs, reports `connected=false`), so you can verify the ROS graph
-*before* worrying about hardware.
+node still runs, reports `connected=false`), so you can verify the graph and
+the API *before* worrying about hardware.
 
-Legend: 🖥️ = on the Pi, 💻 = on another machine on the same LAN.
+Legend: 🖥️ = on the Pi, 💻 = on another machine on the same network.
 
 ---
 
@@ -20,114 +14,123 @@ Legend: 🖥️ = on the Pi, 💻 = on another machine on the same LAN.
 🖥️ Confirm the *host* basics first — ROS can't fix a broken camera:
 
 - [ ] `rpicam-hello -t 2000` shows a camera preview (libcamera works on the host).
-- [ ] `docker --version` and `docker compose version` work.
+- [ ] `docker --version` and `docker compose version` work; `sudo systemctl
+      enable docker` so the stack survives reboots.
 - [ ] Stage (Sangaboard) and galvo (DG1022Z) are plugged in.
-- [ ] Find the galvo's VISA address: run `python galvosetup.py` (from the repo)
-      and note the `USB0::...` string. You'll pass it as `GALVO_RESOURCE`.
+- [ ] Find the galvo's VISA address (e.g. `python galvosetup.py`) and put it in
+      `ros2_ws/.env`: `GALVO_RESOURCE=USB0::...`
+- [ ] Generate at least one API key:
+      `python3 scripts/generate_api_key.py laptop` (note the printed key).
 
-> If `rpicam-hello` fails, fix that first. The container's libcamera must talk to
-> the same camera stack; a broken host camera will never work in the container.
+> If `rpicam-hello` fails, fix that first. A broken host camera will never
+> work in the container either.
 
 ---
 
-## 1. Build the image 🖥️
+## 1. Build the images 🖥️
 
 ```bash
 cd ros2_ws
 docker compose build
 ```
 
-- [ ] Build completes. The risky line is `colcon build` (compiles the interface
-      package). If it fails, the error names the offending `.msg`/`.srv`/`.action`.
-- [ ] If `python3-picamera2` can't be apt-installed on the base image, see the
-      "Camera caveat" in `ros2_ws/README.md`. The build can still succeed — the
-      camera just degrades at runtime.
+- [ ] Build completes. The risky lines are `colcon build` (compiles the
+      interfaces + nodes + gateway) and the `camera` image's
+      `python3-picamera2` install from the Raspberry Pi apt archive.
 
-## 2. Bring up the graph (hardware-agnostic) 🖥️
+## 2. Bring up the stack 🖥️
 
 ```bash
-GALVO_RESOURCE="USB0::0x1AB1::..." docker compose up
-# (or `-d` to detach; then `docker compose logs -f`)
+docker compose up -d
+docker compose logs -f       # watch each service announce itself
 ```
 
-Watch the logs. You want to see each node announce itself; warnings like
-"Camera unavailable … idling" are fine at this stage.
-
-In a second terminal, run the smoke test **inside the container**:
+Run the graph smoke test **inside the container**:
 
 ```bash
-docker compose exec scopio bash -lc "source /entrypoint.sh true; bash /workspace/ros2_ws/scripts/smoke_test.sh"
+docker compose exec scopio bash -lc \
+  "source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && bash /workspace/ros2_ws/scripts/smoke_test.sh"
 ```
 
-- [ ] All five backend nodes present: `calibration_node camera_node stage_node
-      galvo_node tracker_node`. (The UI is a separate app — not a node here.)
-- [ ] Topics listed under `/scopio/...`.
-- [ ] `stage/position`, `camera/state`, `awg/status`, `calibration` are
-      *publishing* (they publish even with no hardware).
+- [ ] All five driver nodes present: `calibration_node camera_node stage_node
+      galvo_node tracker_node` (+ the `gateway` node).
+- [ ] Topics listed under `/scopio/...`; `stage/position`, `camera/state`,
+      `awg/status`, `calibration` are *publishing* (even with no hardware).
 
-If a node is **MISSING**, it crashed — `docker compose logs` shows the traceback.
-Fix that before going on.
+If a node is **MISSING**, it crashed — `docker compose logs` shows the
+traceback. Fix that before going on.
 
-## 3. Camera 🖥️
+## 3. Camera gate 🖥️ (the one go/no-go branch)
 
-- [ ] `ros2 topic hz /scopio/image/compressed` shows ~15 Hz.
-- [ ] Start the UI app (separate): `cd ../ui && docker compose up`, then browse
-      to `http://<pi-ip>:8080` — you should see live video.
-- [ ] (Optional) start/stop a recording from the UI; confirm an `.mp4` appears in
-      `ui/recordings/` on whatever machine runs the UI.
+- [ ] `docker logs scopio-camera` shows the server starting.
+- [ ] Validate picamera2 in-container:
+      `docker compose run --rm camera python3 -c "from picamera2 import Picamera2; print(Picamera2.global_camera_info())"`
+- [ ] `curl http://127.0.0.1:8081/controls` returns JSON.
+- [ ] `ros2 topic hz /scopio/image/compressed` (inside the scopio container)
+      shows ~15 Hz — camera_node's bridge mode is ingesting and republishing.
 
-If video is black: the camera node logged a warning — revisit the Camera caveat.
-
-## 4. Stage 🖥️
-
-- [ ] `ros2 topic echo /scopio/stage/position` shows `connected: true`.
-- [ ] Send a tiny path and watch the numbers move:
-```bash
-ros2 action send_goal /scopio/stage/move_path scopio_interfaces/action/MoveStagePath \
-  "{points: [{x: 40, y: 0, z: 0}, {x: 0, y: 0, z: 0}], settle_s: 0.5}"
-```
-
-## 5. Galvo / laser 🖥️ (uncalibrated is fine)
-
-- [ ] `ros2 topic echo /scopio/awg/status` shows `connected: true`.
-- [ ] Point it (raw SCPI — the node is instrument-agnostic):
-      `ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite "{command: ':SOURce1:VOLTage:OFFSet 0.25'}"`.
-- [ ] Output on/off: `ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite "{command: ':OUTPut1 ON'}"`.
-- [ ] Run a waveform — same passthrough, a different SCPI string, e.g.
-```bash
-ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite \
-  "{command: ':SOURce1:APPLy:SINusoid 2,1.0,0'}"
-```
-      (Geometry/waveform meaning lives in client code, e.g. `GalvoClient` in
-      `../ui/galvo_geometry.py`.)
-
-## 6. Tracker (the real-time question) 🖥️
+**If the container camera fails** (libcamera/kernel mismatch): switch to the
+systemd fallback — identical HTTP surface, nothing downstream changes:
 
 ```bash
-ros2 service call /scopio/tracker/set_active std_srvs/srv/SetBool "{data: true}"
-ros2 topic hz   /scopio/beads      # <-- the achievable tracking rate
-ros2 topic echo /scopio/beads      # counts + positions
+docker compose stop camera
+cd ../camera_server && sudo ./install_systemd.sh
+curl http://127.0.0.1:8081/controls
 ```
+(Comment the `camera` service out of `docker-compose.yml` afterwards.)
 
-- [ ] `beads` publishes; `count` is sane for what's under the scope.
-- [ ] Note the **Hz** — this is the empirical real-time answer. If it's low,
-      tune `params.yaml` (`acquire_every_n`, `roi_size`, `percentile`) or apply
-      the raw-image optimisation (see README "real-time" note).
+## 4. Gateway 🖥️
 
-## 7. The external decision computer 💻
+- [ ] `curl http://127.0.0.1:8000/api/v1/health` →
+      `{"ok": true, "ros_ok": true, "camera_ok": true, "auth_configured": true}`.
+- [ ] No key → 401: `curl -i http://127.0.0.1:8000/api/v1/status`
+- [ ] With key → snapshot:
+      `curl -H "X-API-Key: $KEY" http://127.0.0.1:8000/api/v1/status`
 
-Prove the multi-machine story:
+## 5. From the client machine 💻
 
 ```bash
-# On the other machine (ROS 2 installed, same network, same ROS_DOMAIN_ID):
-ros2 topic list                       # should show /scopio/... from the Pi
-ros2 topic echo /scopio/beads         # receiving the Pi's sensor data remotely
-ros2 action send_goal /scopio/stage/move_path ...   # commanding it remotely
+python3 ros2_ws/scripts/smoke_test_api.py --url http://<pi-ip>:8000 --key $KEY
 ```
 
-- [ ] The Pi's topics appear on the other machine with no extra config
-      (host-network DDS auto-discovery).
-- [ ] (Optional) Foxglove Studio 💻 connects and shows everything live.
+- [ ] All checks pass (with hardware attached it also does a ±0-step jog
+      round-trip and an `*IDN?` galvo query).
+- [ ] Video: open `http://<pi-ip>:8000/api/v1/stream.mjpg?api_key=$KEY` in a
+      browser — live frames.
+
+## 6. Stage 🖥️/💻
+
+- [ ] `/api/v1/status` shows `stage/position ... connected: true`.
+- [ ] Jog and watch numbers move:
+      `curl -H "X-API-Key: $KEY" -H "Content-Type: application/json" -d '{"dz": 100}' http://<pi>:8000/api/v1/service/stage/jog`
+
+## 7. Galvo / laser 💻 (uncalibrated is fine)
+
+- [ ] `awg/status` shows `connected: true` in `/api/v1/status`.
+- [ ] `*IDN?` answers:
+      `curl ... -d '{"command": "*IDN?"}' .../api/v1/service/awg/query`
+- [ ] Point it: `-d '{"command": ":SOURce1:VOLTage:OFFSet 0.25"}'` on
+      `service/awg/write`; output on/off with `":OUTPut1 ON"` / `":OUTPut1 OFF"`.
+
+## 8. Apps + autofocus 💻
+
+- [ ] `ui/run_ui.py` against the Pi: video, sliders, white balance, stage
+      arrows, **Autofocus** (this exercises the backend action end-to-end:
+      camera frames + stage Z sweep).
+- [ ] `galvo_draw/app.py`: **Test link** draws the sine circle.
+
+## 9. Tracker (the real-time question) 💻
+
+- [ ] `curl ... -d '{"data": true}' .../api/v1/service/tracker/set_active`
+- [ ] Subscribe to `beads` (SDK: `scope.subscribe("beads", print)`) — note the
+      achievable Hz; tune `params.yaml` if low.
+
+## 10. Reboot test 🖥️
+
+- [ ] `sudo reboot`, wait, then from the laptop:
+      `curl http://<pi-ip>:8000/api/v1/health` — everything returns with zero
+      SSH sessions (docker enabled + `restart: unless-stopped`, or the systemd
+      camera unit).
 
 ---
 
@@ -135,9 +138,11 @@ ros2 action send_goal /scopio/stage/move_path ...   # commanding it remotely
 
 | Symptom | Likely cause |
 |---|---|
-| Node MISSING in smoke test | import/crash — `docker compose logs` |
+| Node MISSING in smoke test | import/crash — `docker compose logs scopio` |
 | Topic exists but no messages | hardware absent/failed (node degraded gracefully) |
-| Black video | libcamera/picamera2 in container (README caveat) |
-| `laser/state connected:false` | `GALVO_RESOURCE` unset/wrong, or USB perms |
-| Other machine sees nothing | different `ROS_DOMAIN_ID`, or not host-network |
+| `camera_ok: false` | camera service down — step 3 (container vs systemd) |
+| Black video but `camera_ok: true` | stream proxy vs camera: `curl 127.0.0.1:8081/stream.mjpg | head -c 100` on the Pi |
+| `401` from gateway | key not in `secrets/api_keys.json` (regenerate; hot-reloaded) |
+| `504` on service calls | node up but hardware not answering (cables, `GALVO_RESOURCE`) |
+| `awg/status connected: false` | `GALVO_RESOURCE` unset/wrong in `.env`, or USB perms |
 | Tracker Hz too low | tune params / raw-image optimisation |

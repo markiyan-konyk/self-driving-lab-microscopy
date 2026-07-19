@@ -1,20 +1,29 @@
-# SCOPIO ROS 2 BACKEND (hardware driver nodes only -- NO UI).
+# SCOPIO BACKEND -- everything that runs ON the Raspberry Pi, one command:
 #
 #   cd ros2_ws
-#   GALVO_RESOURCE="USB0::0x1AB1::..." docker compose up --build
+#   docker compose up -d --build
 #
-# This brings up the sensor/effectuator graph (camera, stage, galvo, tracker,
-# calibration) under /scopio. The UI is a SEPARATE application (../ui), started
-# independently -- on this machine or another one on the LAN -- so the backend
-# stays a clean, headless, "sacred" ROS service.
+# Three services:
+#   scopio   -- the ROS 2 sensor/effectuator graph (camera, stage, galvo,
+#               tracker, calibration) under /scopio. Headless, "sacred".
+#   camera   -- picamera2 MJPEG server (camera_server/), loopback-only :8081.
+#               Debian bookworm + Raspberry Pi apt archive, because
+#               picamera2/libcamera cannot run in the Ubuntu ROS container.
+#               If libcamera misbehaves in-container on your Pi, use the
+#               systemd fallback instead: camera_server/install_systemd.sh.
+#   gateway  -- the PUBLIC API (HTTP/WebSocket, port 8000, API-key auth).
+#               External apps (ui, galvo_draw, agents) talk ONLY to this --
+#               no ROS, no Docker, no DDS on the client side.
+#
+# All services use restart: unless-stopped, so a rebooted Pi comes back up
+# with zero SSH sessions (enable docker itself: sudo systemctl enable docker).
 #
 # Notes:
-#  * network_mode: host  -> the DDS graph is shared with any other ROS 2 node on
-#    the LAN (the UI and any external program are just more nodes, no bespoke
-#    protocol). It also makes Foxglove/discovery trivial.
-#  * privileged + /run/udev -> camera (libcamera), USB galvo and serial stage are
-#    all reachable. For least-privilege, drop `privileged` and pass explicit
-#    `devices:` instead (see commented block).
+#  * network_mode: host -> DDS stays on localhost between scopio and gateway;
+#    the only LAN-facing port is the gateway's 8000 (and 8081 stays loopback).
+#  * privileged + /run/udev -> USB galvo, serial stage, camera devices.
+#    For least-privilege, replace `privileged` with the commented devices list.
+#  * API keys: python3 scripts/generate_api_key.py <name>  (see docs/API.md).
 services:
   scopio:
     build:
@@ -25,6 +34,7 @@ services:
     network_mode: host
     privileged: true
     ipc: host
+    restart: unless-stopped
     volumes:
       - ..:/workspace                # repo root: microscope/, viscosity/, recordings/
       - /run/udev:/run/udev:ro
@@ -32,15 +42,47 @@ services:
       - SCOPIO_REPO=/workspace
       - GALVO_RESOURCE=${GALVO_RESOURCE:-}
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - CAMERA_URL=http://127.0.0.1:8081   # camera_node bridge mode upstream
     working_dir: /workspace
-    # Backend bring-up: driver nodes only (camera, stage, galvo, tracker,
-    # calibration). The UI lives in ../ui and is run separately.
     command: ros2 launch scopio_microscope microscope.launch.py
-    # Least-privilege alternative to `privileged: true` (uncomment and remove
-    # privileged once you've confirmed which nodes your rig needs):
+    # Least-privilege alternative to `privileged: true`:
     # devices:
     #   - /dev/dma_heap:/dev/dma_heap
     #   - /dev/vchiq:/dev/vchiq
     #   - /dev/video0:/dev/video0
     #   - /dev/ttyACM0:/dev/ttyACM0   # Sangaboard
     #   - /dev/bus/usb:/dev/bus/usb   # DG1022Z (USBTMC)
+
+  camera:
+    build:
+      context: ../camera_server
+      dockerfile: Dockerfile
+    image: scopio-camera:bookworm
+    container_name: scopio-camera
+    network_mode: host
+    privileged: true               # /dev/video*, /dev/dma_heap, /dev/media*
+    restart: unless-stopped
+    volumes:
+      - /run/udev:/run/udev:ro
+    environment:
+      - CAM_HOST=127.0.0.1         # loopback ONLY -- the gateway is the door
+      - CAM_PORT=8081
+      - CAM_W=${CAM_W:-640}
+      - CAM_H=${CAM_H:-480}
+
+  gateway:
+    image: scopio-microscope:jazzy   # same image as scopio -- no extra build
+    container_name: scopio-gateway
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    depends_on:
+      - scopio
+    volumes:
+      - ./secrets:/secrets:ro
+    environment:
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - SCOPIO_API_KEYS_FILE=/secrets/api_keys.json
+      - SCOPIO_GATEWAY_PORT=8000
+      - CAMERA_URL=http://127.0.0.1:8081
+    command: ros2 run scopio_gateway gateway

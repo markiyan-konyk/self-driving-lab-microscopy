@@ -1,0 +1,20 @@
+# Secrets -- API keys for the gateway live on the Pi only, never in git.
+ros2_ws/secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# colcon build products
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Client-side recordings
+ui/recordings/
+recordings/
+
+# Local env files
+.env

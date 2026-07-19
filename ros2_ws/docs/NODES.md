@@ -4,24 +4,33 @@ All nodes run under the `/scopio` namespace and **degrade gracefully**: if their
 hardware is absent they still start and report `connected = false`, so the graph
 always comes up. See `INTERFACES.md` for the frozen field-level contract.
 
-Bring the **backend** up (drivers only — the UI is a separate app, see below):
+Bring the **backend** up (all of it — graph, camera, gateway):
 ```bash
-ros2 launch scopio_microscope microscope.launch.py
+cd ros2_ws && docker compose up -d
 ```
 
-The **web UI is a separate application** at repo-root `../ui` (a standalone ROS
-client, not a workspace package). Start it independently — on the Pi or another
-machine — once the backend is up: `cd ../ui && docker compose up` (or
-`python3 run_ui.py`). See `../ui/README.md`.
-
-To connect from your own program, you only need ROS 2 sourced and the same
-`ROS_DOMAIN_ID` (default 0) on the same network — discovery is automatic.
+**External programs do not join this graph.** They go through the API gateway
+(`http://<pi>:8000`, API key) — see [`../../docs/API.md`](../../docs/API.md)
+and the `scopio_client` SDK. The `ros2 ...` commands below are for **backend
+development on the Pi** (run them inside the `scopio` container).
 
 ---
 
-## camera_node — owns the Pi camera (picamera2)
+## camera_node — the graph's camera surface (native or bridge mode)
 Pure sensor + control surface. **It does not record** (recording is a client
 job — the `../ui` app saves the stream to its own folder).
+
+Two modes, picked automatically at startup:
+- **native**: picamera2 importable (running natively on Pi OS) → owns the
+  sensor directly.
+- **bridge** (the normal case — always inside the Ubuntu container): the
+  sensor is owned by `../camera_server` (its own compose service / systemd
+  unit). The node ingests its MJPEG stream over loopback (`CAMERA_URL`,
+  default `http://127.0.0.1:8081`), republishes the JPEGs on
+  `image/compressed`, forwards the camera services to its HTTP API, and runs
+  autofocus on the ingested frames. The frozen interface behaves identically
+  either way. (Exception: `green_gain` is a software per-frame tweak that only
+  applies in native mode.)
 
 - **Publishes:** `image/compressed` (JPEG), `camera/state` (settings + real fps).
 - **Services:** `camera/set_controls`, `camera/set_framerate`, `camera/white_balance`
@@ -97,34 +106,27 @@ Subscribes to `image/compressed`, runs trackpy, publishes `beads`. Off by
 default. (Kept in the contract; the standalone tracking *application* is a later
 project — for now the monolith UI is the debugging tool for tracking.)
 
-## The web UI — a SEPARATE app (`../ui`), not a node in this workspace
-The UI lives at repo-root `../ui` as a standalone ROS client (owns no hardware).
-It subscribes to the topics above, calls the services, and serves the SCOPIO
-frontend so the browser UI behaves as before. Two things it does itself, **on
-whatever machine runs it**:
-- **Recording:** saves the subscribed stream to mp4 in its *own* local
-  `ui/recordings/` folder (the Pi never records).
-- **Galvo geometry:** turns UI jogs into SCPI via `GalvoClient` → `awg/write`.
+## gateway — the API gateway (scopio_gateway, in this workspace)
+FastAPI + rclpy node that maps the whole graph to authenticated HTTP/WebSocket
+on port 8000: generic `POST /api/v1/service/{name}`, WS topic subscriptions +
+actions, an MJPEG proxy of the camera server, and `GET /api/v1/interfaces`
+discovery. New nodes appear in the API automatically — the mapping is
+introspected from the live graph, not hand-coded. See
+[`../../docs/API.md`](../../docs/API.md).
 
-```bash
-cd ../ui && docker compose up          # then open http://<host>:8080
-#   or, natively:  python3 run_ui.py
-```
-It is intentionally outside this backend workspace so it can run on a different
-machine and so the backend stays a clean, headless ROS service. See
-`../ui/README.md`.
+## The client apps — SEPARATE programs, not nodes
+`../ui` (web UI, records locally, galvo geometry via `GalvoClient`) and
+`../galvo_draw` (laser vector drawing) are plain API clients built on the
+`scopio_client` SDK. They run on any machine that can reach the gateway.
 
 ### Minimal Python client (template for any external program)
 ```python
-import rclpy
-from rclpy.node import Node
-from scopio_interfaces.srv import StageJog
+from scopio_client import Scopio
 
-rclpy.init()
-n = rclpy.create_node("my_controller")
-cli = n.create_client(StageJog, "/scopio/stage/jog")
-cli.wait_for_service()
-req = StageJog.Request(); req.dx, req.dy, req.dz = 40, 0, 0
-fut = cli.call_async(req); rclpy.spin_until_future_complete(n, fut)
-print(fut.result())
+scope = Scopio("http://<pi-ip>:8000", api_key="<key>")
+print(scope.stage.jog(dx=40))                       # {'success': True, ...}
+scope.subscribe("stage/position", lambda msg, env: print(msg), rate_hz=5)
+result = scope.camera.autofocus(on_feedback=print)  # backend action
 ```
+(No ROS required. If you're writing a *backend* node instead, see the existing
+nodes in `scopio_microscope/` as templates.)

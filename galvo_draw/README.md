@@ -2,11 +2,12 @@
 
 A standalone app that turns a drawing (or a draggable wireframe cube) into laser
 motion. You draw on a blank canvas; the galvo traces it as a continuous vector
-image. It is **just another ROS client** — it talks to the SCOPIO backend only
-through the `awg/write` passthrough, exactly like the UI.
+image. It is **just another API client** — it talks to the SCOPIO microscope
+only through the `awg/write` passthrough on the API gateway, exactly like the
+UI. No ROS, no Docker, no DDS.
 
 ```
-browser canvas ──path──► galvo_draw ──arbitrary-waveform SCPI──► /scopio/awg/write
+browser canvas ──path──► galvo_draw ──arbitrary-waveform SCPI──► gateway ──► awg/write
                                                                   (AWG loops it in hardware)
 ```
 
@@ -25,12 +26,18 @@ browser canvas ──path──► galvo_draw ──arbitrary-waveform SCPI─�
   2048 points by arc length in `app.py`.)
 
 ## Run
-Backend first (`../ros2_ws`), then:
+Backend first (on the Pi: `cd ros2_ws && docker compose up -d`), then:
 ```bash
 cd galvo_draw
-docker compose up --build              # → http://localhost:8090
-#   native: pip install -r requirements.txt && python3 app.py   (after sourcing ROS + scopio_interfaces)
+pip install -r requirements.txt        # includes the scopio_client SDK
+
+# Windows (PowerShell)                 # Linux/macOS
+$env:SCOPIO_URL="http://<pi-ip>:8000"  export SCOPIO_URL=http://<pi-ip>:8000
+$env:SCOPIO_API_KEY="<key>"            export SCOPIO_API_KEY=<key>
+
+python app.py                          # → http://localhost:8090
 ```
+(Get a key on the Pi: `python3 ros2_ws/scripts/generate_api_key.py galvo_draw`.)
 
 ## Using it
 - **Draw mode**: click-drag to draw; release to send. Multiple strokes allowed.
