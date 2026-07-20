@@ -1,0 +1,46 @@
+# viscosity_agent configuration.
+#
+# Every value here is overridable by an environment variable of the SAME name
+# in upper case (pydantic-settings), and a few by CLI flags on run_agent.py
+# (--dry-run, --max-iterations, --provider, --model). Connection + LLM secrets
+# live in the environment / .env, NOT here (see .env.example).
+
+# ---------------------------------------------------------------- experiment
+# The physics of the sample under study. Defaults describe ~1 um-diameter SiO2
+# beads in water at room temperature -- the standard viscometry calibration.
+temperature_K:        298.15      # 25 C
+bead_radius_m:        0.5e-6      # 0.5 um radius (1 um bead)
+bead_radius_unc_m:    0.0         # 1-sigma polydispersity; 0 = treat as exact
+literature_eta_Pa_s:  8.9e-4      # water @ 25 C, for the report's comparison
+
+# ---------------------------------------------------------------- analysis
+min_coverage:         0.90        # keep a bead tracked in >= 90% of a clip's frames
+fit_fraction:         0.25        # MSD lag fraction used for the linear fit
+max_ecc:              0.30        # reject elongated blobs (clumps / debris)
+min_beads:            5           # a clip needs >= this many good beads to count
+target_beads:         12          # "enough" beads to lean toward converging
+
+# ---------------------------------------------------------------- scene / survey
+min_scene_beads:      6           # a FOV worth recording needs at least this many
+max_clump_fraction:   0.30        # too many touching beads -> move / discard
+focus_floor:          40.0        # variance-of-Laplacian below this = out of focus
+
+# ---------------------------------------------------------------- acquisition
+target_fps:           30          # requested camera framerate
+clip_min_s:           10          # clip duration bounds the agent may choose within
+clip_max_s:           60
+default_clip_s:       20
+track_workers:        auto        # detect() CPU processes: auto | 1 | an integer
+
+# ---------------------------------------------------------------- budgets (never spin forever)
+max_iterations:       5           # acquire->analyze->critique cycles
+max_fov_moves:        6           # survey jogs before falling back to best-seen FOV
+wall_clock_budget_s:  1800        # 30 min hard wall-clock cap on the whole run
+recursion_limit:      80          # LangGraph backstop
+max_jog_steps:        2000        # clamp on any single stage jog (Sangaboard steps)
+sandbox_timeout_s:    120         # per run_python call in the critique sandbox
+
+# ---------------------------------------------------------------- misc
+dry_run:              false       # true == MockScope, no hardware, known eta_true
+dashboard:            true        # launch the live Flask dashboard alongside the run
+dashboard_port:       8070

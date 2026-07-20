@@ -1,11 +1,23 @@
 # ROS 2 from zero, taught through SCOPIO
 
-> ⚠️ **Teaching document — predates the v1.0 interface freeze.** It uses the
-> original example interfaces (`LaserState`, `ZeroTweezers`, `recording/*`,
-> `RunGalvoWaveform`) to teach ROS *concepts*; those specific names changed in
-> v1.0. For the real, current contract see [INTERFACES.md](INTERFACES.md) and
-> [NODES.md](NODES.md). The concepts (nodes, topics, services, actions) are
-> unchanged.
+> ⚠️ **Teaching document — predates both the v1.0 interface freeze AND the
+> API-gateway rewrite.** Two kinds of staleness here:
+> 1. Example interface names (`LaserState`, `ZeroTweezers`, `recording/*`,
+>    `RunGalvoWaveform`, `tweezers/zero`) are from an early scaffold and were
+>    renamed/removed in v1.0. For the real, current contract see
+>    [INTERFACES.md](INTERFACES.md) and [NODES.md](NODES.md).
+> 2. §9 (Docker) and §10 (architecture) describe an earlier design where a
+>    `scopio_ui`/`ui_gateway` package lived *inside* this workspace and served
+>    the browser directly from the Pi. That package never shipped this way —
+>    today the UI is `../../ui` (a separate, external, plain-Flask program)
+>    and there is also a `scopio_gateway` package in *this* workspace (a
+>    FastAPI+rclpy HTTP/WebSocket API, not a browser-facing UI). See
+>    [../../../docs/API.md](../../../docs/API.md) and
+>    [CONNECTIVITY.md](CONNECTIVITY.md) for what's actually there now.
+>
+> The ROS **concepts** below (nodes, topics, services, actions, executors,
+> colcon/ament) are all still accurate and worth learning from — only the
+> specific package/file names in §9-10 are out of date.
 
 You know how to program; you don't know ROS 2 yet. This document teaches ROS 2
 from the ground up using **the exact code in this repo** as the running example.

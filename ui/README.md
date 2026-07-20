@@ -53,8 +53,8 @@ python run_ui.py                       # -> http://localhost:8080
 
 - The laser position shown is what *this* UI commanded (the AWG has no readback
   in the status topic) — same single-owner assumption as before.
-- `galvo_geometry.py` here is the client-side helper (a copy of the one in
-  `../microscope`); any external galvo app can reuse the same module.
+- `galvo_geometry.py` here is the client-side geometry helper (volts↔pixels↔µm,
+  homing, jogging); any external galvo app can reuse the same module.
 - If several UIs jog the stage at the same time they interleave safely at the
   hardware level, but can obviously fight each other logically — coordinate
   with your labmates.

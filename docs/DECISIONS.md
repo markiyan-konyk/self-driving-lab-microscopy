@@ -77,24 +77,78 @@ client can join. **ROS owns the hardware; the UI becomes one more ROS client.**
   calibration. A dedicated `calibration_node` owns µm/px and steps/µm, persists
   them to disk (survives `main.py`/relaunch), and publishes them **latched** so
   every client — including the stage node — gets them on join.
-- **Autofocus is client-side, not a driver action.** It is policy (move Z +
-  measure sharpness), composable from the image topic + `stage/jog`, so it stays
-  out of the sacred drivers. The gateway runs it as a client routine.
-- **The UI stays on the Pi for now, but backed by ROS.** The gateway serves the
-  same rich SCOPIO frontend and translates every control to ROS calls, so it
-  behaves as before. A future pass moves control programs off-box.
+- ~~Autofocus is client-side, not a driver action.~~ **Superseded in §6:**
+  autofocus is now a backend action (`camera/autofocus`) so any client gets it
+  for free, without reimplementing the sweep/backlash logic.
+- ~~The UI stays on the Pi for now.~~ **Superseded in §6:** the UI is now an
+  external client (the Pi has no spare compute, and multiple people may run
+  their own UI at once).
 - **Reachable by external programs over LAN/USB now; remote/cloud documented for
-  later.** Same-LAN DDS works today (build side-apps now); USB-gadget gives a
-  point-to-point link; off-site uses a mesh VPN or a Zenoh bridge — and because
-  the contract is frozen, none of that changes the interfaces. See
-  `ros2_ws/docs/CONNECTIVITY.md`.
-- **The monolith (`microscope/`) is kept, untouched, as the debugging tool** (it
-  still has recording and is where tracking will be prototyped). The standalone
-  tracking *application* is deferred until after this rewrite.
+  later.** Same-LAN DDS worked at this point in the project (see §6 for what
+  replaced it as the client-facing path); USB-gadget gives a point-to-point
+  link; off-site uses a mesh VPN or a Zenoh bridge for the *DDS graph itself*,
+  which stays Pi-internal now anyway. See `ros2_ws/docs/CONNECTIVITY.md`.
+- ~~The monolith (`microscope/`) is kept, untouched, as the debugging tool.~~
+  **No longer true:** `microscope/` was deleted once `ui/` and `galvo_draw/`
+  fully replaced it (see §6). The standalone tracking *application* is still
+  deferred; `viscosity/` (the offline analysis pipeline `tracker_node` borrows
+  parameters from) remains.
 
 ## 5. Known placeholders (numbers-only fixes later)
 - Galvo geometry constants (`PIXELS_PER_VOLT`, `VOLTS_TO_ANGLE`,
   `OPTICAL_THROW_UM`) in `microscope/galvo_geometry.py` are placeholders until
   `galvo_tests/03_precision.py` measures them. The math is wired; only the
   numbers change.
-- The ROS graph has **no authentication** yet — keep it on a trusted LAN/VPN.
+
+## 6. The API-gateway rewrite (branch `remake`)
+
+Same-LAN DDS (§4) turned out to be impractical in practice: every client
+needed ROS 2 + Docker + a matching `ROS_DOMAIN_ID` + (on Windows) WSL2 with
+mirrored networking + Fast-DDS unicast peer files + firewall holes for UDP
+discovery — for a lab where people just want to open a URL. It also had **no
+authentication**: anything on the network/domain could command the hardware.
+
+- **Wrap the graph in an HTTP/WebSocket API gateway (`scopio_gateway`), gated
+  by API keys.** External programs now speak plain JSON over a normal
+  request/response + WebSocket protocol — no ROS install, no Docker, no DDS
+  config, on any OS. The gateway is a new ROS node (rclpy) that also runs
+  FastAPI/uvicorn in the same process, so it's just another package in this
+  workspace, not a separate service to keep in sync.
+- **Generic over curated.** The gateway maps `POST /api/v1/service/{name}`
+  and WebSocket topic/action ops onto the live graph via ROS introspection
+  (`rosidl_runtime_py`), not hand-written per-endpoint code. This means the
+  frozen `scopio_interfaces` contract (§4) still pays off exactly as
+  intended: a brand-new node (the planned temperature/heating stack) becomes
+  remotely callable and self-documenting (`GET /api/v1/interfaces`) the
+  moment it launches — zero gateway changes.
+- **The API key is just the lock; the gateway is the only door.** Keys live
+  in `ros2_ws/secrets/api_keys.json` (gitignored, hot-reloaded — revoke
+  without a restart). The camera server and the raw DDS graph never face the
+  LAN directly anymore; only port 8000 does.
+- **Autofocus moved from client policy to a backend action.** With the
+  camera reachable in-graph again (via the bridge mode below), there's no
+  reason to keep re-implementing the Z-sweep/backlash/sharpness logic in
+  every client — one correct implementation, callable by anyone.
+- **The camera gets its own always-on container instead of a manually-run
+  script.** `pi_camera_server.py` (still the sole picamera2 owner — it can't
+  run in the Ubuntu ROS container, same reasoning as before) moved to
+  `camera_server/` and became its own `docker compose` service (Debian
+  bookworm + the Raspberry Pi apt archive), with `restart: unless-stopped`
+  and a systemd-unit fallback if libcamera doesn't behave in that container
+  on a given Pi/kernel combo. `camera_node` gained a **bridge mode**: when
+  picamera2 isn't importable (always true in-container) it ingests the
+  camera server's MJPEG over loopback and republishes it on
+  `image/compressed`, so the rest of the graph (tracker, autofocus) can't
+  tell the difference from native mode.
+- **The UI moves off the Pi.** Once it's just an HTTP client, there's no
+  reason to run it on the Pi's limited compute, and running it externally
+  lets multiple people each run their own copy against the same microscope
+  at once.
+- **`microscope/` (the legacy monolith) is deleted, not archived in-repo.**
+  `ui/` and `galvo_draw/` had already fully absorbed everything useful from
+  it (camera control math, white balance, galvo geometry — see §4), so it was
+  pure dead weight once the last debugging use for it passed. Its git history
+  still has it if anyone needs to dig it up. `viscosity/` and `galvo_tests/`
+  are unrelated (offline analysis / hardware bench scripts) and stay.
+- See `docs/API.md` for the resulting command manual and `ros2_ws/docs/CONNECTIVITY.md`
+  for what's left of the DDS-networking story (now Pi-internal only).

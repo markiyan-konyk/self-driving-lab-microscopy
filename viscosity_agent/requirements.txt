@@ -1,0 +1,30 @@
+# viscosity_agent -- autonomous AI-scientist for Brownian-motion viscometry.
+#
+# A standalone API client (like ui/ and galvo_draw/): no ROS, no Docker. It
+# talks to the microscope's API gateway through the scopio_client SDK, and to
+# an LLM through LangChain/LangGraph (either an Anthropic OR an OpenAI key).
+
+# --- orchestration / LLM ---
+langgraph>=0.2
+langchain>=0.3
+langchain-anthropic>=0.3
+langchain-openai>=0.3
+
+# --- config ---
+pydantic>=2
+pydantic-settings>=2
+pyyaml
+
+# --- vision / analysis (shared with viscosity/) ---
+numpy
+pandas
+scipy
+opencv-python
+trackpy
+
+# --- dashboard + pretty console ---
+flask
+rich
+
+# --- the microscope SDK (editable, lives one dir up) ---
+-e ../scopio_client

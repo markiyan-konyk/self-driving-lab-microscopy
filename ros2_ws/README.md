@@ -13,9 +13,10 @@ docker compose up -d           # brings up ALL of this:
   gateway  -> src/scopio_gateway (HTTP/WS API, LAN :8000, API keys)
 ```
 
-This is the **backend**; the legacy Flask app (`../microscope/`) is left
-intact for reference. Hardware has a single owner at a time — run *either*
-this stack *or* the old Flask app, not both.
+This is the **backend**. (An earlier, pre-ROS Flask monolith that drove the
+hardware directly, `microscope/`, has since been deleted — everything it did
+is now covered by this stack plus `../ui` and `../galvo_draw`; see
+`../docs/DECISIONS.md` §6.)
 
 ## Learning / operating this
 
@@ -51,7 +52,7 @@ this stack *or* the old Flask app, not both.
 > **Recording is not a node** — the camera only streams; clients record
 > locally. **The galvo node is a raw VISA/SCPI passthrough** — geometry
 > (volts→pixels→µm) lives in client code. See
-> [DECISIONS.md](../DECISIONS.md) for why.
+> [docs/DECISIONS.md](../docs/DECISIONS.md) for why.
 
 Design notes:
 - **The camera has one owner: `../camera_server`** (picamera2 can't run in

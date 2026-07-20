@@ -71,7 +71,7 @@ ros2 action send_goal /scopio/scan_region scopio_interfaces/action/ScanRegion \
 **Instrument-agnostic and frozen.** It relays command strings to the AWG and
 relays query replies back. It knows nothing about volts/pixels/waveforms — the
 caller must speak the instrument's SCPI. Laser *geometry* lives in client code
-(`microscope/galvo_geometry.py`).
+(`../ui/galvo_geometry.py`).
 
 - **Publishes:** `awg/status`. **Services:** `awg/write`, `awg/query`.
 - **Param:** `resource` (VISA address; or the `GALVO_RESOURCE` env var).
@@ -103,8 +103,9 @@ ros2 service call /scopio/calibration/set scopio_interfaces/srv/CalibrationSet \
 
 ## tracker_node — bead detection (on-demand)
 Subscribes to `image/compressed`, runs trackpy, publishes `beads`. Off by
-default. (Kept in the contract; the standalone tracking *application* is a later
-project — for now the monolith UI is the debugging tool for tracking.)
+default. (Kept in the contract; the standalone tracking *application* is a
+later project. trackpy/pandas/scipy are still not installed in the image — see
+the Dockerfile note — so this node currently idles even when toggled on.)
 
 ## gateway — the API gateway (scopio_gateway, in this workspace)
 FastAPI + rclpy node that maps the whole graph to authenticated HTTP/WebSocket

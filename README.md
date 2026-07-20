@@ -33,9 +33,11 @@ auth**. Client programs need no ROS, no Docker, no DDS — just a URL and a key.
 | [`camera_server/`](camera_server/) | the single owner of the Pi camera; MJPEG + controls on loopback :8081 (compose service, systemd fallback) |
 | [`scopio_client/`](scopio_client/) | pip-installable Python SDK: `Scopio(url, api_key)` |
 | [`docs/API.md`](docs/API.md) | **the developer manual** — every command with JSON/curl/SDK examples |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture rationale (why a dumb galvo passthrough, why backend/UI split, etc.) |
 | [`ui/`](ui/) | reference web UI (Flask), a pure API client, records video locally |
 | [`galvo_draw/`](galvo_draw/) | draw shapes with the laser (arbitrary-waveform vector display) |
-| [`microscope/`](microscope/), `viscosity/`, `galvo_tests/` | legacy monolith + experiment/bench scripts, kept for reference |
+| `viscosity/` | offline bead-tracking/analysis pipeline; `tracker_node` borrows its trackpy parameters |
+| `galvo_tests/` | standalone hardware bench scripts for calibrating the galvo (independent of everything above) |
 
 ## Quick start
 
@@ -55,12 +57,12 @@ python -c "from scopio_client import Scopio; \
 ```
 
 Or run the UI: see [`ui/README.md`](ui/README.md). Full client walkthrough
-from a fresh Windows laptop: [`WINDOWS_CLIENT.md`](WINDOWS_CLIENT.md).
+from a fresh Windows laptop: [`docs/WINDOWS_CLIENT.md`](docs/WINDOWS_CLIENT.md).
 
 ## Design in one paragraph
 
 The Pi only **senses and effectuates**; decisions live off-board
-([`DECISIONS.md`](DECISIONS.md)). The ROS interfaces are frozen at v1.0, and
+([`docs/DECISIONS.md`](docs/DECISIONS.md)). The ROS interfaces are frozen at v1.0, and
 the gateway maps them generically to JSON — so a new node (the planned
 temperature/heating stack, for instance) becomes remotely usable the moment it
 launches, with zero gateway changes and automatic listing in

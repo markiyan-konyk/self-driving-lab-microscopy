@@ -11,7 +11,7 @@ Why a string passthrough (see DECISIONS.md):
   * One string can express DC, sine, square, or arbitrary waveforms and output
     on/off, without a combinatorial typed API. The laser GEOMETRY (volts->pixels
     ->micrometres, homing, jogging) lives in CLIENT code
-    (microscope/galvo_geometry.py), not here.
+    (ui/galvo_geometry.py), not here.
 
 Topics / services (under /scopio):
   pub  awg/status   scopio_interfaces/AwgStatus   (connected, idn, last cmd/err)

@@ -13,7 +13,7 @@ Docker, no ROS, no DDS peer files, no firewall rules, no static IPs.**
 | **Any device** | just viewing/using the UI | a web browser → the laptop |
 
 Clients talk to the gateway at `http://<pi-ip>:8000` with an **API key**.
-The full command reference is [`docs/API.md`](docs/API.md); interactive docs
+The full command reference is [`API.md`](API.md); interactive docs
 live at `http://<pi-ip>:8000/docs`.
 
 ---
