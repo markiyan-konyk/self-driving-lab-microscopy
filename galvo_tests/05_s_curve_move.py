@@ -150,7 +150,7 @@ def main():
         move_s_curve_direct(
             dev=dev,
             x1=0.0, y1=0.0,
-            x2=8.0, y2=5.0,      # 8 degrees and 5 degrees - BIG movement!
+            x2=10.0, y2=10.0,      # 8 degrees and 5 degrees - BIG movement!
             duration=5.0,         # 5 seconds - slow and visible
             sample_rate=8,        # 5s * 8Hz = 40 points
             s_factor=4.0,
