@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Step 5 - Smooth S-Curve movement using PyVISA with chunked transfer.
+Step 5 - Smooth S-Curve via direct /dev/usbtmc (Kernel driver, NO PyVISA).
 
-This version uses PyVISA (like 01_connect.py) but splits the waveform data
-into tiny chunks to avoid USB timeout. Works reliably on Raspberry Pi.
+This bypasses libusb/PyVISA entirely and uses the stable Linux usbtmc driver.
+Requires /dev/usbtmc0 to exist (create with: sudo mknod /dev/usbtmc0 c 180 0).
 
 Usage:
     python3 05_s_curve_move.py
@@ -12,34 +12,44 @@ Usage:
 import sys
 import time
 import numpy as np
-import pyvisa
-from _common import resolve_resource
+import glob
 
 
-def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
-                        sample_rate=10, s_factor=4.0, volt_per_deg=1.0,
-                        chunk_size=10):
+def find_usbtmc():
+    """Return the first /dev/usbtmc* device path."""
+    devices = glob.glob('/dev/usbtmc*')
+    return devices[0] if devices else None
+
+
+def write_cmd(dev, cmd):
+    """Write a SCPI command (append newline) to the USBTMC device."""
+    with open(dev, 'wb') as f:
+        f.write((cmd + '\n').encode())
+
+
+def query_cmd(dev, cmd):
+    """Write a query and read the response."""
+    with open(dev, 'wb') as f:
+        f.write((cmd + '\n').encode())
+    time.sleep(0.1)  # Give the instrument time to respond
+    with open(dev, 'rb') as f:
+        return f.read(4096).decode().strip()
+
+
+def move_s_curve_direct(dev, x1, y1, x2, y2, duration,
+                        sample_rate=10, s_factor=4.0, volt_per_deg=1.0):
     """
-    Move using S-curve with PyVISA and chunked data transfer.
-
-    Args:
-        awg: PyVISA resource object (already open).
-        x1, y1: Start coordinates (degrees).
-        x2, y2: End coordinates (degrees).
-        duration: Total time (seconds).
-        sample_rate: Points per second (low values reduce data size).
-        s_factor: S-curve steepness (4.0 is optimal).
-        volt_per_deg: Galvo scaling (1.0, 0.8, or 0.5).
-        chunk_size: Number of points per USB write (smaller = safer).
+    Move using S-curve via direct kernel USBTMC driver.
+    Ultra-reliable, no USB timeouts.
     """
     if duration <= 0:
-        awg.write(f':SOUR1:APPL:DC {x1 * volt_per_deg}')
-        awg.write(f':SOUR2:APPL:DC {y1 * volt_per_deg}')
-        awg.write(':OUTP1 ON')
-        awg.write(':OUTP2 ON')
+        write_cmd(dev, f':SOUR1:APPL:DC {x1 * volt_per_deg}')
+        write_cmd(dev, f':SOUR2:APPL:DC {y1 * volt_per_deg}')
+        write_cmd(dev, ':OUTP1 ON')
+        write_cmd(dev, ':OUTP2 ON')
         return
 
-    # 1. Calculate total points (capped at 30 to be ultra-safe)
+    # 1. Total points (capped at 30 for absolute safety)
     total_points = int(duration * sample_rate)
     MAX_POINTS = 30
     if total_points > MAX_POINTS:
@@ -71,111 +81,96 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
     x_dac = to_dac(x_volts)
     y_dac = to_dac(y_volts)
 
+    # 5. Convert to comma-separated string (only ~120 bytes for 20 points)
+    x_str = ",".join(map(str, x_dac))
+    y_str = ",".join(map(str, y_dac))
+    print(f"X data size: {len(x_str)} bytes, Y data size: {len(y_str)} bytes")
+
     print(f"Moving ({x1:.1f},{y1:.1f}) -> ({x2:.1f},{y2:.1f}) in {duration}s...")
 
-    # 5. Upload X channel in chunks
-    awg.write(':SOUR1:FUNC:SHAP ARB')
-    awg.write(f':SOUR1:FUNC:ARB:SRATE {sample_rate:.0f}')
-    for i in range(0, len(x_dac), chunk_size):
-        chunk = x_dac[i:i+chunk_size]
-        cmd = f':SOUR1:TRACE:DATA VOLATILE,{",".join(map(str, chunk))}'
-        awg.write(cmd)
-        time.sleep(0.05)   # Small delay to let DG1000Z process each chunk
+    # 6. Upload X
+    write_cmd(dev, ':SOUR1:FUNC:SHAP ARB')
+    write_cmd(dev, f':SOUR1:FUNC:ARB:SRATE {sample_rate:.0f}')
+    write_cmd(dev, f':SOUR1:TRACE:DATA VOLATILE,{x_str}')
+    time.sleep(0.2)  # Critical: let the instrument process
 
-    # 6. Upload Y channel in chunks
-    awg.write(':SOUR2:FUNC:SHAP ARB')
-    awg.write(f':SOUR2:FUNC:ARB:SRATE {sample_rate:.0f}')
-    for i in range(0, len(y_dac), chunk_size):
-        chunk = y_dac[i:i+chunk_size]
-        cmd = f':SOUR2:TRACE:DATA VOLATILE,{",".join(map(str, chunk))}'
-        awg.write(cmd)
-        time.sleep(0.05)
+    # 7. Upload Y
+    write_cmd(dev, ':SOUR2:FUNC:SHAP ARB')
+    write_cmd(dev, f':SOUR2:FUNC:ARB:SRATE {sample_rate:.0f}')
+    write_cmd(dev, f':SOUR2:TRACE:DATA VOLATILE,{y_str}')
+    time.sleep(0.2)
 
-    # 7. Set amplitude and enable outputs
-    awg.write(':SOUR1:VOLT 20')
-    awg.write(':SOUR1:VOLT:OFFS 0')
-    awg.write(':OUTP1 ON')
+    # 8. Enable outputs
+    write_cmd(dev, ':SOUR1:VOLT 20')
+    write_cmd(dev, ':SOUR1:VOLT:OFFS 0')
+    write_cmd(dev, ':OUTP1 ON')
 
-    awg.write(':SOUR2:VOLT 20')
-    awg.write(':SOUR2:VOLT:OFFS 0')
-    awg.write(':OUTP2 ON')
+    write_cmd(dev, ':SOUR2:VOLT 20')
+    write_cmd(dev, ':SOUR2:VOLT:OFFS 0')
+    write_cmd(dev, ':OUTP2 ON')
 
-    # 8. Wait for motion to finish
+    # 9. Wait for motion
     time.sleep(duration + 0.1)
 
-    # 9. Hold final position (DC)
-    awg.write(':SOUR1:FUNC:SHAP DC')
-    awg.write(f':SOUR1:VOLT:OFFS {vx2}')
-    awg.write(':SOUR2:FUNC:SHAP DC')
-    awg.write(f':SOUR2:VOLT:OFFS {vy2}')
+    # 10. Hold final position (DC)
+    write_cmd(dev, ':SOUR1:FUNC:SHAP DC')
+    write_cmd(dev, f':SOUR1:VOLT:OFFS {vx2}')
+    write_cmd(dev, ':SOUR2:FUNC:SHAP DC')
+    write_cmd(dev, f':SOUR2:VOLT:OFFS {vy2}')
     print("Motion completed.")
 
 
 def main():
-    # Find the device using the same logic as 01_connect.py
-    res = resolve_resource()
-    if not res:
-        print("ERROR: No galvo resource found. Is DG1000Z connected?")
+    dev = find_usbtmc()
+    if not dev:
+        print("ERROR: No /dev/usbtmc* found.")
+        print("Create it with: sudo mknod /dev/usbtmc0 c 180 0")
         return 1
 
-    print(f"Connecting to {res} ...")
-    rm = pyvisa.ResourceManager()
-    awg = rm.open_resource(res)
-    awg.timeout = 15000   # 15 seconds (more than enough for tiny chunks)
+    print(f"Using USBTMC device: {dev}")
 
     # Test communication
-    try:
-        idn = awg.query('*IDN?').strip()
-        print(f"IDN: {idn}")
-    except Exception as e:
-        print(f"Communication error: {e}")
-        awg.close()
-        return 1
+    write_cmd(dev, '*RST')
+    time.sleep(0.5)
+    idn = query_cmd(dev, '*IDN?')
+    print(f"IDN: {idn}")
 
     try:
-        # Move from (0,0) to (5,3) in 2 seconds with only 20 points
-        move_s_curve_pyvisa(
-            awg=awg,
+        # Move from (0,0) to (5,3) in 2 seconds
+        move_s_curve_direct(
+            dev=dev,
             x1=0.0, y1=0.0,
             x2=5.0, y2=3.0,
             duration=2.0,
-            sample_rate=10,      # 2s * 10Hz = 20 points
+            sample_rate=10,      # 20 points
             s_factor=4.0,
-            volt_per_deg=1.0,
-            chunk_size=10        # send 10 points per USB write
+            volt_per_deg=1.0
         )
 
         time.sleep(1.0)
         print("\nMoving back to origin...")
-        move_s_curve_pyvisa(
-            awg=awg,
+        move_s_curve_direct(
+            dev=dev,
             x1=5.0, y1=3.0,
             x2=0.0, y2=0.0,
             duration=1.5,
             sample_rate=10,
             s_factor=4.0,
-            volt_per_deg=1.0,
-            chunk_size=10
+            volt_per_deg=1.0
         )
 
     except KeyboardInterrupt:
-        print("\nInterrupted by user.")
-    except Exception as e:
-        print(f"\nERROR: {e}")
-        import traceback
-        traceback.print_exc()
+        print("\nInterrupted.")
     finally:
-        # Safety: turn off outputs and close connection
         print("Shutting down outputs...")
         try:
-            awg.write(':OUTP1 OFF')
+            write_cmd(dev, ':OUTP1 OFF')
         except:
             pass
         try:
-            awg.write(':OUTP2 OFF')
+            write_cmd(dev, ':OUTP2 OFF')
         except:
             pass
-        awg.close()
         print("Done.")
 
 if __name__ == "__main__":
