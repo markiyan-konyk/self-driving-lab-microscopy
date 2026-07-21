@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Step 5 - Smooth S-Curve via direct /dev/usbtmc (Kernel driver).
+Step 5 - Smooth S-Curve via direct /dev/usbtmc (VISIBLE VERSION).
 
-Improved version: properly stops output before switching to DC.
+Increased duration and amplitude for clear visual confirmation.
 """
 
 import sys
@@ -30,9 +30,9 @@ def query_cmd(dev, cmd):
 
 
 def move_s_curve_direct(dev, x1, y1, x2, y2, duration,
-                        sample_rate=5, s_factor=4.0, volt_per_deg=1.0):
+                        sample_rate=10, s_factor=4.0, volt_per_deg=1.0):
     """
-    Move using S-curve with safe output handling.
+    Move using S-curve with longer duration for visual tracking.
     """
     if duration <= 0:
         write_cmd(dev, f':SOUR1:APPL:DC {x1 * volt_per_deg}')
@@ -41,24 +41,24 @@ def move_s_curve_direct(dev, x1, y1, x2, y2, duration,
         write_cmd(dev, ':OUTP2 ON')
         return
 
-    # 1. Turn off outputs before changing anything
+    # Turn off outputs before changing anything
     write_cmd(dev, ':OUTP1 OFF')
     write_cmd(dev, ':OUTP2 OFF')
     time.sleep(0.1)
 
-    # 2. Total points (capped at 20 for absolute safety)
+    # Total points (max 40 to be safe, enough for 4-5 seconds)
     total_points = int(duration * sample_rate)
-    MAX_POINTS = 20
+    MAX_POINTS = 40
     if total_points > MAX_POINTS:
         total_points = MAX_POINTS
         sample_rate = total_points / duration
-    elif total_points < 5:
-        total_points = 5
+    elif total_points < 8:
+        total_points = 8
         sample_rate = total_points / duration
 
     print(f"Points: {total_points}, sample rate: {sample_rate:.1f} Hz")
 
-    # 3. Generate S-curve
+    # Generate S-curve
     t = np.linspace(-s_factor, s_factor, total_points)
     weights = (np.tanh(t) + 1.0) / 2.0
 
@@ -70,6 +70,9 @@ def move_s_curve_direct(dev, x1, y1, x2, y2, duration,
     x_volts = vx1 + (vx2 - vx1) * weights
     y_volts = vy1 + (vy2 - vy1) * weights
 
+    print(f"Voltage range: X = {min(x_volts):.2f}V ~ {max(x_volts):.2f}V, "
+          f"Y = {min(y_volts):.2f}V ~ {max(y_volts):.2f}V")
+
     def to_dac(v):
         return np.clip(((v + 10.0) / 20.0) * 16383, 0, 16383).astype(int)
 
@@ -78,23 +81,23 @@ def move_s_curve_direct(dev, x1, y1, x2, y2, duration,
 
     x_str = ",".join(map(str, x_dac))
     y_str = ",".join(map(str, y_dac))
-    print(f"X data size: {len(x_str)} bytes, Y data size: {len(y_str)} bytes")
+    print(f"X data: {len(x_str)} bytes, Y data: {len(y_str)} bytes")
 
-    print(f"Moving ({x1:.1f},{y1:.1f}) -> ({x2:.1f},{y2:.1f}) in {duration}s...")
+    print(f"Moving ({x1:.1f},{y1:.1f}) -> ({x2:.1f},{y2:.1f}) over {duration}s...")
 
-    # 4. Upload X
+    # Upload X
     write_cmd(dev, ':SOUR1:FUNC:SHAP ARB')
     write_cmd(dev, f':SOUR1:FUNC:ARB:SRATE {sample_rate:.0f}')
     write_cmd(dev, f':SOUR1:TRACE:DATA VOLATILE,{x_str}')
     time.sleep(0.2)
 
-    # 5. Upload Y
+    # Upload Y
     write_cmd(dev, ':SOUR2:FUNC:SHAP ARB')
     write_cmd(dev, f':SOUR2:FUNC:ARB:SRATE {sample_rate:.0f}')
     write_cmd(dev, f':SOUR2:TRACE:DATA VOLATILE,{y_str}')
     time.sleep(0.2)
 
-    # 6. Set amplitude and enable outputs
+    # Enable outputs (relay clicks here)
     write_cmd(dev, ':SOUR1:VOLT 20')
     write_cmd(dev, ':SOUR1:VOLT:OFFS 0')
     write_cmd(dev, ':OUTP1 ON')
@@ -103,11 +106,11 @@ def move_s_curve_direct(dev, x1, y1, x2, y2, duration,
     write_cmd(dev, ':SOUR2:VOLT:OFFS 0')
     write_cmd(dev, ':OUTP2 ON')
 
-    # 7. Let the waveform play for the specified duration
-    time.sleep(duration + 0.1)
+    # Let the waveform play
+    time.sleep(duration + 0.2)
 
-    # 8. Safely stop output and switch to DC hold
-    print("Holding final position...")
+    # Hold final position (DC) - relay clicks here
+    print("Holding final position (DC) for 3 seconds...")
     write_cmd(dev, ':OUTP1 OFF')
     write_cmd(dev, ':OUTP2 OFF')
     time.sleep(0.1)
@@ -120,6 +123,10 @@ def move_s_curve_direct(dev, x1, y1, x2, y2, duration,
 
     write_cmd(dev, ':OUTP1 ON')
     write_cmd(dev, ':OUTP2 ON')
+
+    # Give user time to see the final spot
+    time.sleep(3.0)
+
     print("Motion completed.")
 
 
@@ -127,39 +134,38 @@ def main():
     dev = find_usbtmc()
     if not dev:
         print("ERROR: No /dev/usbtmc* found.")
-        print("Create it with: sudo mknod /dev/usbtmc0 c 180 0")
         return 1
 
     print(f"Using USBTMC device: {dev}")
 
-    # Reset instrument
     write_cmd(dev, '*RST')
     time.sleep(0.5)
 
-    # Test communication
     idn = query_cmd(dev, '*IDN?')
     print(f"IDN: {idn}")
 
     try:
-        # Move from (0,0) to (5,3) in 2 seconds (10 points)
+        # Move from (0,0) to (8,5) over 5 seconds
+        # Duration is long so you can clearly see the laser moving!
         move_s_curve_direct(
             dev=dev,
             x1=0.0, y1=0.0,
-            x2=5.0, y2=3.0,
-            duration=2.0,
-            sample_rate=5,       # 2s * 5Hz = 10 points
+            x2=8.0, y2=5.0,      # 8 degrees and 5 degrees - BIG movement!
+            duration=5.0,         # 5 seconds - slow and visible
+            sample_rate=8,        # 5s * 8Hz = 40 points
             s_factor=4.0,
             volt_per_deg=1.0
         )
 
+        # Wait a bit and move back
         time.sleep(1.0)
-        print("\nMoving back to origin...")
+        print("\nMoving back to origin slowly...")
         move_s_curve_direct(
             dev=dev,
-            x1=5.0, y1=3.0,
+            x1=8.0, y1=5.0,
             x2=0.0, y2=0.0,
-            duration=1.5,
-            sample_rate=5,
+            duration=5.0,
+            sample_rate=8,
             s_factor=4.0,
             volt_per_deg=1.0
         )
