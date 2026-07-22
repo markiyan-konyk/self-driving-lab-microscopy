@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 Step 5 - Smooth S-Curve using PyVISA with real-time voltage stepping.
-
-This uses short DC commands (no large data transfer) to avoid USB timeouts.
-The laser moves smoothly over the specified duration.
+Fixed: Proper DC mode, simultaneous X/Y updates, correct S-curve.
 """
 
 import sys
@@ -17,7 +15,7 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
                         steps=100, s_factor=4.0, volt_per_deg=1.0):
     """
     Move using S-curve by stepping DC voltage in real-time.
-    No large data transfers -> no USB timeout.
+    Uses :APPL:DC for immediate DC output without mode switching.
     """
     if duration <= 0:
         awg.write(f':SOUR1:APPL:DC {x1 * volt_per_deg}')
@@ -26,7 +24,7 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
         awg.write(':OUTP2 ON')
         return
 
-    # Turn off outputs before starting
+    # Turn off outputs before starting (clean slate)
     awg.write(':OUTP1 OFF')
     awg.write(':OUTP2 OFF')
     time.sleep(0.1)
@@ -46,31 +44,43 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
 
     print(f"Moving ({x1:.1f},{y1:.1f}) -> ({x2:.1f},{y2:.1f}) over {duration}s "
           f"with {steps} steps...")
+    print(f"Voltage range: X = {min(x_volts):.2f}V ~ {max(x_volts):.2f}V, "
+          f"Y = {min(y_volts):.2f}V ~ {max(y_volts):.2f}V")
 
-    # Set amplitude and offset to 0 (we'll use DC offset directly)
-    awg.write(':SOUR1:VOLT 0')
-    awg.write(':SOUR1:VOLT:OFFS 0')
-    awg.write(':SOUR2:VOLT 0')
-    awg.write(':SOUR2:VOLT:OFFS 0')
+    # Set both channels to DC mode (this is critical!)
+    awg.write(':SOUR1:FUNC:SHAP DC')
+    awg.write(':SOUR2:FUNC:SHAP DC')
+    time.sleep(0.1)
+
+    # Enable outputs with initial position (x1, y1)
+    awg.write(f':SOUR1:VOLT:OFFS {vx1:.3f}')
+    awg.write(f':SOUR2:VOLT:OFFS {vy1:.3f}')
     awg.write(':OUTP1 ON')
     awg.write(':OUTP2 ON')
     time.sleep(0.1)
 
     # Step through the voltage curve
     interval = duration / steps
-    for vx, vy in zip(x_volts, y_volts):
+    for i, (vx, vy) in enumerate(zip(x_volts, y_volts)):
+        # Send both commands in quick succession
         awg.write(f':SOUR1:VOLT:OFFS {vx:.3f}')
         awg.write(f':SOUR2:VOLT:OFFS {vy:.3f}')
         time.sleep(interval)
+        
+        # Print progress every 10 steps
+        if (i + 1) % 10 == 0:
+            progress = (i + 1) / steps * 100
+            print(f"  Progress: {progress:.0f}% complete")
 
     # Hold final position for 3 seconds (visible confirmation)
     print("Holding final position for 3 seconds...")
     time.sleep(3.0)
 
-    # Optionally turn off outputs (or leave them on)
-    awg.write(':OUTP1 OFF')
-    awg.write(':OUTP2 OFF')
-    print("Motion completed.")
+    # Keep outputs on (don't turn off) so the laser stays at final position
+    # Optionally, you can turn them off if you want the laser to go to center
+    # awg.write(':OUTP1 OFF')
+    # awg.write(':OUTP2 OFF')
+    print("Motion completed. Laser held at final position.")
 
 
 def main():
@@ -93,19 +103,25 @@ def main():
         return 1
 
     try:
-        # Move from (0,0) to (10,10) in 5 seconds with 100 steps
+        # ============================================================
+        # TEST 1: Move from (0,0) to (5,5) in 5 seconds
+        # ============================================================
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
             x2=5.0, y2=5.0,
             duration=5.0,
-            steps=100,          # 100 steps = 50ms per step -> smooth
+            steps=100,
             s_factor=4.0,
             volt_per_deg=1.0
         )
 
-        # Wait and move back
+        # Wait a bit
         time.sleep(1.0)
+        
+        # ============================================================
+        # TEST 2: Move from (5,5) to (0,0) in 5 seconds
+        # ============================================================
         print("\nMoving back to origin...")
         move_s_curve_pyvisa(
             awg=awg,
