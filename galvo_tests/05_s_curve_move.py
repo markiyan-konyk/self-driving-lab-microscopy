@@ -97,7 +97,7 @@ def main():
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
-            x2=10.0, y2=10.0,
+            x2=5.0, y2=5.0,
             duration=5.0,
             steps=100,          # 100 steps = 50ms per step -> smooth
             s_factor=4.0,
