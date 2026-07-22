@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Step 5 - Smooth S-Curve using PyVISA with real-time voltage stepping.
-Final stable version: single initialization, no output toggling between moves.
+Stable version without *OPC? to avoid timeout.
 """
 
 import sys
@@ -13,8 +13,8 @@ from _common import resolve_resource
 # ============================================================
 # ★★★ USER CONFIGURABLE PARAMETERS ★★★
 # ============================================================
-STEPS = 50          # Number of steps (higher = smoother)
-DURATION = 4.0      # Total movement time in seconds
+STEPS = 40          # Reduce steps to give instrument more time per command
+DURATION = 5.0      # Longer duration gives more time per step
 # ============================================================
 
 
@@ -22,12 +22,8 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
                         steps=STEPS, s_factor=4.0, volt_per_deg=1.0,
                         first_call=False):
     """
-    Move using S-curve by stepping DC voltage in real-time.
-    No delay between X and Y commands for perfect diagonal motion.
-    
-    Args:
-        first_call: If True, initialize DC mode and turn on outputs.
-                    If False, assume outputs are already ON and in DC mode.
+    Move using S-curve by stepping DC voltage.
+    No *OPC? to avoid timeout.
     """
     if duration <= 0:
         awg.write(f':SOUR1:VOLT:OFFS {x1 * volt_per_deg:.3f}')
@@ -41,17 +37,14 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
     # Only initialize DC mode and outputs on the FIRST call
     # ============================================================
     if first_call:
-        # Turn off outputs to reset state (only once)
         awg.write(':OUTP1 OFF')
         awg.write(':OUTP2 OFF')
         time.sleep(0.1)
 
-        # Set both channels to DC mode
         awg.write(':SOUR1:FUNC:SHAP DC')
         awg.write(':SOUR2:FUNC:SHAP DC')
         time.sleep(0.1)
 
-        # Enable outputs
         awg.write(':OUTP1 ON')
         awg.write(':OUTP2 ON')
         time.sleep(0.1)
@@ -69,7 +62,7 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
     x_volts = vx1 + (vx2 - vx1) * weights
     y_volts = vy1 + (vy2 - vy1) * weights
 
-    # Force last value to be EXACTLY the target (avoid floating-point errors)
+    # Force last value exactly to target
     if len(x_volts) > 0:
         x_volts[-1] = vx2
         y_volts[-1] = vy2
@@ -83,43 +76,43 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
     time.sleep(0.1)
 
     # ============================================================
-    # ★★★ CRITICAL FIX: No delay between X and Y commands ★★★
-    # Send both commands back-to-back, then sleep for the interval.
+    # Step through the curve with small delay after each pair
     # ============================================================
     interval = duration / steps
     for i, (vx, vy) in enumerate(zip(x_volts, y_volts)):
-        # Send X and Y commands IMMEDIATELY after each other
         awg.write(f':SOUR1:VOLT:OFFS {vx:.3f}')
         awg.write(f':SOUR2:VOLT:OFFS {vy:.3f}')
         
-        # Now wait for the step interval
-        time.sleep(interval)
+        # Small delay to prevent buffer overflow
+        time.sleep(0.002)   # 2ms after each pair
+        
+        # Wait for the remaining interval (minus the 2ms already spent)
+        remaining = interval - 0.002
+        if remaining > 0:
+            time.sleep(remaining)
+        else:
+            time.sleep(0.001)
 
-        # Print progress every 20 steps
         if (i + 1) % 20 == 0 or i == 0:
             print(f"  Progress: {int((i+1)/steps*100)}%")
 
     # ============================================================
-    # ★★★ Synchronize with *OPC? to ensure all commands are processed
+    # ★★★ NO *OPC? – just wait a bit and force final position ★★★
     # ============================================================
-    print("Waiting for all commands to complete...")
-    awg.query('*OPC?')   # Blocks until all previous commands are done
-    time.sleep(0.2)
+    print("Allowing instrument to finish processing...")
+    time.sleep(0.5)   # Let the DG1022Z catch up
 
-    # ============================================================
     # Force final position using :VOLT:OFFS (we are still in DC mode)
-    # ============================================================
     print(f"Forcing final position to exactly ({x2:.1f}, {y2:.1f})...")
     awg.write(f':SOUR1:VOLT:OFFS {vx2:.3f}')
     awg.write(f':SOUR2:VOLT:OFFS {vy2:.3f}')
     time.sleep(0.2)
 
-    # Send again for reliability
+    # Send again to be absolutely sure
     awg.write(f':SOUR1:VOLT:OFFS {vx2:.3f}')
     awg.write(f':SOUR2:VOLT:OFFS {vy2:.3f}')
     time.sleep(0.2)
 
-    # Hold final position for 2 seconds
     print("Holding final position for 2 seconds...")
     time.sleep(2.0)
 
@@ -135,7 +128,7 @@ def main():
     print(f"Connecting to {res} ...")
     rm = pyvisa.ResourceManager()
     awg = rm.open_resource(res)
-    awg.timeout = 5000
+    awg.timeout = 10000   # Increase timeout to 10 seconds
 
     try:
         idn = awg.query('*IDN?').strip()
@@ -147,7 +140,7 @@ def main():
 
     try:
         # ============================================================
-        # First move: (0,0) -> (3,0)  (first_call=True initializes DC mode)
+        # First move: (0,0) -> (3,0)
         # ============================================================
         move_s_curve_pyvisa(
             awg=awg,
@@ -157,13 +150,13 @@ def main():
             steps=STEPS,
             s_factor=4.0,
             volt_per_deg=1.0,
-            first_call=True      # ← Only the first call initializes
+            first_call=True
         )
 
         time.sleep(1.0)
 
         # ============================================================
-        # Second move: (3,0) -> (0,0)  (no output toggling)
+        # Second move: (3,0) -> (0,0)
         # ============================================================
         move_s_curve_pyvisa(
             awg=awg,
@@ -179,7 +172,7 @@ def main():
         time.sleep(1.0)
 
         # ============================================================
-        # Third move: (0,0) -> (0,-3)  (vertical down)
+        # Third move: (0,0) -> (0,-3)
         # ============================================================
         print("\nMoving down...")
         move_s_curve_pyvisa(
@@ -196,7 +189,7 @@ def main():
         time.sleep(1.0)
 
         # ============================================================
-        # Fourth move: (0,-3) -> (0,0)  (back to origin)
+        # Fourth move: (0,-3) -> (0,0)
         # ============================================================
         print("\nMoving back to origin...")
         move_s_curve_pyvisa(
