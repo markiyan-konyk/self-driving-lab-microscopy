@@ -100,7 +100,7 @@ def main():
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
-            x2=5.0, y2=5.0,
+            x2=3.0, y2=3.0,
             duration=5.0,
             steps=STEPS,        # Use global STEPS
             s_factor=4.0,
@@ -113,7 +113,7 @@ def main():
         print("\nMoving back to origin...")
         move_s_curve_pyvisa(
             awg=awg,
-            x1=5.0, y1=5.0,
+            x1=3.0, y1=3.0,
             x2=0.0, y2=0.0,
             duration=5.0,
             steps=STEPS,        # Use global STEPS
