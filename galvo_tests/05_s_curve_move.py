@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Step 5 - Smooth S-Curve using PyVISA with real-time voltage stepping.
-Fixed: Proper DC mode, simultaneous X/Y updates, correct S-curve.
+Step 5 - Smooth S-Curve using PyVISA with :APPL:DC for reliable DC output.
+Fixed: Both channels update synchronously, proper S-curve.
 """
 
 import sys
@@ -12,10 +12,10 @@ from _common import resolve_resource
 
 
 def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
-                        steps=100, s_factor=4.0, volt_per_deg=1.0):
+                        steps=50, s_factor=4.0, volt_per_deg=1.0):
     """
-    Move using S-curve by stepping DC voltage in real-time.
-    Uses :APPL:DC for immediate DC output without mode switching.
+    Move using S-curve with :APPL:DC for each step.
+    :APPL:DC sets DC mode and offset in one command.
     """
     if duration <= 0:
         awg.write(f':SOUR1:APPL:DC {x1 * volt_per_deg}')
@@ -24,7 +24,7 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
         awg.write(':OUTP2 ON')
         return
 
-    # Turn off outputs before starting (clean slate)
+    # Turn off outputs to reset state
     awg.write(':OUTP1 OFF')
     awg.write(':OUTP2 OFF')
     time.sleep(0.1)
@@ -43,44 +43,36 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
     y_volts = vy1 + (vy2 - vy1) * weights
 
     print(f"Moving ({x1:.1f},{y1:.1f}) -> ({x2:.1f},{y2:.1f}) over {duration}s "
-          f"with {steps} steps...")
-    print(f"Voltage range: X = {min(x_volts):.2f}V ~ {max(x_volts):.2f}V, "
-          f"Y = {min(y_volts):.2f}V ~ {max(y_volts):.2f}V")
+          f"with {steps} steps")
+    print(f"Voltage range: X = {min(x_volts):.3f}V ~ {max(x_volts):.3f}V, "
+          f"Y = {min(y_volts):.3f}V ~ {max(y_volts):.3f}V")
 
-    # Set both channels to DC mode (this is critical!)
-    awg.write(':SOUR1:FUNC:SHAP DC')
-    awg.write(':SOUR2:FUNC:SHAP DC')
-    time.sleep(0.1)
-
-    # Enable outputs with initial position (x1, y1)
-    awg.write(f':SOUR1:VOLT:OFFS {vx1:.3f}')
-    awg.write(f':SOUR2:VOLT:OFFS {vy1:.3f}')
+    # Set initial position using :APPL:DC (simultaneously sets mode and offset)
+    awg.write(f':SOUR1:APPL:DC {vx1:.3f}')
+    awg.write(f':SOUR2:APPL:DC {vy1:.3f}')
     awg.write(':OUTP1 ON')
     awg.write(':OUTP2 ON')
     time.sleep(0.1)
 
-    # Step through the voltage curve
+    # Step through the curve
     interval = duration / steps
     for i, (vx, vy) in enumerate(zip(x_volts, y_volts)):
-        # Send both commands in quick succession
-        awg.write(f':SOUR1:VOLT:OFFS {vx:.3f}')
-        awg.write(f':SOUR2:VOLT:OFFS {vy:.3f}')
+        # Send both commands back-to-back (no sleep between them)
+        awg.write(f':SOUR1:APPL:DC {vx:.3f}')
+        awg.write(f':SOUR2:APPL:DC {vy:.3f}')
+        # Wait for the step interval
         time.sleep(interval)
-        
-        # Print progress every 10 steps
-        if (i + 1) % 10 == 0:
-            progress = (i + 1) / steps * 100
-            print(f"  Progress: {progress:.0f}% complete")
 
-    # Hold final position for 3 seconds (visible confirmation)
+        # Progress report every 10 steps
+        if (i + 1) % 10 == 0:
+            print(f"  Progress: {int((i+1)/steps*100)}%")
+
+    # Hold final position for 3 seconds
     print("Holding final position for 3 seconds...")
     time.sleep(3.0)
 
-    # Keep outputs on (don't turn off) so the laser stays at final position
-    # Optionally, you can turn them off if you want the laser to go to center
-    # awg.write(':OUTP1 OFF')
-    # awg.write(':OUTP2 OFF')
     print("Motion completed. Laser held at final position.")
+    # Keep outputs on so the laser stays at final position
 
 
 def main():
@@ -104,23 +96,22 @@ def main():
 
     try:
         # ============================================================
-        # TEST 1: Move from (0,0) to (5,5) in 5 seconds
+        # TEST: Move from (0,0) to (5,5) smoothly over 5 seconds
         # ============================================================
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
             x2=5.0, y2=5.0,
             duration=5.0,
-            steps=100,
+            steps=50,          # 50 steps -> each step 0.1s
             s_factor=4.0,
             volt_per_deg=1.0
         )
 
-        # Wait a bit
         time.sleep(1.0)
-        
+
         # ============================================================
-        # TEST 2: Move from (5,5) to (0,0) in 5 seconds
+        # Move back to origin
         # ============================================================
         print("\nMoving back to origin...")
         move_s_curve_pyvisa(
@@ -128,7 +119,7 @@ def main():
             x1=5.0, y1=5.0,
             x2=0.0, y2=0.0,
             duration=5.0,
-            steps=100,
+            steps=50,
             s_factor=4.0,
             volt_per_deg=1.0
         )
