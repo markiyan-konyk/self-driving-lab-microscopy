@@ -109,7 +109,7 @@ def main():
         print("\nMoving back to origin...")
         move_s_curve_pyvisa(
             awg=awg,
-            x1=10.0, y1=10.0,
+            x1=5.0, y1=5.0,
             x2=0.0, y2=0.0,
             duration=5.0,
             steps=100,
