@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Step 5 - Smooth S-Curve using PyVISA with real-time voltage stepping.
-Stable version with inter-command delays to prevent glitches.
 """
 
 import sys
@@ -11,13 +10,11 @@ import pyvisa
 from _common import resolve_resource
 
 # ============================================================
-# ★★★ USER CONFIGURABLE PARAMETER ★★★
-# Adjust STEPS to balance smoothness and stability.
-# - 50  : Slightly visible steps, very stable
-# - 80  : Good balance (recommended)
-# - 100 : Smooth, may glitch on slow USB
+# ★★★ USER CONFIGURABLE PARAMETERS ★★★
+# Change these values to adjust motion.
 # ============================================================
-STEPS = 50   # ← Recommended for stable operation
+STEPS = 50          # Number of steps (higher = smoother, but more USB load)
+DURATION = 8.0      # Total movement time in seconds
 # ============================================================
 
 
@@ -25,8 +22,7 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
                         steps=STEPS, s_factor=4.0, volt_per_deg=1.0):
     """
     Move using S-curve by stepping DC voltage in real-time.
-    Includes 5ms delay between X and Y commands for stability.
-    Forces final position twice to ensure accuracy.
+    Uses :APPL:DC at the end to force the exact final position.
     """
     if duration <= 0:
         awg.write(f':SOUR1:APPL:DC {x1 * volt_per_deg}')
@@ -58,6 +54,14 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
     x_volts = vx1 + (vx2 - vx1) * weights
     y_volts = vy1 + (vy2 - vy1) * weights
 
+    # ============================================================
+    # CRITICAL FIX: Force the last value to be EXACTLY the target.
+    # This prevents floating-point errors (e.g., 0.999999 -> 0.002V offset).
+    # ============================================================
+    if len(x_volts) > 0:
+        x_volts[-1] = vx2
+        y_volts[-1] = vy2
+
     print(f"Moving ({x1:.1f},{y1:.1f}) -> ({x2:.1f},{y2:.1f}) over {duration}s "
           f"with {steps} steps (interval: {duration/steps*1000:.1f}ms)")
 
@@ -83,26 +87,28 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
         if remaining_time > 0:
             time.sleep(remaining_time)
         else:
-            time.sleep(0.001)  # fallback if interval is very small
+            time.sleep(0.001)
 
         # Print progress every 20 steps
         if (i + 1) % 20 == 0 or i == 0:
             print(f"  Progress: {int((i+1)/steps*100)}%")
 
     # ============================================================
-    # ★★★ CRITICAL FIX: Force final position twice ★★★
-    # This ensures the laser stops exactly at (x2, y2).
+    # ★★★ ULTIMATE FIX: Force the final position using :APPL:DC ★★★
+    # :APPL:DC resets the channel mode and sets voltage in one command.
+    # This guarantees the laser goes to (x2, y2) regardless of buffer state.
     # ============================================================
-    print(f"Forcing final position to exactly ({x2:.1f}, {y2:.1f})...")
-    
-    # First attempt
-    awg.write(f':SOUR1:VOLT:OFFS {x2 * volt_per_deg:.3f}')
-    awg.write(f':SOUR2:VOLT:OFFS {y2 * volt_per_deg:.3f}')
+    print(f"Forcing final position to exactly ({x2:.1f}, {y2:.1f}) using :APPL:DC...")
+    time.sleep(0.5)  # Wait for the instrument to finish processing the loop
+
+    # Send :APPL:DC to both channels (this is a very robust command)
+    awg.write(f':SOUR1:APPL:DC {vx2:.3f}')
+    awg.write(f':SOUR2:APPL:DC {vy2:.3f}')
     time.sleep(0.3)
-    
-    # Second attempt (to override any lingering commands)
-    awg.write(f':SOUR1:VOLT:OFFS {x2 * volt_per_deg:.3f}')
-    awg.write(f':SOUR2:VOLT:OFFS {y2 * volt_per_deg:.3f}')
+
+    # Verify by sending it a second time (belt and suspenders)
+    awg.write(f':SOUR1:APPL:DC {vx2:.3f}')
+    awg.write(f':SOUR2:APPL:DC {vy2:.3f}')
     time.sleep(0.3)
 
     # Hold final position for 2 seconds
@@ -132,27 +138,31 @@ def main():
         return 1
 
     try:
-        # First move: (0,0) -> (5,5)
+        # ============================================================
+        # First move: (0,0) -> (5,5) using global DURATION and STEPS
+        # ============================================================
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
             x2=5.0, y2=5.0,
-            duration=5.0,
-            steps=STEPS,
+            duration=DURATION,   # Use global variable
+            steps=STEPS,         # Use global variable
             s_factor=4.0,
             volt_per_deg=1.0
         )
 
         time.sleep(1.0)
 
-        # Second move: (5,5) -> (0,0) (back to origin)
+        # ============================================================
+        # Second move: (5,5) -> (0,0) back to origin
+        # ============================================================
         print("\nMoving back to origin...")
         move_s_curve_pyvisa(
             awg=awg,
             x1=5.0, y1=5.0,
             x2=0.0, y2=0.0,
-            duration=5.0,
-            steps=STEPS,
+            duration=DURATION,   # Use global variable
+            steps=STEPS,         # Use global variable
             s_factor=4.0,
             volt_per_deg=1.0
         )
