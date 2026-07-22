@@ -14,7 +14,7 @@ from _common import resolve_resource
 # Change these values to adjust motion.
 # ============================================================
 STEPS = 50          # Number of steps (higher = smoother, but more USB load)
-DURATION = 8.0      # Total movement time in seconds
+DURATION = 4.0      # Total movement time in seconds
 # ============================================================
 
 
@@ -144,7 +144,7 @@ def main():
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
-            x2=5.0, y2=0.0,
+            x2=3.0, y2=0.0,
             duration=DURATION,   # Use global variable
             steps=STEPS,         # Use global variable
             s_factor=4.0,
@@ -154,7 +154,7 @@ def main():
         time.sleep(1.0)
         move_s_curve_pyvisa(
             awg=awg,
-            x1=5.0, y1=0.0,
+            x1=3.0, y1=0.0,
             x2=0.0, y2=0.0,
             duration=DURATION,   # Use global variable
             steps=STEPS,         # Use global variable
@@ -170,7 +170,7 @@ def main():
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
-            x2=0.0, y2=5.0,
+            x2=0.0, y2=-3.0,
             duration=DURATION,   # Use global variable
             steps=STEPS,         # Use global variable
             s_factor=4.0,
@@ -178,7 +178,7 @@ def main():
         )
         move_s_curve_pyvisa(
             awg=awg,
-            x1=0.0, y1=5.0,
+            x1=0.0, y1=-3.0,
             x2=0.0, y2=0.0,
             duration=DURATION,   # Use global variable
             steps=STEPS,         # Use global variable
