@@ -1,4 +1,6 @@
 # galvo_draw deps -- pure API client, no ROS.
 flask
 numpy
+python-dotenv        # auto-loads .env (SCOPIO_URL / SCOPIO_API_KEY)
+pyyaml               # reads config.yaml
 -e ../scopio_client

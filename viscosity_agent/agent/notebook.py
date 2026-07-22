@@ -141,6 +141,7 @@ class Notebook:
             "aggregate": state.get("aggregate"),
             "n_clips": len(state.get("clips", [])),
             "n_results": len(state.get("results", [])),
+            "usage": state.get("usage"),
             "fov_history": state.get("fov_history", []),
             "abort_reason": state.get("abort_reason"),
             "report_path": _rel_or_none(state.get("report_path"), self.run_dir),

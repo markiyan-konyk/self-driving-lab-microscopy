@@ -6,10 +6,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
-  body { margin: 0; background: #0c1311; color: #eaf2ee; display: flex; gap: 18px; padding: 18px; }
+  body { margin: 0; background: #0c1311; color: #eaf2ee; display: flex; gap: 18px; padding: 18px; flex-wrap: wrap; }
   h1 { font-size: 17px; margin: 0 0 2px; letter-spacing: 1px; }
   .sub { color: #8fa69b; font-size: 12px; margin-bottom: 14px; }
-  canvas { background: #05080a; border: 1px solid #25332c; border-radius: 10px; touch-action: none; cursor: crosshair; }
+  canvas { background: #05080a; border: 1px solid #25332c; border-radius: 10px; touch-action: none; cursor: crosshair; max-width: 100%; }
   .panel { width: 240px; display: flex; flex-direction: column; gap: 14px; }
   .row { display: flex; flex-direction: column; gap: 5px; }
   .row label { font-size: 12px; color: #8fa69b; text-transform: uppercase; letter-spacing: .6px; }
@@ -21,6 +21,8 @@
   button.active { background: #34d399; border-color: #34d399; color: #06140e; }
   .seg { display: flex; gap: 8px; }
   .seg button { flex: 1; }
+  .toggle { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #cfe0d8; }
+  .toggle input { width: 18px; height: 18px; accent-color: #34d399; }
   .enable { display: flex; align-items: center; gap: 10px; }
   .enable input { width: 20px; height: 20px; accent-color: #ef4444; }
   .status { font-size: 12px; color: #8fa69b; min-height: 32px; font-family: ui-monospace, monospace; }
@@ -46,9 +48,12 @@
       <input type="range" id="vpp" min="0" max="5" step="0.05" value="1.0">
     </div>
     <div class="row">
-      <label>Loop rate <span class="val" id="freqVal">60</span> Hz</label>
-      <input type="range" id="freq" min="10" max="200" step="1" value="60">
+      <label>Loop rate <span class="val" id="freqVal">45</span> Hz</label>
+      <input type="range" id="freq" min="20" max="100" step="1" value="45">
     </div>
+
+    <label class="toggle"><input type="checkbox" id="dim" checked> Dim travel lines
+      <span class="val"></span></label>
 
     <label class="enable"><input type="checkbox" id="enable"> Enable laser output</label>
 
@@ -59,8 +64,10 @@
     <button id="stopBtn">■ Stop (park dot)</button>
 
     <div class="status" id="status">idle</div>
-    <div class="warn">The laser can't blank, so separate strokes are joined by
-      visible lines — it's a single continuous loop (vector display).</div>
+    <div class="warn">The laser can't blank. With "dim travel" on, the beam whips
+      fast across the gaps between strokes so they fade; off, every line is equally
+      bright. Raise the loop rate for less flicker — lower it if the figure
+      distorts (the galvo can't follow).</div>
   </div>
 
 <script>
@@ -71,6 +78,7 @@ let mode = 'draw';
 let strokes = [];          // draw mode: array of strokes, each an array of [x,y] canvas px
 let cur = null;            // current stroke being drawn
 let down = false, lastXY = null;
+let dimTravel = true;
 
 // cube state
 let yaw = 0.6, pitch = -0.5;
@@ -113,26 +121,24 @@ function project(v) {
 }
 function cubePath() { return SEQ.map(i => project(CUBE[i])); }   // in [-~1.7, 1.7] units
 
-// ---- gather the path to draw (canvas px) ----
-function pathCanvas() {
+// ---- gather strokes to draw, in canvas px (list of strokes) ----
+function pathStrokes() {
   if (mode === 'cube') {
-    const pts = cubePath();
-    const s = 180;                                              // units -> px
-    return pts.map(([x,y]) => [W/2 + x*s, H/2 + y*s]);
+    const pts = cubePath(), s = 180;                            // units -> px
+    return [ pts.map(([x,y]) => [W/2 + x*s, H/2 + y*s]) ];      // one closed stroke
   }
-  // draw: concatenate all strokes
-  const out = [];
-  for (const st of strokes) for (const p of st) out.push(p);
-  return out;
+  return strokes.filter(st => st.length >= 1);
 }
 
-// ---- normalize canvas px -> [-1,1], y up ----
-function normalize(pts) {
-  if (pts.length < 2) return [];
+// ---- normalize all strokes with ONE global transform -> [-1,1], y up ----
+function normalizeStrokes(sts) {
+  const all = [];
+  for (const st of sts) for (const p of st) all.push(p);
+  if (all.length < 2) return [];
   let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;
-  for (const [x,y] of pts){ minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y); }
+  for (const [x,y] of all){ minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y); }
   const cx=(minX+maxX)/2, cy=(minY+maxY)/2, half=Math.max((maxX-minX),(maxY-minY))/2 || 1;
-  return pts.map(([x,y]) => [ (x-cx)/half, -(y-cy)/half ]);     // flip y
+  return sts.map(st => st.map(([x,y]) => [ (x-cx)/half, -(y-cy)/half ]));   // flip y
 }
 
 // ---- render preview ----
@@ -140,29 +146,42 @@ function render() {
   ctx.fillStyle = '#05080a'; ctx.fillRect(0,0,W,H);
   ctx.strokeStyle = '#1f2c26'; ctx.beginPath();
   ctx.moveTo(W/2,0); ctx.lineTo(W/2,H); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
-  const pts = pathCanvas();
-  if (pts.length < 2) return;
-  ctx.strokeStyle = '#34d399'; ctx.lineWidth = 2; ctx.beginPath();
-  ctx.moveTo(pts[0][0], pts[0][1]);
-  for (const p of pts) ctx.lineTo(p[0], p[1]);
-  if (mode === 'cube') ctx.lineTo(pts[0][0], pts[0][1]);
-  ctx.stroke();
+  const sts = pathStrokes();
+  if (!sts.length) return;
+  // faint connectors (travel) between strokes, to visualize the always-on beam
+  ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+  ctx.strokeStyle = dimTravel ? '#173a2c' : '#2c6b52';
+  ctx.beginPath();
+  for (let i = 0; i < sts.length; i++) {
+    const a = sts[i][sts[i].length-1], b = sts[(i+1) % sts.length][0];
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+  }
+  ctx.stroke(); ctx.setLineDash([]);
+  // strokes (bright)
+  ctx.strokeStyle = '#34d399'; ctx.lineWidth = 2;
+  for (const st of sts) {
+    ctx.beginPath(); ctx.moveTo(st[0][0], st[0][1]);
+    for (const p of st) ctx.lineTo(p[0], p[1]);
+    ctx.stroke();
+  }
 }
 
 // ---- send (debounced) ----
 let timer = null;
 function scheduleSend() { clearTimeout(timer); timer = setTimeout(send, 150); }
 async function send() {
-  const points = normalize(pathCanvas());
+  const strokesN = normalizeStrokes(pathStrokes());
   try {
     await fetch('/set_path', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ points, vpp: +$('vpp').value, freq: +$('freq').value, enabled: $('enable').checked }) });
+      body: JSON.stringify({ strokes: strokesN, vpp: +$('vpp').value, freq: +$('freq').value,
+                             dim_travel: dimTravel, enabled: $('enable').checked }) });
   } catch(e) {}
 }
 
 function fmt(v){ return (+v).toFixed(2); }
 $('vpp').oninput = () => { $('vppVal').textContent = fmt($('vpp').value); scheduleSend(); };
 $('freq').oninput = () => { $('freqVal').textContent = $('freq').value; scheduleSend(); };
+$('dim').onchange = () => { dimTravel = $('dim').checked; render(); scheduleSend(); };
 $('enable').onchange = send;
 $('clearBtn').onclick = async () => {
   strokes = []; render();
@@ -177,8 +196,24 @@ $('testBtn').onclick = async () => {
 async function poll() {
   try { const s = await (await fetch('/status')).json(); $('status').textContent = (s.connected?'● ':'○ ') + s.message; } catch(e){}
 }
+
+// ---- apply config.yaml bounds/defaults to the sliders ----
+async function loadConfig() {
+  try {
+    const c = await (await fetch('/config')).json();
+    const f = $('freq');
+    f.min = c.loop_hz_min; f.max = c.loop_hz_max; f.value = c.default_loop_hz;
+    $('freqVal').textContent = c.default_loop_hz;
+    const v = $('vpp');
+    v.max = c.max_vpp; v.value = c.default_vpp;
+    $('vppVal').textContent = fmt(c.default_vpp);
+    dimTravel = !!c.dim_travel; $('dim').checked = dimTravel;
+  } catch(e) {}
+  render();
+}
+
+loadConfig();
 setInterval(poll, 1000); poll();
-render();
 </script>
 </body>
 </html>

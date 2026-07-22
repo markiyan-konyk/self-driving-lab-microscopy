@@ -152,3 +152,47 @@ authentication**: anything on the network/domain could command the hardware.
   are unrelated (offline analysis / hardware bench scripts) and stay.
 - See `docs/API.md` for the resulting command manual and `ros2_ws/docs/CONNECTIVITY.md`
   for what's left of the DDS-networking story (now Pi-internal only).
+
+## 7. Instruments are exposed as a whole CLASS, not a feature list
+
+Adding the temperature controller (Wavelength TC LAB) forced the question the
+galvo passthrough had only half-answered: *which* instrument features should the
+ROS layer support?
+
+**Answer: all of them, by not choosing.** Each instrument node owns a plain
+python driver **class** and publishes every public method of it through one
+generic service (`InstrumentCall`: `{method, args, kwargs}` JSON in, JSON
+result out). `temperature/call` and `awg/call` are the whole API.
+
+- **Why not a typed service per feature.** The TC LAB has ~100 useful commands
+  (setpoint, PID, IntelliTune, limits, tolerance, sensor profiles, stored
+  profiles and scripts). A self-driving lab cannot predict which knob the next
+  experiment needs, and each new one would otherwise cost a `.srv`, a container
+  rebuild, a contract bump and a client update. Now it costs a method on a
+  python class — and it is callable the same day, by every app.
+- **Discoverability replaces documentation.** `list_methods` returns the name,
+  signature and docstring of everything callable (introspected from the class,
+  so it answers even while the hardware is offline). An app — or an agent — asks
+  the instrument what it can do; `GET /api/v1/interfaces` still lists the
+  service itself.
+- **This is the passthrough idea, done properly.** §4's raw SCPI relay had the
+  right instinct (the node takes no view of meaning) but pushed the entire
+  command *language* onto every client. A driver class keeps the node
+  instrument-agnostic while giving clients named methods, a lock so concurrent
+  callers can't interleave mid-protocol, auto-recovery after a USBTMC hiccup,
+  and paced command bursts. `awg/write`/`awg/query` stay for clients that
+  genuinely want to compose SCPI (`galvo_draw`) — they're now just the class's
+  own `command()`/`query()`.
+- **The apps still own policy.** Ramping temperature is walking a setpoint over
+  time; the controller has no ramp command, so the UI does it — the same split
+  that keeps galvo geometry in `ui/galvo_geometry.py`. The node holds hardware,
+  never experiment intent.
+- **Driver classes are vendored, not imported.** `ros2_ws/…/drivers/tclab.py`
+  and `…/drivers/wavegen.py` are copies of the repo-root `temperature.py` /
+  `galvo.py`: the workspace builds into a container and must not reach outside
+  itself. Keep them in sync by hand (`diff`); the banner in each says so.
+- **Prove the box before the stack.** `temperature_test.py` (repo root) drives
+  the controller with nothing but pyvisa — connect, read cold, check the
+  instrument's own limits, drive to two setpoints, always leave the output off.
+  When something doesn't work you learn *immediately* whether it's the
+  instrument or the integration.

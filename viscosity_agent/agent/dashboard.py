@@ -154,6 +154,14 @@ border-radius:4px;margin-top:6px;white-space:pre-wrap}
       <div class="kv"><span>beads · clips</span><b id="nb">—</b></div>
     </div>
     <div class="card">
+      <h2>LLM token cost</h2>
+      <div class="eta" id="cost" style="color:var(--warn)">$0.0000</div>
+      <div id="costmodel" class="muted" style="margin-top:4px">—</div>
+      <div class="kv"><span>input tokens</span><b id="tin">—</b></div>
+      <div class="kv"><span>output tokens</span><b id="tout">—</b></div>
+      <div class="kv"><span>total · calls</span><b id="ttot">—</b></div>
+    </div>
+    <div class="card">
       <h2>Setup</h2>
       <div class="kv"><span>calibration</span><b id="cal">—</b></div>
       <div class="kv"><span>source</span><b id="calsrc">—</b></div>
@@ -212,6 +220,14 @@ async function poll(){
       d.textContent=(dev>=0?'+':'')+dev.toFixed(1)+'%';
       d.className=Math.abs(dev)<10?'dev-ok':(Math.abs(dev)<25?'dev-warn':'dev-bad');
       document.getElementById('nb').textContent=e.n+' · '+(st.n_clips||0);
+    }
+    const u=st.usage;
+    if(u){
+      document.getElementById('cost').textContent=u.priced?('$'+(u.cost_usd||0).toFixed(4)):'—';
+      document.getElementById('costmodel').textContent=(u.model||'')+(u.priced?'':' · price unset');
+      document.getElementById('tin').textContent=(u.input_tokens||0).toLocaleString();
+      document.getElementById('tout').textContent=(u.output_tokens||0).toLocaleString();
+      document.getElementById('ttot').textContent=(u.total_tokens||0).toLocaleString()+' · '+(u.calls||0);
     }
     document.getElementById('cal').textContent=(st.um_per_px!=null?st.um_per_px+' µm/px':'—');
     document.getElementById('calsrc').textContent=st.calibration_source||'—';

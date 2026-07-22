@@ -26,13 +26,19 @@ in place.
 | `stage/position` | `scopio_interfaces/StagePosition` | stage_node | Open-loop position in **steps and micrometres**. |
 | `beads` | `scopio_interfaces/BeadArray` | tracker_node | Detected beads (on-demand; tracker off by default). |
 | `awg/status` | `scopio_interfaces/AwgStatus` | galvo_node | AWG liveness + last relayed command. |
+| `temperature/status` | `scopio_interfaces/TemperatureStatus` | temperature_node | Sample temperature, setpoint, TEC current/voltage, fault flags. |
 | `calibration` | `scopio_interfaces/Calibration` | calibration_node | **Latched.** µm/px + steps/µm. |
 
-### Future-sensor convention (not yet built)
-New sensors (e.g. temperature) publish under `sensors/<name>` using a standard
-message where one exists (temperature → `sensors/temperature`
-`sensor_msgs/Temperature`). Add them here when built; do not overload existing
-topics.
+### v1.1 — additive only
+`TemperatureStatus` and `InstrumentCall` were **added**; no existing field
+changed, so every v1.0 client keeps working untouched. That is the only kind of
+change this contract accepts.
+
+> The earlier plan was `sensors/temperature` + `sensor_msgs/Temperature`. It was
+> dropped: a bare temperature reading can't carry the setpoint, TEC current or
+> the sensor-fault flags a control loop needs, and the controller is an
+> *effectuator* as much as a sensor. One purpose-built status message beats a
+> standard one that omits half the state.
 
 ## Services (effectuators / commands)
 
@@ -45,7 +51,30 @@ topics.
 | `camera/white_balance` | `WhiteBalance` | camera_node | One-shot hardware AWB; returns the gains. |
 | `awg/write` | `AwgWrite` | galvo_node | **Relay a raw SCPI command** to the AWG. |
 | `awg/query` | `AwgQuery` | galvo_node | **Relay a raw SCPI query**, return the reply. |
+| `awg/call` | `InstrumentCall` | galvo_node | **Call any method** of the AWG driver class (`drivers/wavegen.py`). |
+| `temperature/call` | `InstrumentCall` | temperature_node | **Call any method** of the controller driver class (`drivers/tclab.py`). |
 | `calibration/set` | `CalibrationSet` | calibration_node | Update µm/px or steps/µm (NaN = leave), persisted. |
+
+### The instrument-call pattern (`InstrumentCall`)
+
+Two nodes own a plain-python driver **class** and expose *all* of it through one
+service: `{method, args, kwargs}` in (args/kwargs are JSON strings), `{success,
+result, error}` out (`result` is JSON). It is the one place this contract is
+deliberately not statically typed, because the alternative — a service per
+instrument feature — would mean an ABI change every time an experiment needs a
+knob the last one didn't.
+
+```bash
+ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall \
+  "{method: 'set_setpoint', args: '[25.0]'}"
+ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall \
+  "{method: 'list_methods'}"          # self-describing: name, signature, doc
+```
+
+Rules: private methods (`_x`) and `close` are not reachable; unknown methods and
+bad arguments come back as `success: false` **without** disturbing the
+instrument; `list_methods`, `connected` and `reconnect` are answered by the node
+itself and work even while the hardware is offline.
 
 ## Actions (long-running, with feedback)
 

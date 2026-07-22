@@ -40,7 +40,8 @@ def build_graph(ctx: Context):
         g.add_node(name, partial(getattr(nodes, name), ctx))
 
     g.set_entry_point("connect")
-    g.add_edge("connect", "calibration_gate")
+    g.add_conditional_edges("connect", partial(nodes.route_after_connect, ctx),
+                            {"ok": "calibration_gate", "abort": "report"})
     g.add_conditional_edges("calibration_gate",
                             partial(nodes.route_after_calibration, ctx),
                             {"ok": "setup_camera", "abort": "report"})

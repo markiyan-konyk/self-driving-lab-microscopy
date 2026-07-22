@@ -41,6 +41,10 @@ services:
     environment:
       - SCOPIO_REPO=/workspace
       - GALVO_RESOURCE=${GALVO_RESOURCE:-}
+      # TC LAB temperature controller. Leave empty to auto-discover it on USB;
+      # REQUIRED for an Ethernet unit (e.g. TCPIP::192.168.1.50::INSTR) and
+      # whenever the AWG is on USB too, so each node grabs the right box.
+      - TCLAB_RESOURCE=${TCLAB_RESOURCE:-}
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
       - CAMERA_URL=http://127.0.0.1:8081   # camera_node bridge mode upstream
     working_dir: /workspace

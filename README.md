@@ -16,7 +16,8 @@ auth**. Client programs need no ROS, no Docker, no DDS — just a URL and a key.
                  │        │ MJPEG/HTTP       │                    │
                  │  ROS 2 graph /scopio ◄──► API gateway (:8000)  │
                  │  camera·stage·galvo·      HTTP + WS + API key  │
-                 │  calibration·tracker      │                    │
+                 │  temperature·calibration· │                    │
+                 │  tracker                  │                    │
                  └───────────────────────────┼────────────────────┘
                                              │  any network
               ┌───────────────┬──────────────┼────────────────┐
@@ -38,6 +39,8 @@ auth**. Client programs need no ROS, no Docker, no DDS — just a URL and a key.
 | [`galvo_draw/`](galvo_draw/) | draw shapes with the laser (arbitrary-waveform vector display) |
 | `viscosity/` | offline bead-tracking/analysis pipeline; `tracker_node` borrows its trackpy parameters |
 | `galvo_tests/` | standalone hardware bench scripts for calibrating the galvo (independent of everything above) |
+| `temperature.py`, `galvo.py` | the instrument driver classes (TC LAB controller, Rigol AWG). The backend runs **copies** of these in `ros2_ws/…/scopio_microscope/drivers/` and exposes every method of them over the API |
+| `temperature_test.py` | prove the temperature controller works with nothing but pyvisa — run this before blaming the stack |
 
 ## Quick start
 
@@ -62,12 +65,15 @@ from a fresh Windows laptop: [`docs/WINDOWS_CLIENT.md`](docs/WINDOWS_CLIENT.md).
 ## Design in one paragraph
 
 The Pi only **senses and effectuates**; decisions live off-board
-([`docs/DECISIONS.md`](docs/DECISIONS.md)). The ROS interfaces are frozen at v1.0, and
-the gateway maps them generically to JSON — so a new node (the planned
-temperature/heating stack, for instance) becomes remotely usable the moment it
-launches, with zero gateway changes and automatic listing in
-`GET /api/v1/interfaces`. The API key is the lock; the gateway is the only
-door (the camera server and the DDS graph never face the LAN).
+([`docs/DECISIONS.md`](docs/DECISIONS.md)). The ROS interfaces are additive-only,
+and the gateway maps them generically to JSON — so a new node (the temperature
+controller was the latest) becomes remotely usable the moment it launches, with
+zero gateway changes and automatic listing in `GET /api/v1/interfaces`.
+Instrument nodes go one step further: they expose their whole **driver class**
+(`temperature/call`, `awg/call`), so any app can use any capability of the
+instrument without the ROS contract changing at all. The API key is the lock;
+the gateway is the only door (the camera server and the DDS graph never face
+the LAN).
 
 Status: restructured for the API-gateway architecture on branch `remake`;
 gateway + clients validated against the no-hardware graph, on-Pi hardware

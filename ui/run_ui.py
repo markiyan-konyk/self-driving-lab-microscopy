@@ -5,9 +5,11 @@ This program owns NO hardware and speaks NO ROS. It is the reference UI for
 the SCOPIO microscope and talks to the Pi's API gateway over plain HTTP/
 WebSocket through the scopio_client SDK:
 
-  subscribes (WS):  camera/state, stage/position, awg/status, beads, calibration
+  subscribes (WS):  camera/state, stage/position, awg/status, beads,
+                    calibration, temperature/status
   video (MJPEG):    /api/v1/stream.mjpg  -> live view + client-side recording
-  services (HTTP):  stage/jog, calibration/set, awg/write, camera controls
+  services (HTTP):  stage/jog, calibration/set, awg/write, temperature/call,
+                    camera controls
   action (WS):      camera/autofocus (runs on the backend)
 
 Because it is a plain HTTP client it runs on ANY machine that can reach the
@@ -31,6 +33,7 @@ Env: SCOPIO_URL, SCOPIO_API_KEY (required); SCOPIO_UI_PORT (8080),
 import os
 import re
 import json
+import math
 import time
 import secrets
 import logging
@@ -84,6 +87,7 @@ class State:
         self.camera = None          # camera/state message dict
         self.stage = None           # stage/position message dict
         self.awg = None             # awg/status message dict
+        self.temp = None            # temperature/status message dict
         self.beads = None           # beads message dict
         self.calibration = None     # calibration message dict (latched)
         self.connected = False      # gateway subscriptions established
@@ -127,10 +131,22 @@ def _subscribe_loop():
             scope.subscribe("calibration", store("calibration"))
             state.connected = True
             log.info("subscribed to microscope telemetry")
-            return
+            break
         except ScopioError as e:
             log.warning(f"cannot subscribe yet ({e}); retrying in 3 s")
             time.sleep(3)
+
+    # Temperature is OPTIONAL and retried separately: a microscope without the
+    # controller (or an older backend without the node) must not cost us the
+    # camera/stage telemetry above, which a single failing subscribe would.
+    while True:
+        try:
+            scope.subscribe("temperature/status", store("temp"), rate_hz=1)
+            log.info("subscribed to temperature telemetry")
+            return
+        except ScopioError as e:
+            log.info(f"no temperature node yet ({e}); retrying in 15 s")
+            time.sleep(15)
 
 
 def _frame_ingest_loop():
@@ -452,6 +468,153 @@ def _laser_state():
     s["connected"] = bool(awg and awg["connected"])
     s["global_um"] = {k: round(v, 1) for k, v in galvo.global_um(stage_um).items()}
     return s
+
+
+# ---- temperature (sample environment) ----
+# The node exposes the WHOLE driver class (setpoint, PID, IntelliTune, limits,
+# ...); this UI deliberately uses only the few calls an operator needs at the
+# microscope. A dedicated temperature app can use the rest -- ask the
+# instrument what it has with scope.temperature.methods().
+UNIT_NAMES = {0: "°C", 1: "K", 2: "°F", 3: "raw"}
+
+# Ramping is CLIENT policy: the controller has no ramp command, so we walk its
+# setpoint. Same split as the galvo (node = hardware, app = meaning). A ramp
+# lives in this process only -- restart the UI and the setpoint simply stays
+# where the last step left it.
+RAMP_TICK_S = 2.0
+_ramp = {"active": False, "thread": None, "stop": threading.Event(),
+         "target": None, "rate": 0.0, "commanded": None, "error": ""}
+
+
+def _ramp_cancel():
+    """Stop any ramp in flight and wait for its thread to notice."""
+    _ramp["stop"].set()
+    t = _ramp["thread"]
+    if t and t.is_alive() and t is not threading.current_thread():
+        t.join(timeout=RAMP_TICK_S + 2.0)
+    _ramp["active"] = False
+
+
+def _ramp_loop(stop, start, target, rate):
+    """Walk the setpoint from `start` to `target` at `rate` degrees/minute.
+
+    Every step is clamped to the target, so the ramp can never overshoot; the
+    instrument's own PID does the actual following. `stop` is passed in (not
+    read from _ramp) so a cancelled ramp can never be revived by, or interfere
+    with, the ramp that replaced it.
+    """
+    per_tick = abs(rate) * (RAMP_TICK_S / 60.0)
+    commanded = start
+    try:
+        while not stop.is_set():
+            remaining = target - commanded
+            commanded += math.copysign(min(per_tick, abs(remaining)), remaining)
+            scope.temperature.setpoint(round(commanded, 3))
+            _ramp["commanded"] = commanded
+            if abs(target - commanded) < 1e-6:
+                log.info(f"temperature ramp reached {target:g}")
+                break
+            if stop.wait(RAMP_TICK_S):
+                break
+    except ScopioError as e:
+        _ramp["error"] = str(e)
+        log.warning(f"temperature ramp aborted: {e}")
+    finally:
+        if _ramp["stop"] is stop:      # not superseded by a newer ramp
+            _ramp["active"] = False
+
+
+def _r(value, digits=3):
+    """Round, but keep null null -- the gateway sends NaN readings as null."""
+    return None if value is None else round(value, digits)
+
+
+def _temp_state():
+    with state.lock:
+        t = state.temp
+    eta = None
+    if _ramp["active"] and _ramp["commanded"] is not None and _ramp["rate"]:
+        eta = abs(_ramp["target"] - _ramp["commanded"]) / _ramp["rate"] * 60.0
+    out = {
+        "connected": bool(t and t["connected"]),
+        "ramp": {"active": _ramp["active"], "target": _ramp["target"],
+                 "rate": _ramp["rate"], "eta_s": eta, "error": _ramp["error"]},
+    }
+    if t:
+        out.update({
+            "temperature": _r(t["temperature"]),
+            "setpoint": _r(t["setpoint"]),
+            "unit": UNIT_NAMES.get(t["units"], "?"),
+            "output": t["output_enabled"],
+            "in_tolerance": t["in_tolerance"],
+            "sensor_fault": t["sensor_fault"],
+            "at_current_limit": t["at_current_limit"],
+            "tec_current": _r(t["tec_current"]),
+            "tec_voltage": _r(t["tec_voltage"]),
+            "error": t["last_error"],
+        })
+    return out
+
+
+@app.route("/temperature")
+@login_required
+def temperature():
+    return jsonify(_temp_state())
+
+
+@app.route("/temperature/target", methods=["POST"])
+@login_required
+def temperature_target():
+    """Set a target. rate <= 0 jumps straight there; rate > 0 ramps (°/min)."""
+    d = request.get_json() or {}
+    try:
+        target = float(d["celsius"])
+        rate = float(d.get("rate") or 0)
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Need 'celsius' (and optional 'rate')"}), 400
+
+    _ramp_cancel()
+    _ramp.update(error="", target=target, rate=max(0.0, rate))
+    try:
+        if rate <= 0:
+            scope.temperature.setpoint(target)
+            _ramp.update(active=False, commanded=target)
+            return jsonify({"message": f"Setpoint {target:g}", **_temp_state()})
+        # Start from where the controller actually is, read live -- telemetry
+        # may lag a previous command by up to a publish period.
+        start = float(scope.temperature.setpoint())
+    except ScopioError as e:
+        return jsonify({"error": str(e)}), 503
+
+    stop = _ramp["stop"] = threading.Event()
+    _ramp.update(active=True, commanded=start)
+    _ramp["thread"] = threading.Thread(target=_ramp_loop,
+                                       args=(stop, start, target, rate), daemon=True)
+    _ramp["thread"].start()
+    return jsonify({"message": f"Ramping {start:g} → {target:g} at {rate:g}/min",
+                    **_temp_state()})
+
+
+@app.route("/temperature/stop", methods=["POST"])
+@login_required
+def temperature_stop():
+    """Stop ramping and hold wherever the setpoint got to (does NOT touch the
+    output -- stopping a ramp is not an emergency stop)."""
+    _ramp_cancel()
+    return jsonify({"message": "Ramp stopped", **_temp_state()})
+
+
+@app.route("/temperature/output", methods=["POST"])
+@login_required
+def temperature_output():
+    on = bool((request.get_json() or {}).get("on"))
+    if not on:
+        _ramp_cancel()          # a ramp with the TEC off is meaningless
+    try:
+        scope.temperature.output(on)
+    except ScopioError as e:
+        return jsonify({"error": str(e)}), 503
+    return jsonify({"message": "Output " + ("on" if on else "off"), **_temp_state()})
 
 
 # ========== Client-side recording ==========

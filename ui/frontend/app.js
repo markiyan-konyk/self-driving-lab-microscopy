@@ -604,6 +604,110 @@
         });
 
         // ============================================================
+        //  Sample temperature (TC LAB controller)
+        // ============================================================
+        // The backend node exposes the WHOLE driver class; this panel uses the
+        // handful of calls an operator needs at the microscope (read, target,
+        // ramp, TEC on/off). Everything else -- PID, tuning, limits -- is one
+        // temperature/call away for a dedicated app.
+        const tempSection = document.querySelector('.temp-section');
+        const tempReadoutBox = document.querySelector('.temp-readout');
+        const tempStatus = $('tempStatus'), tempReadout = $('tempReadout');
+        const tempTarget = $('tempTarget'), tempRate = $('tempRate');
+        const tempApplyBtn = $('tempApplyBtn'), tempOutputBtn = $('tempOutputBtn');
+        let tempConnected = false, tempOutputOn = false, tempRamping = false, tempTargetTouched = false;
+
+        const tempToggle = $('tempToggle'), tempBody = $('tempBody');
+        tempToggle.addEventListener('click', () => {
+            const collapsed = tempBody.classList.toggle('collapsed');
+            tempToggle.setAttribute('aria-expanded', String(!collapsed));
+        });
+
+        const fmtT = (v, d = 2) => (v == null ? '—' : v.toFixed(d));
+
+        function renderTemperature(t) {
+            tempConnected = !!t.connected;
+            tempSection.classList.toggle('disabled', !tempConnected);
+            $('tempNow').textContent = fmtT(t.temperature);
+            $('tempUnit').textContent = t.unit || '°C';
+            $('tempSet').textContent = fmtT(t.setpoint, 1);
+            $('tempTec').textContent = t.tec_current == null ? '—'
+                : `${t.tec_current.toFixed(2)} A · ${fmtT(t.tec_voltage, 2)} V`;
+
+            tempOutputOn = !!t.output;
+            tempOutputBtn.classList.toggle('on', tempOutputOn);
+            tempOutputBtn.textContent = tempOutputOn ? '⏻ TEC on' : '⏻ TEC off';
+
+            tempReadoutBox.classList.toggle('live', tempConnected && !t.sensor_fault);
+            tempReadoutBox.classList.toggle('fault', !!t.sensor_fault);
+
+            const ramp = t.ramp || {};
+            tempRamping = !!ramp.active;
+            tempApplyBtn.textContent = tempRamping ? 'Stop ramp' : 'Set target';
+            let cls = 'off', text = 'Controller offline';
+            if (tempConnected) {
+                if (t.sensor_fault) { cls = 'off'; text = 'SENSOR FAULT — check the wiring'; }
+                else if (ramp.active) {
+                    cls = 'ramping';
+                    text = `Ramping to ${ramp.target}° at ${ramp.rate}°/min`;
+                } else if (!tempOutputOn) { cls = 'off'; text = 'TEC output off — not controlling'; }
+                else if (t.in_tolerance) { cls = 'on'; text = 'At temperature'; }
+                else { cls = 'on'; text = 'Driving to setpoint'; }
+            }
+            tempStatus.textContent = text;
+            tempStatus.className = 'temp-status ' + cls;
+
+            const bits = [];
+            if (ramp.active && ramp.eta_s != null) bits.push(`eta ${fmtTime(ramp.eta_s)}`);
+            if (t.at_current_limit) bits.push('at current limit');
+            if (ramp.error) bits.push('ramp: ' + ramp.error);
+            else if (t.error) bits.push(t.error);
+            tempReadout.textContent = bits.join(' · ') || '—';
+
+            // Seed the target box from the instrument once, then leave the
+            // operator's typing alone.
+            if (!tempTargetTouched && t.setpoint != null) {
+                tempTarget.value = t.setpoint;
+                tempTargetTouched = true;
+            }
+        }
+
+        async function pollTemperature() {
+            try { renderTemperature(await (await request('/temperature')).json()); }
+            catch (e) {}
+        }
+        setInterval(pollTemperature, 2000); pollTemperature();
+
+        [tempTarget, tempRate].forEach(el => el.addEventListener('input', () => { tempTargetTouched = true; }));
+
+        async function tempPost(path, body, label) {
+            tempApplyBtn.disabled = true;
+            try {
+                const d = await (await postJSON(path, body)).json();
+                if (d.error) throw new Error(d.error);
+                renderTemperature(d);
+                msg(d.message || label);
+            } catch (e) { msg(label + ' failed: ' + e.message); }
+            finally { tempApplyBtn.disabled = false; }
+        }
+
+        tempApplyBtn.addEventListener('click', () => {
+            if (!tempConnected) { msg('Temperature controller offline'); return; }
+            // While ramping this button becomes the cancel: hold the setpoint
+            // wherever the walk got to (the TEC keeps controlling to it).
+            if (tempRamping) { tempPost('/temperature/stop', {}, 'Stop ramp'); return; }
+            const celsius = parseFloat(tempTarget.value);
+            if (!isFinite(celsius)) { tempTarget.focus(); return; }
+            const rate = Math.max(0, parseFloat(tempRate.value) || 0);
+            tempPost('/temperature/target', { celsius, rate }, 'Set target');
+        });
+
+        tempOutputBtn.addEventListener('click', () => {
+            if (!tempConnected) { msg('Temperature controller offline'); return; }
+            tempPost('/temperature/output', { on: !tempOutputOn }, 'TEC output');
+        });
+
+        // ============================================================
         //  Mobile mode
         // ============================================================
         $('mobileToggle').addEventListener('click', () => {

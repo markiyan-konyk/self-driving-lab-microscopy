@@ -67,26 +67,75 @@ ros2 action send_goal /scopio/scan_region scopio_interfaces/action/ScanRegion \
   "{x_min: 0, x_max: 400, y_min: 0, y_max: 400, step: 100, settle_s: 0.3}" --feedback
 ```
 
-## galvo_node — raw VISA/SCPI passthrough to the laser AWG
-**Instrument-agnostic and frozen.** It relays command strings to the AWG and
-relays query replies back. It knows nothing about volts/pixels/waveforms — the
-caller must speak the instrument's SCPI. Laser *geometry* lives in client code
-(`../ui/galvo_geometry.py`).
+## galvo_node — the laser AWG, exposed whole
+Owns the VISA session through the `WaveGen` driver class
+(`scopio_microscope/drivers/wavegen.py`, a copy of the repo-root `galvo.py`) and
+offers it two ways:
 
-- **Publishes:** `awg/status`. **Services:** `awg/write`, `awg/query`.
-- **Param:** `resource` (VISA address; or the `GALVO_RESOURCE` env var).
+- `awg/call` — **any public method of the class**, by name, with JSON args:
+  sine/square/ramp, sweep, burst, AM/FM/PM/PWM/FSK, arbitrary-waveform upload,
+  paced command bursts, error-queue drain.
+- `awg/write` / `awg/query` — the original **raw SCPI passthrough**, unchanged,
+  for clients that compose their own SCPI (`galvo_draw`, `ui/galvo_geometry.py`).
+
+Either way the node takes no view of what commands *mean*: no volts, no pixels,
+no waveform semantics. Laser *geometry* stays in client code.
+
+- **Publishes:** `awg/status`. **Services:** `awg/call`, `awg/write`, `awg/query`.
+- **Params:** `resource` (VISA address; or `GALVO_RESOURCE`), `auto_discover`,
+  `timeout_ms`, `publish_rate`, `reconnect_period`.
 
 ```bash
-ros2 service call /scopio/awg/query scopio_interfaces/srv/AwgQuery "{command: '*IDN?'}"
-# point the X mirror to 1.25 V:
-ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite "{command: ':SOURce1:VOLTage:OFFSet 1.2500'}"
-# a continuous sine on CH1 (for a circle): 
-ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite "{command: ':SOURce1:APPLy:SINusoid 2,1.0,0'}"
+# what can this instrument do? (name, signature, docstring for each method)
+ros2 service call /scopio/awg/call scopio_interfaces/srv/InstrumentCall "{method: 'list_methods'}"
+# point the X mirror to 1.25 V, two equivalent ways:
+ros2 service call /scopio/awg/call scopio_interfaces/srv/InstrumentCall \
+  "{method: 'set_offset', args: '[1.25, 1]'}"
+ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite \
+  "{command: ':SOURce1:VOLTage:OFFSet 1.2500'}"
+# a continuous sine on CH1 (for a circle):
+ros2 service call /scopio/awg/call scopio_interfaces/srv/InstrumentCall \
+  "{method: 'apply_sine', args: '[2, 1.0]', kwargs: '{\"channel\": 1}'}"
 # laser off:
-ros2 service call /scopio/awg/write scopio_interfaces/srv/AwgWrite "{command: ':OUTPut1 OFF'}"
+ros2 service call /scopio/awg/call scopio_interfaces/srv/InstrumentCall \
+  "{method: 'output', args: '[false, 1]'}"
 ```
-> To use a *different* AWG later, change only your SCPI strings (or write a
-> sibling of `GalvoClient`); the ROS node does not change.
+> To use a *different* AWG later, swap the driver class (or just keep sending
+> your own SCPI strings); the node and the ROS contract do not change.
+
+What the class buys over the old bare-pyvisa passthrough: one lock so concurrent
+clients can't interleave mid-protocol, auto-recovery (USBTMC clear, then
+reconnect) after a hiccup instead of a wedged node, and `send_sequence` pacing
+for the long command bursts that used to jam the session.
+
+## temperature_node — the sample temperature controller, exposed whole
+Same pattern, for a Wavelength Electronics **TC LAB** (USB/USBTMC or
+Ethernet/VXI-11) through the `TCLab` driver class
+(`scopio_microscope/drivers/tclab.py`, a copy of the repo-root `temperature.py`).
+Every method — setpoint, PID, IntelliTune, limits, tolerance, sensor profiles,
+stored profiles/scripts, raw `command`/`query` — is callable by any client.
+
+- **Publishes:** `temperature/status` (polled at `publish_rate`).
+  **Service:** `temperature/call`.
+- **Params:** `resource` (or `TCLAB_RESOURCE`), `auto_discover`, `publish_rate`,
+  `timeout_ms`, `reconnect_period`, `units` (forced on connect so the published
+  degrees are unambiguous).
+
+```bash
+ros2 topic echo /scopio/temperature/status
+ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall \
+  "{method: 'set_setpoint', args: '[25.0]'}"
+ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall \
+  "{method: 'output', args: '[true]'}"      # nothing heats/cools until this is on
+```
+> **Two USB instruments, one bus:** with both the AWG and the controller on USB,
+> set `GALVO_RESOURCE` *and* `TCLAB_RESOURCE` explicitly — auto-discovery picks
+> the first USB device it sees, which is a coin flip. An Ethernet TC LAB must
+> always be named (`TCPIP::<ip>::INSTR`); pyvisa-py cannot scan the LAN.
+>
+> **Ramping is a client concern.** The controller has no ramp command, so an app
+> that wants one walks the setpoint itself (`ui/run_ui.py` does, at °/min) —
+> same node/app split as the galvo geometry.
 
 ## calibration_node — owns the spatial calibration
 Single source of truth for µm/px (image scale) and steps/µm (stage). Persisted

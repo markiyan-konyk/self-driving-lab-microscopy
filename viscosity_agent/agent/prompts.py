@@ -90,7 +90,19 @@ viscosities and flag outliers, or check for residual drift. Call
 read_results_summary / read_tracks_head to inspect data quickly. Save any plots
 under plots/. Do a couple of focused checks -- you don't need to be exhaustive.
 
-Then give your verdict:
+You can also FIX the method and commit the change to the data, without re-recording:
+  - set_tracking_params(...) then reprocess_clip(clip_id) -- if detection is missing
+    beads (lower minmass / adjust diameter) or mislinking (raise search_range/memory).
+  - set_analysis_params(...) then reanalyze() -- e.g. drift_correction=False if the
+    intercept warnings show drift is being over-corrected on a near-static sample;
+    or adjust fit_fraction / coverage / eccentricity thresholds.
+  - reanalyze() re-runs QC + estimation over every clip and updates the committed
+    viscosity (what the report will show); it returns the before/after so you can
+    tell whether your change actually helped. Prefer a targeted, justified change
+    over blind sweeping, and always reanalyze() after changing a parameter.
+If a change makes the result WORSE or has no physical justification, revert it.
+
+Then give your verdict (based on the CURRENT, possibly re-tuned, numbers):
   - converged    : the estimate is credible (enough beads, tight and consistent,
                    good fits, physically sensible vs literature). Stop and report.
   - acquire_more : promising but under-powered (too few beads, wide spread, high

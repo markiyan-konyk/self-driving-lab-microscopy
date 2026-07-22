@@ -26,5 +26,6 @@ def generate_launch_description():
         Node(executable="camera_node", name="camera_node", **common),
         Node(executable="stage_node", name="stage_node", **common),
         Node(executable="galvo_node", name="galvo_node", **common),
+        Node(executable="temperature_node", name="temperature_node", **common),
         Node(executable="tracker_node", name="tracker_node", **common),
     ])

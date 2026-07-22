@@ -77,7 +77,7 @@ scope.stage.jog(dz=100)
 | Method + path | Auth | Meaning |
 |---|---|---|
 | `GET /api/v1/health` | no | `{ok, ros_ok, camera_ok, auth_configured, uptime_s}` |
-| `GET /api/v1/status` | yes | one-call snapshot: latest `stage/position`, `camera/state`, `awg/status`, `beads`, `calibration` + camera reachability |
+| `GET /api/v1/status` | yes | one-call snapshot: latest `stage/position`, `camera/state`, `awg/status`, `temperature/status`, `beads`, `calibration` + camera reachability |
 | `GET /api/v1/interfaces` | yes | discovery: every service/topic/action with per-field schemas |
 | `POST /api/v1/service/{name}` | yes | **generic service call** (section 4) |
 | `GET /api/v1/stream.mjpg` | yes | live MJPEG video |
@@ -164,6 +164,71 @@ backend is a deliberate dumb passthrough (see `DECISIONS.md`).
 #### `awg/query` — raw SCPI query (AwgQuery)
 Request `{command}` (e.g. `"*IDN?"`) → `{success, response, error}`.
 
+#### `awg/call` / `temperature/call` — call any driver method (InstrumentCall)
+See section 4.1 — this is how you reach everything the AWG and the temperature
+controller can do.
+
+### 4.1 Instrument calls: the whole driver class, one service
+
+The galvo and temperature nodes each own a plain-python driver **class** and
+expose *every public method of it* through a single service. There is no fixed
+list of "supported features": whatever the class can do, your app can do, and a
+method added to the driver is callable the same day — no new endpoint, no
+gateway change, no SDK update.
+
+| Service | Instrument | Driver class |
+|---|---|---|
+| `awg/call` | Rigol DG1022Z AWG (galvo mirrors) | `ros2_ws/…/drivers/wavegen.py` (`WaveGen`) |
+| `temperature/call` | Wavelength TC LAB controller | `ros2_ws/…/drivers/tclab.py` (`TCLab`) |
+
+Request `{method, args, kwargs}` → `{success, result, error}`. `args` is a JSON
+**array**, `kwargs` a JSON **object**, both as *strings* (ROS fields are
+statically typed; this is the escape hatch). `result` is the JSON-encoded return
+value.
+
+```bash
+# set the sample to 25 °C
+curl -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+     -d '{"method": "set_setpoint", "args": "[25.0]"}' \
+     http://<pi>:8000/api/v1/service/temperature/call
+# enable the TEC output -- nothing heats or cools until this is on
+     -d '{"method": "output", "args": "[true]"}'
+# a 1 kHz sine on CH2 of the AWG
+     -d '{"method": "apply_sine", "args": "[1000, 2.0]", "kwargs": "{\"channel\": 2}"}'
+```
+
+**Ask the instrument what it can do** — `list_methods` returns the name,
+signature and docstring of everything callable, so you never have to guess:
+
+```python
+for m in scope.temperature.methods():
+    print(m["name"], m["signature"], "--", m["doc"])
+# set_setpoint (value) -- ...
+# set_pid (p, i=None, d=None) -- ...
+# intellitune_start () -- ...
+```
+
+SDK:
+```python
+scope.temperature.setpoint(25.0)          # sugar for the common calls
+scope.temperature.output(True)
+scope.temperature.call("set_pid", 1.2, i=0.4)   # anything else
+scope.galvo.call("apply_sine", 1000, 2.0, channel=2)
+```
+
+Three **meta-methods** are answered by the node itself and work even while the
+hardware is offline: `list_methods`, `connected`, `reconnect`.
+
+Rules of the road:
+- Private methods (`_foo`) and `close` are not reachable.
+- An unknown method or bad argument returns `success: false` and changes
+  nothing — one client's mistake can't knock the instrument offline for others.
+- A genuine link failure drops the session; the node reconnects on its own
+  (~15 s) and `connected` goes false on the status topic meanwhile.
+- **Policy stays in your app.** The controller has no ramp command, so ramping
+  is done by walking the setpoint client-side (`ui/run_ui.py` does this at
+  °/min) — exactly like galvo geometry lives in client code.
+
 #### `tracker/set_active` — toggle bead tracking (std_srvs/SetBool)
 Request `{data: true|false}` → `{success, message}`. While active, bead
 detections stream on the `beads` topic.
@@ -196,6 +261,7 @@ about that request echo it.
 | `stage/position` | StagePosition | absolute steps + µm, `connected` |
 | `camera/state` | CameraState | all camera settings + measured fps |
 | `awg/status` | AwgStatus | AWG `connected`, resource string |
+| `temperature/status` | TemperatureStatus | temperature, setpoint, TEC current/voltage, `output_enabled`, `in_tolerance`, `sensor_fault` |
 | `beads` | BeadArray | tracked bead positions (when tracker active) |
 | `calibration` | Calibration | µm/px + steps/µm (latched) |
 | `image/compressed` | CompressedImage | *refused over WS — use the MJPEG stream* |
@@ -275,7 +341,13 @@ is possible future work in the gateway.
 3. Document the new commands here, and (optionally) add a convenience
    namespace to `scopio_client`.
 
-Planned example: the temperature/heating node will publish
-`sensors/temperature` (`sensor_msgs/Temperature`) and expose something like a
-`thermal/set_target` service — clients will reach both through the exact same
-generic surface the day the node first launches.
+Worked example: the temperature node (section 4.1) was added exactly this way —
+a node, one message and one service in `scopio_interfaces`, and it was reachable
+through `/api/v1/service/temperature/call`, `/api/v1/interfaces` and the
+WebSocket the moment it launched. The only gateway edit was optional: adding
+`temperature/status` to the cached snapshot in `GET /api/v1/status`.
+
+**Instrument nodes: prefer the class pattern.** If your node fronts an
+instrument with a big command set, give it a driver class and one
+`InstrumentCall` service instead of a service per feature. You get the whole
+instrument, self-documented (`list_methods`), and the contract stops churning.

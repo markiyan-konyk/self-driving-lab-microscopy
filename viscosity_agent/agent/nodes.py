@@ -19,7 +19,8 @@ from .prompts import CRITIQUE, DECIDE_SCENE, REPORT, SYSTEM
 from .state import Critique, SceneDecision
 from .tools import acquisition, instrument, pipeline, sandbox, vision
 
-_MAX_CRITIQUE_STEPS = 8       # tool-call turns the critique agent may take
+_MAX_CRITIQUE_STEPS = 12      # tool-call turns the critique agent may take
+                              # (analysis scripts + re-tuning both cost turns)
 
 
 # --------------------------------------------------------------------------- #
@@ -27,8 +28,21 @@ _MAX_CRITIQUE_STEPS = 8       # tool-call turns the critique agent may take
 # --------------------------------------------------------------------------- #
 def _commit(ctx: Context, state: dict, update: dict) -> dict:
     """Refresh the dashboard state snapshot from the merged state, return update."""
+    if ctx.usage is not None:
+        update["usage"] = ctx.usage.snapshot()
     ctx.nb.set_state({**state, **update})
     return update
+
+
+def _log_usage(ctx: Context, node: str, before: int):
+    """Emit a compact token/cost line to the feed after an LLM node."""
+    if ctx.usage is None:
+        return
+    snap = ctx.usage.snapshot()
+    delta = snap["total_tokens"] - before
+    cost = f"${snap['cost_usd']:.4f}" if snap["priced"] else "price unset"
+    ctx.nb.note(f"tokens: +{delta:,} this step; run total {snap['total_tokens']:,} "
+                f"({cost})", usage=snap)
 
 
 def over_budget(ctx: Context, state: dict) -> bool:
@@ -81,10 +95,19 @@ def _fmt_results_table(results) -> str:
 def connect(ctx: Context, state: dict) -> dict:
     ctx.nb.phase("connect")
     h = instrument.get_health(ctx)
+    reachable = bool(h.get("ok"))          # did the health call itself succeed?
+    if not reachable and not state.get("dry_run"):
+        err = h.get("error", "unreachable")
+        msg = (f"cannot reach the microscope at {ctx.cfg.scopio_url}: {err}. "
+               f"Check SCOPIO_URL / SCOPIO_API_KEY and that the Pi gateway is up "
+               f"(curl {ctx.cfg.scopio_url}/api/v1/health), or use --dry-run.")
+        ctx.nb.error(msg)
+        print("\n  [x] " + msg + "\n")
+        return _commit(ctx, state, {"abort_reason": msg, "status": "aborted"})
     controls = instrument.get_camera_controls(ctx)
-    ok = bool(h.get("result", {}).get("ok", False)) if h.get("ok") else False
+    ok = bool(h.get("result", {}).get("ok", False)) if reachable else False
     status = "connected" if ok else "connect-degraded"
-    ctx.nb.note(f"health ok={ok}")
+    ctx.nb.note(f"health reachable={reachable} ok={ok}")
     return _commit(ctx, state, {"camera_controls": controls or {}, "status": status})
 
 
@@ -105,12 +128,27 @@ def calibration_gate(ctx: Context, state: dict) -> dict:
         val = _prompt_um_per_px(ctx)
         source = "prompt"
     if not val:
-        ctx.nb.error("no calibration available; cannot measure viscosity")
-        return _commit(ctx, state, {"abort_reason": "no calibration provided",
-                                    "status": "aborted"})
-    instrument.set_calibration(ctx, val)
-    ctx.nb.note(f"calibration set to {val:g} um/px (source: {source})")
-    return _commit(ctx, state, {"um_per_px": float(val),
+        guidance = (
+            "No microscope calibration (micrometres per pixel) is available. "
+            "This is the ONE value the agent needs from you. Provide it any of these "
+            "ways and re-run:\n"
+            "    - CLI:  python run_agent.py --um-per-px 0.5\n"
+            "    - env:  set UM_PER_PX=0.5   (or add it to viscosity_agent/.env)\n"
+            "    - UI :  set the calibration once in the SCOPIO web UI - it latches "
+            "on the gateway and the agent then picks it up automatically.\n"
+            "(0.5 is only an example - use your objective+camera's real um/px.)")
+        ctx.nb.error("calibration missing - cannot measure viscosity")
+        print("\n  [x] " + guidance + "\n")
+        return _commit(ctx, state, {
+            "abort_reason": "calibration not provided - pass --um-per-px, set "
+                            "UM_PER_PX, or set it in the UI (see console)",
+            "status": "aborted"})
+    val = float(val)
+    res = instrument.set_calibration(ctx, val)     # latch on the gateway if we can
+    if not res.get("ok"):
+        ctx.nb.note("could not latch calibration on the gateway; using it locally anyway")
+    ctx.nb.note(f"calibration = {val:g} um/px (source: {source})")
+    return _commit(ctx, state, {"um_per_px": val,
                                 "calibration_source": source, "status": "calibrated"})
 
 
@@ -146,10 +184,12 @@ def survey(ctx: Context, state: dict) -> dict:
 def decide_scene(ctx: Context, state: dict) -> dict:
     ctx.nb.phase("decide_scene")
     scene = state.get("scene") or {}
+    before = ctx.usage.snapshot()["total_tokens"] if ctx.usage else 0
     if ctx.offline:
         decision = _decide_scene_offline(ctx, state, scene)
     else:
         decision = _decide_scene_llm(ctx, state, scene)
+        _log_usage(ctx, "decide_scene", before)
     ctx.nb.decision("scene_decision", decision)
     return _commit(ctx, state, {"scene_decision": decision, "status": "deciding-scene"})
 
@@ -165,11 +205,15 @@ def _decide_scene_llm(ctx: Context, state: dict, scene: dict) -> dict:
         fov_history=json.dumps(state.get("fov_history", [])[-5:], indent=2),
         default_clip_s=cfg.default_clip_s, clip_min_s=cfg.clip_min_s,
         clip_max_s=cfg.clip_max_s, max_jog_steps=cfg.max_jog_steps, jog_hint=300)
-    llm = ctx.llm.with_structured_output(SceneDecision)
+    llm = ctx.llm.with_structured_output(SceneDecision, include_raw=True)
     try:
-        out: SceneDecision = llm.invoke(
-            [SystemMessage(content=SYSTEM), HumanMessage(content=prompt)])
-        return out.model_dump()
+        res = llm.invoke([SystemMessage(content=SYSTEM), HumanMessage(content=prompt)])
+        if ctx.usage is not None and res.get("raw") is not None:
+            ctx.usage.record(res["raw"], node="decide_scene")
+        parsed = res.get("parsed")
+        if parsed is None:
+            raise ValueError(res.get("parsing_error") or "no structured output")
+        return parsed.model_dump()
     except Exception as e:              # never let a bad LLM call stall the graph
         ctx.nb.error(f"decide_scene LLM failed ({e}); falling back to heuristic")
         return _decide_scene_offline(ctx, state, scene)
@@ -266,12 +310,20 @@ def analyze(ctx: Context, state: dict) -> dict:
 # --------------------------------------------------------------------------- #
 def critique(ctx: Context, state: dict) -> dict:
     ctx.nb.phase("critique")
+    before = ctx.usage.snapshot()["total_tokens"] if ctx.usage else 0
     if ctx.offline:
         crit = _critique_offline(ctx, state)
     else:
         crit = _critique_llm(ctx, state)
+        _log_usage(ctx, "critique", before)
     ctx.nb.decision("critique", crit)
-    return _commit(ctx, state, {"critique": crit, "status": "critiqued"})
+    # The critique agent may have re-tuned tracking/analysis and reprocessed the
+    # data in place (reprocess_clip / reanalyze). Return those committed changes so
+    # they persist into the report and dashboard.
+    return _commit(ctx, state, {
+        "critique": crit, "status": "critiqued",
+        "clips": state.get("clips", []), "datasets": state.get("datasets", []),
+        "results": state.get("results", []), "aggregate": state.get("aggregate")})
 
 
 def _critique_prompt(ctx: Context, state: dict) -> str:
@@ -297,6 +349,8 @@ def _critique_llm(ctx: Context, state: dict) -> dict:
     try:
         for _ in range(_MAX_CRITIQUE_STEPS):
             resp = llm_tools.invoke(messages)
+            if ctx.usage is not None:
+                ctx.usage.record(resp, node="critique")
             messages.append(resp)
             calls = getattr(resp, "tool_calls", None) or []
             if not calls:
@@ -312,8 +366,13 @@ def _critique_llm(ctx: Context, state: dict) -> dict:
                         result = f"tool error: {e}"
                 messages.append(ToolMessage(content=str(result),
                                             tool_call_id=call["id"]))
-        verdict = ctx.llm.with_structured_output(Critique).invoke(
+        res = ctx.llm.with_structured_output(Critique, include_raw=True).invoke(
             messages + [HumanMessage(content="Now give your final structured verdict.")])
+        if ctx.usage is not None and res.get("raw") is not None:
+            ctx.usage.record(res["raw"], node="critique")
+        verdict = res.get("parsed")
+        if verdict is None:
+            raise ValueError(res.get("parsing_error") or "no structured verdict")
         return verdict.model_dump()
     except Exception as e:
         ctx.nb.error(f"critique LLM failed ({e}); falling back to heuristic")
@@ -362,10 +421,14 @@ def report(ctx: Context, state: dict) -> dict:
     import os
     ctx.nb.phase("report")
     path = os.path.join(ctx.run_dir, "report.md")
-    if ctx.offline or ctx.llm is None:
+    before = ctx.usage.snapshot()["total_tokens"] if ctx.usage else 0
+    # An aborted run (no calibration, unreachable, etc.) has no data to reason
+    # about -- write the templated report instead of paying the LLM to restate it.
+    if ctx.offline or ctx.llm is None or state.get("abort_reason"):
         md = _report_offline(ctx, state)
     else:
         md = _report_llm(ctx, state)
+        _log_usage(ctx, "report", before)
     with open(path, "w", encoding="utf-8") as f:
         f.write(md)
     ctx.nb.result(f"report written -> {os.path.basename(path)}",
@@ -391,6 +454,7 @@ def _run_json(ctx: Context, state: dict) -> str:
         "fov_history": state.get("fov_history", []),
         "iterations": state.get("iteration"),
         "abort_reason": state.get("abort_reason"),
+        "usage": state.get("usage"),
     }
     return json.dumps(trimmed, indent=2, default=str)
 
@@ -407,6 +471,8 @@ def _report_llm(ctx: Context, state: dict) -> str:
     try:
         resp = ctx.llm.invoke([SystemMessage(content=SYSTEM),
                                HumanMessage(content=prompt)])
+        if ctx.usage is not None:
+            ctx.usage.record(resp, node="report")
         return _text(resp)
     except Exception as e:
         ctx.nb.error(f"report LLM failed ({e}); writing templated report")
@@ -444,6 +510,12 @@ def _report_offline(ctx: Context, state: dict) -> str:
         f"- temperature: {cfg.temperature_K} K; bead radius: {cfg.bead_radius_m * 1e6:g} µm",
         f"- provider/model: {state.get('provider_model')}"
         + ("  ·  dry-run (synthetic scope)" if state.get("dry_run") else ""), ""]
+    u = state.get("usage")
+    if u and u.get("calls"):
+        cost = f"${u['cost_usd']:.4f}" if u.get("priced") else "price unset"
+        lines += [f"- LLM cost: **{cost}** — {u['input_tokens']:,} input + "
+                  f"{u['output_tokens']:,} output tokens "
+                  f"({u['total_tokens']:,} total) over {u['calls']} calls", ""]
     lines += ["## Per-bead results", "", "```", _fmt_results_table(state.get("results", [])),
               "```", ""]
     lines += ["## Self-critique", "",
@@ -465,6 +537,10 @@ def _report_offline(ctx: Context, state: dict) -> str:
 # --------------------------------------------------------------------------- #
 #  routers                                                                     #
 # --------------------------------------------------------------------------- #
+def route_after_connect(ctx: Context, state: dict) -> str:
+    return "abort" if state.get("abort_reason") else "ok"
+
+
 def route_after_calibration(ctx: Context, state: dict) -> str:
     return "abort" if state.get("abort_reason") else "ok"
 

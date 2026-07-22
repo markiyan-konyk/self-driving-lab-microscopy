@@ -20,6 +20,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..context import Context
+from . import pipeline
 
 _MAX_OUTPUT = 6000            # chars of combined stdout+stderr returned to the LLM
 _SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
@@ -170,5 +171,94 @@ def build_analysis_tools(ctx: Context, state: dict):
         nb.tool("read_tracks_head", {"clip_id": clip_id, "n": n}, "ok")
         return head
 
+    # ---- closed-loop re-tuning: change the method and COMMIT it to the data ----
+    def _eta(agg):
+        if not agg or agg.get("weighted_mean_Pa_s") is None:
+            return "n/a"
+        return (f"{agg['weighted_mean_Pa_s']:.3e} Pa.s (N={agg['n_particles']}, "
+                f"+/-{agg['weighted_unc_Pa_s']:.1e})")
+
+    @tool
+    def set_tracking_params(diameter: int = None, minmass: float = None,
+                            percentile: float = None, search_range: int = None,
+                            memory: int = None) -> str:
+        """Re-tune the trackpy DETECTION/LINKING parameters for future re-processing.
+        Use when you suspect beads are being missed (lower minmass, adjust diameter)
+        or mislinked (raise search_range/memory). diameter must be odd. After setting,
+        call reprocess_clip(clip_id) to actually re-detect, then reanalyze(). Only the
+        params you pass change; omit the rest."""
+        tp = ctx.track_params
+        if diameter is not None:
+            d = int(diameter)
+            tp["diameter"] = d if d % 2 == 1 else d + 1      # trackpy needs odd
+        if minmass is not None:
+            tp["minmass"] = max(1.0, float(minmass))
+        if percentile is not None:
+            tp["percentile"] = float(max(0.0, min(100.0, percentile)))
+        if search_range is not None:
+            tp["search_range"] = max(1, int(search_range))
+        if memory is not None:
+            tp["memory"] = max(0, int(memory))
+        merged = pipeline.track_params(ctx)
+        nb.tool("set_tracking_params", {k: v for k, v in tp.items()}, "updated")
+        return "tracking params now: " + json.dumps(
+            {k: merged[k] for k in ("diameter", "minmass", "percentile",
+                                    "search_range", "memory")})
+
+    @tool
+    def reprocess_clip(clip_id: str) -> str:
+        """Re-run bead detection + linking on an ALREADY-RECORDED clip using the
+        current tracking params (see set_tracking_params), rewriting its CSV. Returns
+        the bead-count change. Follow with reanalyze() to update the viscosity."""
+        clip = next((c for c in state.get("clips", []) if c["clip_id"] == clip_id), None)
+        if clip is None:
+            return f"no such clip {clip_id}"
+        old_n = clip.get("n_beads_total")
+        pipeline.track_clip(ctx, clip)              # mutates clip in place, rewrites CSV
+        prepare_workspace(ctx, state)              # refresh staged ./data copies
+        new_n = clip.get("n_beads_total")
+        nb.tool("reprocess_clip", {"clip_id": clip_id}, f"beads {old_n} -> {new_n}")
+        return (f"reprocessed {clip_id}: linked beads {old_n} -> {new_n}. "
+                f"Call reanalyze() to fold this into the viscosity estimate.")
+
+    @tool
+    def set_analysis_params(fit_fraction: float = None, drift_correction: bool = None,
+                            min_coverage: float = None, max_ecc: float = None) -> str:
+        """Re-tune the ANALYSIS parameters. drift_correction=False disables linear
+        drift subtraction (use if the MSD intercept warnings say drift is being
+        over-corrected on a drift-free sample); fit_fraction changes how much of the
+        MSD curve is fit; min_coverage/max_ecc change which beads pass QC. Call
+        reanalyze() afterwards to apply them. Only the params you pass change."""
+        c = ctx.cfg
+        changed = {}
+        if fit_fraction is not None:
+            c.fit_fraction = float(max(0.05, min(1.0, fit_fraction))); changed["fit_fraction"] = c.fit_fraction
+        if drift_correction is not None:
+            c.drift_correction = bool(drift_correction); changed["drift_correction"] = c.drift_correction
+        if min_coverage is not None:
+            c.min_coverage = float(max(0.1, min(1.0, min_coverage))); changed["min_coverage"] = c.min_coverage
+        if max_ecc is not None:
+            c.max_ecc = float(max(0.0, min(1.0, max_ecc))); changed["max_ecc"] = c.max_ecc
+        nb.tool("set_analysis_params", changed, "updated")
+        return "analysis params now: " + json.dumps({
+            "fit_fraction": c.fit_fraction, "drift_correction": c.drift_correction,
+            "min_coverage": c.min_coverage, "max_ecc": c.max_ecc})
+
+    @tool
+    def reanalyze() -> str:
+        """Re-run QC + viscosity estimation across ALL recorded clips with the current
+        analysis params and COMMIT the new results/aggregate (this is what the report
+        and dashboard will show). Returns the before/after viscosity so you can judge
+        whether the change helped. This changes real state -- use it to actually fix a
+        wrong result, not just to explore."""
+        old = _eta(state.get("aggregate"))
+        datasets, results, agg = pipeline.reanalyze_all(
+            ctx, state.get("clips", []), state.get("um_per_px"))
+        state["datasets"], state["results"], state["aggregate"] = datasets, results, agg
+        prepare_workspace(ctx, state)
+        nb.result(f"reanalyze: {old} -> {_eta(agg)}", aggregate=agg)
+        return f"reanalyzed all clips. viscosity {old} -> {_eta(agg)} ({len(results)} beads)"
+
     return [write_file, read_file, list_files, run_python,
-            read_results_summary, read_tracks_head]
+            read_results_summary, read_tracks_head,
+            set_tracking_params, reprocess_clip, set_analysis_params, reanalyze]

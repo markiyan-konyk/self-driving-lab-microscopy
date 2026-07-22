@@ -13,15 +13,22 @@ backend (Pi: ros2_ws + gateway)  ──HTTP/WS──►  this UI  ──HTTP/MJP
 ```
 
 - **Video** is the gateway's `/api/v1/stream.mjpg` ingested by the SDK.
-- **Telemetry** (stage position, camera state, AWG status, calibration) streams
-  over the SDK's WebSocket subscriptions.
+- **Telemetry** (stage position, camera state, AWG status, temperature,
+  calibration) streams over the SDK's WebSocket subscriptions.
 - **Controls** are SDK calls (`scope.stage.jog`, `scope.camera.set_controls`,
-  `scope.calibration.set`, `scope.galvo.write`...).
+  `scope.calibration.set`, `scope.galvo.write`, `scope.temperature.setpoint`...).
 - **Autofocus** runs on the backend (`camera/autofocus` action).
 - **Recording happens here**, written to `./recordings` on whatever machine
   runs the UI (the Pi takes no recording load).
 - **Galvo/laser** control composes SCPI strings in `galvo_geometry.py` and
   sends them through the `awg/write` passthrough.
+- **Temperature** shows the live reading and sets a target, with an optional
+  ramp in °/min. The ramp is *this app's* policy — the controller has no ramp
+  command, so the UI walks its setpoint (in a background thread, so it stops if
+  the UI does). The backend node exposes the controller's *entire* driver class
+  (`temperature/call`), of which this panel deliberately uses only read /
+  setpoint / TEC-output — a dedicated temperature app can use the rest
+  (`scope.temperature.methods()` lists everything).
 
 ## Prerequisite: the backend must be running
 

@@ -32,7 +32,7 @@ is now covered by this stack plus `../ui` and `../galvo_draw`; see
 | Package | Type | What it is |
 |---|---|---|
 | `scopio_interfaces` | ament_cmake | The contract: msgs / srvs / **actions** (frozen v1.0) |
-| `scopio_microscope` | ament_python | The driver nodes (camera, stage, galvo, calibration, tracker) |
+| `scopio_microscope` | ament_python | The driver nodes (camera, stage, galvo, temperature, calibration, tracker) + the vendored instrument drivers in `scopio_microscope/drivers/` |
 | `scopio_gateway` | ament_python | The HTTP/WS API gateway (FastAPI + rclpy) |
 
 ### Nodes (all under the `/scopio` namespace)
@@ -45,13 +45,16 @@ is now covered by this stack plus `../ui` and `../galvo_draw`; see
 |---|---|---|---|
 | `camera_node` | `image/compressed`, `camera/state` | `camera/set_controls`, `camera/set_framerate`, `camera/white_balance` | `camera/autofocus` |
 | `stage_node` | `stage/position` | `stage/jog`, `stage/move_abs` | `stage/move_path`, `scan_region` |
-| `galvo_node` | `awg/status` | `awg/write`, `awg/query` (raw SCPI passthrough) | — |
+| `galvo_node` | `awg/status` | `awg/call` (any driver method), `awg/write`, `awg/query` (raw SCPI) | — |
+| `temperature_node` | `temperature/status` | `temperature/call` (any driver method) | — |
 | `calibration_node` | `calibration` (latched) | `calibration/set` | — |
 | `tracker_node` | `beads` | `tracker/set_active` | — |
 
 > **Recording is not a node** — the camera only streams; clients record
-> locally. **The galvo node is a raw VISA/SCPI passthrough** — geometry
-> (volts→pixels→µm) lives in client code. See
+> locally. **The instrument nodes expose a whole driver CLASS** (`awg/call`,
+> `temperature/call`): every method the class has is callable by any app, so
+> the ROS layer never decides which instrument features are "supported" and
+> meaning (volts→pixels→µm, temperature ramps) stays in client code. See
 > [docs/DECISIONS.md](../docs/DECISIONS.md) for why.
 
 Design notes:

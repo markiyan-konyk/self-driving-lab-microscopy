@@ -21,10 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-sensor-msgs \
         ros-jazzy-std-srvs \
     && rm -rf /var/lib/apt/lists/*
-# libusb-1.0-0 is REQUIRED for pyvisa-py/pyusb to enumerate the USB-TMC AWG (the
-# Rigol galvo). Without it the container sees only serial ports and galvo_node
-# reports "AWG unavailable" -- the host has libusb so galvo_tests work there, but
-# the Ubuntu container needs it installed explicitly.
+# libusb-1.0-0 is REQUIRED for pyvisa-py/pyusb to enumerate USB-TMC instruments
+# (the Rigol AWG that steers the galvo, and the TC LAB temperature controller
+# when it is on USB rather than Ethernet). Without it the container sees only
+# serial ports and those nodes report unavailable -- the host has libusb so the
+# standalone bench scripts work there, but the Ubuntu container needs it
+# installed explicitly.
 
 # NOTE: picamera2 / libcamera are NOT in Ubuntu's ARM repos -- they ship from
 # Raspberry Pi OS (Debian). So they are intentionally NOT installed here. The

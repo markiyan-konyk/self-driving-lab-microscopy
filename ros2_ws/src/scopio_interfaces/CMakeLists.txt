@@ -18,6 +18,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CameraState.msg"
   "msg/AwgStatus.msg"
   "msg/Calibration.msg"
+  # v1.1 additions (purely additive -- nothing above changed):
+  "msg/TemperatureStatus.msg"
   # ---- Services ----
   "srv/StageJog.srv"
   "srv/MoveAbs.srv"
@@ -27,6 +29,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/AwgWrite.srv"
   "srv/AwgQuery.srv"
   "srv/CalibrationSet.srv"
+  "srv/InstrumentCall.srv"   # generic driver-method dispatch (galvo + temperature)
   # ---- Actions ----
   "action/MoveStagePath.action"
   "action/ScanRegion.action"

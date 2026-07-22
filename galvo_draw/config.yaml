@@ -1,0 +1,31 @@
+# galvo_draw tuning knobs. Connection (URL + API key) lives in .env, NOT here.
+#
+# The AWG plays a single closed loop of samples at a fixed rate, so the beam's
+# speed at any point is set by how densely that region is sampled. See README.
+
+port:            8090     # web UI port (env GALVO_DRAW_PORT overrides)
+
+# --- arbitrary-waveform resolution ---
+# Kept SMALL on purpose: the Pi's galvo_node writes each ":DATA VOLATILE" over
+# pyvisa/USB-TMC with a 5 s VISA timeout, and a big ASCII arb command can't be
+# ingested in time -> "[Errno 110] Operation timed out". A few hundred points is
+# plenty (the DG1000Z interpolates to 8192 in hardware anyway). If uploads still
+# time out, LOWER THIS FIRST (e.g. 128).
+n_points:        256      # samples uploaded per channel (DG1000Z allows 8..16384)
+upload_settle_s: 0.25     # pause after each channel's arb upload (USB flow control)
+write_timeout_s: 20       # per-command gateway timeout for the big uploads (<=120)
+
+# --- loop rate (persistence-of-vision refresh) ---
+default_loop_hz: 45       # waveform repetitions/sec. Higher = less flicker; too
+loop_hz_min:     20       # high and a mechanical galvo can't keep up and the
+loop_hz_max:     100      # figure distorts. Tune to YOUR galvo's bandwidth.
+
+# --- size / safety ---
+default_vpp:     1.0      # amplitude = drawing size (Vpp)
+max_vpp:         5.0      # hard clamp on amplitude (galvo safe envelope)
+
+# --- always-on-beam handling ---
+dim_travel:      true     # true:  connectors between strokes are traced fast, so
+                          #        they fade; strokes are traced slowly (bright).
+                          # false: uniform speed -> travel lines equally bright.
+travel_points:   3        # samples per connector (fewer = faster = fainter)

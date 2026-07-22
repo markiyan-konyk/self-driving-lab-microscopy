@@ -43,15 +43,21 @@ def get_status_summary(ctx: Context):
 def get_calibration(ctx: Context):
     try:
         c = ctx.scope.calibration.get()
-    except ScopioError as e:
+    except Exception as e:      # ScopioError, or a malformed/absent telemetry cache
         ctx.nb.error(f"get_calibration failed: {e}")
         return {"has_um_per_px": False, "um_per_px": None, "error": str(e)}
     if not c or not c.get("has_um_per_px"):
         ctx.nb.tool("get_calibration", {}, "unset")
         return {"has_um_per_px": False, "um_per_px": None}
-    val = c.get("um_per_px")
+    try:
+        val = float(c.get("um_per_px"))
+    except (TypeError, ValueError):
+        val = None
+    if val is None or val != val or val <= 0:      # None / NaN / non-positive
+        ctx.nb.tool("get_calibration", {}, "unset (no valid value)")
+        return {"has_um_per_px": False, "um_per_px": None}
     ctx.nb.tool("get_calibration", {}, f"{val:g} um/px")
-    return {"has_um_per_px": True, "um_per_px": float(val)}
+    return {"has_um_per_px": True, "um_per_px": val}
 
 
 def set_calibration(ctx: Context, um_per_px: float):

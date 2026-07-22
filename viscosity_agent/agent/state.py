@@ -121,6 +121,9 @@ class AgentState(TypedDict, total=False):
     report_path: Optional[str]
     errors: List[str]
 
+    # token + cost accounting (snapshot refreshed after every node)
+    usage: Optional[dict]
+
 
 def new_state(run_dir: str, provider_model: str, um_per_px, dry_run: bool,
               started_at: float) -> AgentState:
@@ -147,4 +150,5 @@ def new_state(run_dir: str, provider_model: str, um_per_px, dry_run: bool,
         abort_reason=None,
         report_path=None,
         errors=[],
+        usage=None,
     )

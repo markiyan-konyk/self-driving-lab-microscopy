@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-4-8"  # current Anthropic flagship
     openai_model: str = "gpt-5.6-sol"         # current OpenAI flagship
     max_tokens: int = 8192
+    # optional cost overrides ($/1M tokens) if the built-in price table is stale
+    price_in_per_mtok: Optional[float] = None
+    price_out_per_mtok: Optional[float] = None
 
     # ---- the one human input ----
     um_per_px: Optional[float] = None
@@ -74,6 +77,7 @@ class Settings(BaseSettings):
     min_coverage: float = 0.90
     fit_fraction: float = 0.25
     max_ecc: float = 0.30
+    drift_correction: bool = True     # subtract linear stage drift before MSD
     min_beads: int = 5
     target_beads: int = 12
 

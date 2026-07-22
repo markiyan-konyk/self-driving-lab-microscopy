@@ -76,6 +76,15 @@ def build_scope(cfg, nb):
 
 
 def main():
+    # Windows consoles default to cp1252, which can't encode some of the glyphs
+    # we print (µ, arrows, etc.) -> force UTF-8 with replacement so a stray glyph
+    # never crashes a run with UnicodeEncodeError.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     args = parse_args()
 
     overrides = {
@@ -116,8 +125,13 @@ def main():
     scope = build_scope(cfg, nb)
     llm = None if offline else make_llm(cfg)
 
+    from agent.usage import UsageMeter
+    meter = UsageMeter(model=("offline" if offline else cfg.resolve_model()),
+                       price_in=cfg.price_in_per_mtok,
+                       price_out=cfg.price_out_per_mtok)
+
     ctx = Context(cfg=cfg, scope=scope, nb=nb, run_dir=run_dir,
-                  llm=llm, offline=offline)
+                  llm=llm, offline=offline, usage=meter)
 
     # dashboard (background thread)
     dash_url = None
@@ -126,7 +140,7 @@ def main():
         launch_in_thread(run_dir, cfg.dashboard_port)
         dash_url = f"http://localhost:{cfg.dashboard_port}"
         nb.note(f"dashboard live at {dash_url}")
-        print(f"\n  ► dashboard: {dash_url}\n")
+        print(f"\n  >> dashboard: {dash_url}\n")
 
     started = time.monotonic()
     state = new_state(run_dir, provider_model, cfg.um_per_px, cfg.dry_run, started)
@@ -176,6 +190,11 @@ def _print_summary(cfg, state, run_dir, dash_url):
         print(f"  no viscosity estimated ({state.get('abort_reason') or 'see notebook'})")
     crit = state.get("critique") or {}
     print(f"  verdict   : {crit.get('verdict')} (confidence {crit.get('confidence')})")
+    u = state.get("usage")
+    if u and u.get("calls"):
+        cost = f"${u['cost_usd']:.4f}" if u.get("priced") else "(price unset)"
+        print(f"  tokens    : {u['input_tokens']:,} in + {u['output_tokens']:,} out "
+              f"= {u['total_tokens']:,}  over {u['calls']} calls  ->  {cost}")
     print(f"  report    : {state.get('report_path')}")
     print(f"  notebook  : {os.path.join(run_dir, 'notebook.md')}")
     if dash_url:

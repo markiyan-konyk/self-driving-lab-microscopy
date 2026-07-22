@@ -17,6 +17,7 @@ literature_eta_Pa_s:  8.9e-4      # water @ 25 C, for the report's comparison
 min_coverage:         0.90        # keep a bead tracked in >= 90% of a clip's frames
 fit_fraction:         0.25        # MSD lag fraction used for the linear fit
 max_ecc:              0.30        # reject elongated blobs (clumps / debris)
+drift_correction:     true        # subtract linear stage drift before the MSD fit
 min_beads:            5           # a clip needs >= this many good beads to count
 target_beads:         12          # "enough" beads to lean toward converging
 
@@ -39,6 +40,12 @@ wall_clock_budget_s:  1800        # 30 min hard wall-clock cap on the whole run
 recursion_limit:      80          # LangGraph backstop
 max_jog_steps:        2000        # clamp on any single stage jog (Sangaboard steps)
 sandbox_timeout_s:    120         # per run_python call in the critique sandbox
+
+# ---------------------------------------------------------------- cost (optional)
+# Override the built-in per-model price table ($ per 1,000,000 tokens) if it has
+# gone stale. Leave unset to use the table in agent/usage.py.
+# price_in_per_mtok:  5.0
+# price_out_per_mtok: 25.0
 
 # ---------------------------------------------------------------- misc
 dry_run:              false       # true == MockScope, no hardware, known eta_true

@@ -52,10 +52,11 @@ docker compose exec scopio bash -lc \
   "source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && bash /workspace/ros2_ws/scripts/smoke_test.sh"
 ```
 
-- [ ] All five driver nodes present: `calibration_node camera_node stage_node
-      galvo_node tracker_node` (+ the `gateway` node).
+- [ ] All six driver nodes present: `calibration_node camera_node stage_node
+      galvo_node temperature_node tracker_node` (+ the `gateway` node).
 - [ ] Topics listed under `/scopio/...`; `stage/position`, `camera/state`,
-      `awg/status`, `calibration` are *publishing* (even with no hardware).
+      `awg/status`, `temperature/status`, `calibration` are *publishing* (even
+      with no hardware).
 
 If a node is **MISSING**, it crashed — `docker compose logs` shows the
 traceback. Fix that before going on.
@@ -111,6 +112,25 @@ python3 ros2_ws/scripts/smoke_test_api.py --url http://<pi-ip>:8000 --key $KEY
       `curl ... -d '{"command": "*IDN?"}' .../api/v1/service/awg/query`
 - [ ] Point it: `-d '{"command": ":SOURce1:VOLTage:OFFSet 0.25"}'` on
       `service/awg/write`; output on/off with `":OUTPut1 ON"` / `":OUTPut1 OFF"`.
+- [ ] The class surface answers too:
+      `-d '{"method": "list_methods"}'` on `service/awg/call`.
+
+## 7b. Temperature controller 💻
+
+Prove the box FIRST, off the microscope entirely — plug it into any machine and
+run `python temperature_test.py` (repo root). If that fails, nothing below can
+work. Then, on the Pi:
+
+- [ ] `temperature/status` shows `connected: true` in `/api/v1/status`.
+      If it's false with the controller plugged in, set `TCLAB_RESOURCE` in
+      `ros2_ws/.env` — auto-discovery grabs the *first* USB instrument, which
+      is a coin flip when the AWG is on USB too (set `GALVO_RESOURCE` as well).
+      An Ethernet unit must always be named: `TCPIP::<ip>::INSTR`.
+- [ ] Read it: `curl ... -d '{"method": "temperature"}' .../api/v1/service/temperature/call`
+- [ ] Drive it: `-d '{"method": "set_setpoint", "args": "[25.0]"}'`, then
+      `-d '{"method": "output", "args": "[true]"}'` and watch `temperature`
+      move on the status topic.
+- [ ] Turn it back off when done: `-d '{"method": "output", "args": "[false]"}'`.
 
 ## 8. Apps + autofocus 💻
 
@@ -145,4 +165,6 @@ python3 ros2_ws/scripts/smoke_test_api.py --url http://<pi-ip>:8000 --key $KEY
 | `401` from gateway | key not in `secrets/api_keys.json` (regenerate; hot-reloaded) |
 | `504` on service calls | node up but hardware not answering (cables, `GALVO_RESOURCE`) |
 | `awg/status connected: false` | `GALVO_RESOURCE` unset/wrong in `.env`, or USB perms |
+| `temperature/status connected: false` | `TCLAB_RESOURCE` unset/wrong, or the wrong USB device was auto-picked (set both resources explicitly) |
+| Temperature reads but never moves | TEC output off (`output`, `[true]`), or the rear Remote-Enable input is gating it |
 | Tracker Hz too low | tune params / raw-image optimisation |

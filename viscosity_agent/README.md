@@ -34,8 +34,15 @@ connect → calibration_gate → setup_camera → survey ⇄ decide_scene ─(ac
 - **Self-critique with a sandbox.** After analysis the agent can write and run its
   own Python (MSD-linearity plots, fit-fraction sensitivity, outlier checks) in a
   jailed workspace before deciding whether the estimate is trustworthy.
+- **Closed-loop self-tuning.** If it diagnoses a problem, it can *fix the method and
+  commit the change* without re-recording: re-tune trackpy detection/linking and
+  re-process a saved clip (`set_tracking_params` → `reprocess_clip`), or change the
+  analysis (`set_analysis_params` → `reanalyze`, e.g. disable drift correction when
+  the MSD intercept shows it's over-corrected) — the report and dashboard then show
+  the corrected result. It's told to only keep a change that actually helps.
 - **Live dashboard.** A web view of every decision, tool call, and the running
-  viscosity estimate vs the literature value.
+  viscosity estimate vs the literature value — plus **live token spend and USD
+  cost** so you always know what a run is costing.
 
 It reuses the repo's validated physics in [`viscosity/`](../viscosity/)
 (`track.py`, `calculation.py`, `main.py`) via a thin import shim.
@@ -93,6 +100,12 @@ Defaults are the current flagships — Anthropic `claude-opus-4-8`, OpenAI
 `--provider` / `--model` or `ANTHROPIC_MODEL` / `OPENAI_MODEL`. (Sampling params
 like temperature are never sent — Opus 4.8 rejects them, and this keeps behaviour
 identical across providers.)
+
+**Token spend & cost.** Every LLM call's tokens are metered (via LangChain's
+`usage_metadata`) and priced from a built-in per-model table, broken down by node.
+Totals show live on the dashboard, in the run summary, and in `report.md`. If the
+prices drift, override them per run with `PRICE_IN_PER_MTOK` / `PRICE_OUT_PER_MTOK`
+(or the same keys in `config.yaml`).
 
 ## Configuration
 

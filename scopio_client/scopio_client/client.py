@@ -13,13 +13,23 @@ Convenience namespaces (thin sugar over the generic surface):
     scope.camera.get_controls() / set_controls(...) / set_framerate(fps)
                  / white_balance() / autofocus(...)
     scope.galvo.write(cmd) / write_all(cmds) / query(cmd) / status()
+    scope.temperature.temperature() / setpoint(c) / output(on) / status()
     scope.calibration.get() / set(um_per_px=...)
     scope.stream_frames()                            # generator of JPEG bytes
+
+Instrument classes: the galvo and temperature nodes each own a driver CLASS and
+expose every one of its methods over one service. Reach anything the sugar
+above doesn't cover with .call(), and ask the instrument what it has:
+    scope.temperature.call("set_pid", 1.2, i=0.4)
+    scope.galvo.call("apply_sine", 1000, 2.0, channel=2)
+    [m["name"] for m in scope.temperature.methods()]
 
 NaN sentinels: calibration/set (and the ROS camera/set_controls service) treat
 NaN as "leave unchanged". The convenience methods pre-fill JSON null (-> NaN)
 for every field you don't pass, so partial updates are safe by default.
 """
+
+import json
 
 import requests
 
@@ -42,6 +52,7 @@ class Scopio:
         self.stage = _Stage(self)
         self.camera = _Camera(self)
         self.galvo = _Galvo(self)
+        self.temperature = _Temperature(self)
         self.calibration = _Calibration(self)
 
     # ------------------------------------------------------------ plumbing
@@ -191,9 +202,45 @@ class _Camera:
                                  on_feedback=on_feedback, timeout=timeout)
 
 
-class _Galvo:
+class _InstrumentCall:
+    """Shared plumbing for the nodes that expose a whole driver class over one
+    `InstrumentCall` service (galvo -> WaveGen, temperature -> TCLab)."""
+
+    SERVICE = None      # e.g. "temperature/call"
+
     def __init__(self, scope):
         self._s = scope
+
+    def call(self, method, *args, timeout=None, **kwargs):
+        """Call any method of the instrument's driver class. Python args map
+        straight through: call("apply_sine", 1000, 2.0, channel=2)."""
+        resp = self._s.call_service(self.SERVICE, {
+            "method": method,
+            "args": json.dumps(list(args)) if args else "",
+            "kwargs": json.dumps(kwargs) if kwargs else "",
+        }, timeout=timeout)
+        if not resp.get("success", False):
+            raise ScopioError(f"{self.SERVICE} {method}: {resp.get('error')}",
+                              payload=resp)
+        try:
+            return json.loads(resp.get("result") or "null")
+        except ValueError:
+            return resp.get("result")
+
+    def methods(self):
+        """Every method this instrument exposes: [{name, signature, doc}, ...].
+        Answers even while the hardware is offline."""
+        return self.call("list_methods")
+
+    def connected(self):
+        return bool(self.call("connected"))
+
+    def reconnect(self):
+        return bool(self.call("reconnect"))
+
+
+class _Galvo(_InstrumentCall):
+    SERVICE = "awg/call"
 
     def write(self, command):
         """Send one raw SCPI command to the AWG. Raises on failure."""
@@ -213,6 +260,36 @@ class _Galvo:
 
     def status(self):
         return self._s.telemetry("awg/status")
+
+
+class _Temperature(_InstrumentCall):
+    """The TC LAB sample-temperature controller. `status()` is the cheap read
+    (cached telemetry, no instrument traffic); everything else is a live call.
+
+    Only the handful of things every app needs is sugared here -- PID, tuning,
+    limits, sensor profiles and the rest are one .call() away, and .methods()
+    lists them."""
+
+    SERVICE = "temperature/call"
+
+    def status(self):
+        return self._s.telemetry("temperature/status")
+
+    def temperature(self):
+        """Control-sensor reading, live from the instrument."""
+        return self.call("temperature")
+
+    def setpoint(self, celsius=None):
+        """Read the setpoint, or set it when `celsius` is given."""
+        if celsius is None:
+            return self.call("get_setpoint")
+        return self.call("set_setpoint", float(celsius))
+
+    def output(self, on=None):
+        """Read or switch the TEC output (nothing heats/cools while it's off)."""
+        if on is None:
+            return self.call("output_enabled")
+        return self.call("output", bool(on))
 
 
 class _Calibration:

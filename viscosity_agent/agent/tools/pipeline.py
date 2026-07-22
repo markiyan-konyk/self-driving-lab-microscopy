@@ -40,6 +40,15 @@ def _workers(ctx):
     return "auto" if w.lower() == "auto" else int(w)
 
 
+def track_params(ctx: Context) -> dict:
+    """Resolve the trackpy detection/linking params: viscosity DEFAULTS, overlaid
+    with anything the agent has re-tuned onto ``ctx.track_params``."""
+    p = dict(_D)
+    override = getattr(ctx, "track_params", None) or {}
+    p.update({k: v for k, v in override.items() if v is not None})
+    return p
+
+
 def track_clip(ctx: Context, clip_record: dict):
     """Detect + link a recorded clip, writing a real-timestamp CSV. Updates the record."""
     clip_id = clip_record["clip_id"]
@@ -53,10 +62,13 @@ def track_clip(ctx: Context, clip_record: dict):
         clip_record["n_beads_total"] = 0
         return clip_record
 
-    ctx.nb.phase(f"tracking {clip_id} ({len(frames)} frames)", clip_id=clip_id)
-    feats = _vi.detect(frames, _D["channel"], _D["diameter"], _D["minmass"],
-                       _D["invert"], percentile="auto", workers=_workers(ctx))
-    tracks = _vi.link(feats, _D["search_range"], _D["memory"])
+    p = track_params(ctx)
+    ctx.nb.phase(f"tracking {clip_id} ({len(frames)} frames, "
+                 f"diameter={p['diameter']} minmass={p['minmass']} "
+                 f"percentile={p['percentile']})", clip_id=clip_id)
+    feats = _vi.detect(frames, p["channel"], p["diameter"], p["minmass"],
+                       p["invert"], percentile=p["percentile"], workers=_workers(ctx))
+    tracks = _vi.link(feats, p["search_range"], p["memory"])
     del frames                      # free the decoded frames promptly
 
     # merge REAL timestamps (frame -> timestamp_ms) captured during recording
@@ -139,7 +151,7 @@ def estimate_all(ctx: Context, clip_record: dict, dataset: dict, um_per_px: floa
                 particle_radius_m=ctx.cfg.bead_radius_m,
                 particle_radius_uncertainty_m=ctx.cfg.bead_radius_unc_m,
                 fit_fraction=ctx.cfg.fit_fraction,
-                drift_correction=True,
+                drift_correction=ctx.cfg.drift_correction,
             )
         except (ValueError, RuntimeError):
             skipped += 1
@@ -165,3 +177,21 @@ def aggregate_results(results: list):
     if not results:
         return None
     return _vi.summarise(results)
+
+
+def reanalyze_all(ctx: Context, clips: list, um_per_px: float):
+    """Re-run QC + estimate across every already-tracked clip with the CURRENT
+    analysis params (ctx.cfg). Returns (datasets, results, aggregate).
+
+    Used by the critique agent's ``reanalyze`` tool to commit a methodology change
+    (e.g. toggled drift correction, looser coverage) to the whole dataset without
+    re-recording anything.
+    """
+    datasets, results = [], []
+    for clip in clips:
+        if not clip.get("csv_path"):
+            continue
+        ds = qc_tracks(ctx, clip)
+        datasets.append(ds)
+        results.extend(estimate_all(ctx, clip, ds, um_per_px))
+    return datasets, results, aggregate_results(results)
