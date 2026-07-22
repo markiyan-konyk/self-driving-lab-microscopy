@@ -24,6 +24,8 @@
 #  * privileged + /run/udev -> USB galvo, serial stage, camera devices.
 #    For least-privilege, replace `privileged` with the commented devices list.
 #  * API keys: python3 scripts/generate_api_key.py <name>  (see docs/API.md).
+#  * Which instrument is which: .env in THIS folder (cp .env.example .env).
+#    Compose reads it automatically -- nothing to export, nothing to remember.
 services:
   scopio:
     build:
@@ -40,10 +42,11 @@ services:
       - /run/udev:/run/udev:ro
     environment:
       - SCOPIO_REPO=/workspace
+      # Instrument addresses come from .env in this folder (see .env.example).
+      # Empty => the node auto-discovers the first USB instrument, which is only
+      # safe with ONE instrument on the bus. An Ethernet TC LAB must always be
+      # named there: pyvisa-py cannot scan the LAN.
       - GALVO_RESOURCE=${GALVO_RESOURCE:-}
-      # TC LAB temperature controller. Leave empty to auto-discover it on USB;
-      # REQUIRED for an Ethernet unit (e.g. TCPIP::192.168.1.50::INSTR) and
-      # whenever the AWG is on USB too, so each node grabs the right box.
       - TCLAB_RESOURCE=${TCLAB_RESOURCE:-}
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
       - CAMERA_URL=http://127.0.0.1:8081   # camera_node bridge mode upstream

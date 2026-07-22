@@ -22,7 +22,8 @@
   ros__parameters:
     # VISA resource of the AWG (e.g. the DG1022Z). Empty => auto-discover the
     # first USB instrument; nothing found => node still runs, reports
-    # connected=false. Overridden by the GALVO_RESOURCE env var.
+    # connected=false. NORMALLY SET IN ros2_ws/.env (GALVO_RESOURCE), which
+    # wins over this -- that file is the one place the rig is described.
     resource: ""
     auto_discover: true      # set false (+ resource) when several USB instruments share the bus
     publish_rate: 5.0        # Hz, AwgStatus
@@ -37,11 +38,11 @@
 /scopio/temperature_node:
   ros__parameters:
     # VISA resource of the TC LAB controller. Empty => auto-discover the first
-    # USB instrument. An ETHERNET unit CANNOT be discovered (pyvisa-py doesn't
-    # scan the LAN) -- name it here or in the TCLAB_RESOURCE env var, e.g.
-    # "TCPIP::192.168.1.50::INSTR". Env wins over this.
-    # With both the AWG and the controller on USB, set BOTH resources
-    # explicitly rather than trusting enumeration order.
+    # USB instrument. NORMALLY SET IN ros2_ws/.env (TCLAB_RESOURCE), which wins
+    # over this. An ETHERNET unit CANNOT be discovered (pyvisa-py doesn't scan
+    # the LAN) -- it must be named: "TCPIP::192.168.1.50::INSTR".
+    # With both the AWG and the controller on USB, name BOTH resources rather
+    # than trusting enumeration order.
     resource: ""
     auto_discover: true
     publish_rate: 1.0        # Hz, TemperatureStatus (each tick = ~7 VISA queries)

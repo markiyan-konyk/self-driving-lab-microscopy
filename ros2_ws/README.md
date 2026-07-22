@@ -7,11 +7,18 @@ HTTP/WebSocket with an API key, never ROS. The Pi only senses, publishes, and
 effectuates.
 
 ```
+cp .env.example .env           # once: which VISA instrument is which (gitignored)
 docker compose up -d           # brings up ALL of this:
   scopio   -> the ROS 2 driver graph under /scopio (this workspace)
   camera   -> ../camera_server (picamera2 MJPEG, loopback :8081)
   gateway  -> src/scopio_gateway (HTTP/WS API, LAN :8000, API keys)
 ```
+
+`.env` is the **only** place the rig's hardware wiring is written down
+(`GALVO_RESOURCE`, `TCLAB_RESOURCE`, camera size). Compose reads it by itself —
+nothing to export, nothing to remember between sessions — and `temperature_test.py`
+reads the same file, so the bench script and the backend can't disagree. Edit it,
+then `docker compose up -d` again to apply.
 
 This is the **backend**. (An earlier, pre-ROS Flask monolith that drove the
 hardware directly, `microscope/`, has since been deleted — everything it did

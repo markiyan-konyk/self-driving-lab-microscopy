@@ -129,9 +129,10 @@ ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall 
   "{method: 'output', args: '[true]'}"      # nothing heats/cools until this is on
 ```
 > **Two USB instruments, one bus:** with both the AWG and the controller on USB,
-> set `GALVO_RESOURCE` *and* `TCLAB_RESOURCE` explicitly — auto-discovery picks
-> the first USB device it sees, which is a coin flip. An Ethernet TC LAB must
-> always be named (`TCPIP::<ip>::INSTR`); pyvisa-py cannot scan the LAN.
+> name `GALVO_RESOURCE` *and* `TCLAB_RESOURCE` in `ros2_ws/.env` (see
+> `.env.example`) — auto-discovery picks the first USB device it sees, which is
+> a coin flip. An Ethernet TC LAB must always be named (`TCPIP::<ip>::INSTR`);
+> pyvisa-py cannot scan the LAN.
 >
 > **Ramping is a client concern.** The controller has no ramp command, so an app
 > that wants one walks the setpoint itself (`ui/run_ui.py` does, at °/min) —

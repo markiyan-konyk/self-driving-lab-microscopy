@@ -16,9 +16,34 @@ Legend: 🖥️ = on the Pi, 💻 = on another machine on the same network.
 - [ ] `rpicam-hello -t 2000` shows a camera preview (libcamera works on the host).
 - [ ] `docker --version` and `docker compose version` work; `sudo systemctl
       enable docker` so the stack survives reboots.
-- [ ] Stage (Sangaboard) and galvo (DG1022Z) are plugged in.
-- [ ] Find the galvo's VISA address (e.g. `python galvosetup.py`) and put it in
-      `ros2_ws/.env`: `GALVO_RESOURCE=USB0::...`
+- [ ] Stage (Sangaboard), galvo AWG (DG1022Z) and — if you're using it — the
+      TC LAB temperature controller are plugged in.
+- [ ] **Write the rig down once**, in `ros2_ws/.env` (compose reads it
+      automatically; it is gitignored because it describes *this* Pi):
+
+      ```bash
+      cd ros2_ws && cp .env.example .env       # then edit it
+      lsusb                                    # sanity: the boxes are seen at all
+      ```
+
+      To get the exact VISA strings you need pyvisa. Either on any machine with
+      the instrument attached (`python temperature_test.py --list`), or from the
+      container once the stack is up (step 2) — the `.env` can be filled in then
+      and applied with another `docker compose up -d`:
+
+      ```bash
+      docker compose exec scopio python3 -c \
+        "import pyvisa; print(pyvisa.ResourceManager('@py').list_resources())"
+      ```
+
+      ```ini
+      GALVO_RESOURCE=USB0::0x1AB1::0x0642::DG1ZA000000000::INSTR
+      TCLAB_RESOURCE=TCPIP::192.168.1.50::INSTR
+      ```
+
+      Leave a line out and that node auto-discovers the first USB instrument —
+      fine with one instrument on the bus, a coin flip with two. An Ethernet
+      TC LAB must always be named (pyvisa-py cannot scan the LAN).
 - [ ] Generate at least one API key:
       `python3 scripts/generate_api_key.py laptop` (note the printed key).
 
@@ -122,10 +147,8 @@ run `python temperature_test.py` (repo root). If that fails, nothing below can
 work. Then, on the Pi:
 
 - [ ] `temperature/status` shows `connected: true` in `/api/v1/status`.
-      If it's false with the controller plugged in, set `TCLAB_RESOURCE` in
-      `ros2_ws/.env` — auto-discovery grabs the *first* USB instrument, which
-      is a coin flip when the AWG is on USB too (set `GALVO_RESOURCE` as well).
-      An Ethernet unit must always be named: `TCPIP::<ip>::INSTR`.
+      If it's false with the controller plugged in, check `TCLAB_RESOURCE` in
+      `ros2_ws/.env` (step 0), then `docker compose up -d` to apply it.
 - [ ] Read it: `curl ... -d '{"method": "temperature"}' .../api/v1/service/temperature/call`
 - [ ] Drive it: `-d '{"method": "set_setpoint", "args": "[25.0]"}'`, then
       `-d '{"method": "output", "args": "[true]"}'` and watch `temperature`
@@ -165,6 +188,8 @@ work. Then, on the Pi:
 | `401` from gateway | key not in `secrets/api_keys.json` (regenerate; hot-reloaded) |
 | `504` on service calls | node up but hardware not answering (cables, `GALVO_RESOURCE`) |
 | `awg/status connected: false` | `GALVO_RESOURCE` unset/wrong in `.env`, or USB perms |
-| `temperature/status connected: false` | `TCLAB_RESOURCE` unset/wrong, or the wrong USB device was auto-picked (set both resources explicitly) |
+| `temperature/status connected: false` | `TCLAB_RESOURCE` unset/wrong in `.env`, or the wrong USB device was auto-picked (name both resources) |
+| Edited `.env`, nothing changed | `docker compose up -d` again — env vars are baked in at container creation |
+| `list_resources()` doesn't show an instrument | Run `python3 instrument_scan.py` (host **and** `docker compose exec scopio python3 /workspace/instrument_scan.py`). A device whose USB interface class is CDC/vendor is a **virtual COM port**: it can only ever be an `ASRL/dev/tty…::INSTR` resource, never `USB…::INSTR`, and USB auto-discovery skips it by design. Missing pyserial hides serial instruments entirely. |
 | Temperature reads but never moves | TEC output off (`output`, `[true]`), or the rear Remote-Enable input is gating it |
 | Tracker Hz too low | tune params / raw-image optimisation |

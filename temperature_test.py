@@ -24,7 +24,9 @@ Usage:
     python temperature_test.py --setpoints 25,30 --hold 120 --tolerance 0.2
     python temperature_test.py --no-output                  # read-only, never drives
 
-Env: TCLAB_RESOURCE is used when --resource is omitted.
+Resource lookup order: --resource, then $TCLAB_RESOURCE, then TCLAB_RESOURCE in
+ros2_ws/.env (the same file docker compose reads, so the rig is described in
+ONE place), then auto-discovery of the first USB instrument.
 
 SAFETY: --setpoints are degrees in the instrument's active unit (Celsius by
 default). The script never touches your current/voltage limits -- set those on
@@ -49,23 +51,53 @@ def list_resources(backend="@py"):
         return []
 
 
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ros2_ws", ".env")
+
+
+def from_env_file(key, path=None):
+    """Read one KEY=value out of ros2_ws/.env -- the very file docker compose
+    reads, so the backend and this bench script agree on which box is which.
+    Hand-rolled rather than python-dotenv: this script must run with nothing
+    installed but pyvisa.
+    """
+    path = path or ENV_FILE       # resolved at CALL time, not at import
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                name, _, value = line.partition("=")
+                if name.strip() == key:
+                    return value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
 def pick_resource(explicit, backend="@py"):
-    """--resource > $TCLAB_RESOURCE > the first USB instrument VISA can see.
+    """--resource > $TCLAB_RESOURCE > ros2_ws/.env > first USB instrument.
 
     Network (TCPIP) instruments are NOT discoverable -- pyvisa-py cannot scan
     the LAN -- so an Ethernet TC LAB must always be named explicitly.
     """
-    chosen = explicit or os.environ.get("TCLAB_RESOURCE")
-    if chosen:
-        return chosen
+    for value, source in ((explicit, "--resource"),
+                          (os.environ.get("TCLAB_RESOURCE"), "$TCLAB_RESOURCE"),
+                          (from_env_file("TCLAB_RESOURCE"), ENV_FILE)):
+        if value:
+            print(f"Resource {value}  (from {source})")
+            return value
     found = list_resources(backend)
     usb = [r for r in found if r.upper().startswith("USB")]
     if not usb:
         print("No USB instrument found. Seen by VISA:", found or "(nothing)")
-        print("Pass --resource TCPIP::<ip>::INSTR for an Ethernet TC LAB.")
+        print("Pass --resource TCPIP::<ip>::INSTR for an Ethernet TC LAB, or set "
+              f"TCLAB_RESOURCE in {ENV_FILE}")
         return None
     if len(usb) > 1:
         print(f"  ! {len(usb)} USB instruments present; using the first: {usb}")
+        print(f"    Name the right one in {ENV_FILE} (TCLAB_RESOURCE=...).")
+    print(f"Resource {usb[0]}  (auto-discovered on USB)")
     return usb[0]
 
 

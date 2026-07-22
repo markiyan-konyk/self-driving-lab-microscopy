@@ -50,6 +50,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
         pyvisa \
         pyvisa-py \
         pyusb \
+        pyserial \
         libusb-package \
         sangaboard \
         fastapi \
@@ -58,6 +59,10 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # fastapi/uvicorn/httpx power the scopio_gateway package (the HTTP/WebSocket
 # API that external clients use instead of joining the DDS graph). They are
 # pure-python and light -- fine on the Pi.
+# pyserial is listed EXPLICITLY even though sangaboard pulls it in: pyvisa-py
+# cannot enumerate or open a single ASRL (serial / USB virtual-COM) instrument
+# without it, and inheriting that from another package's dependency tree is how
+# you end up debugging an instrument that "VISA can't see" for an afternoon.
 
 # Build the workspace (interfaces + nodes) into the image.
 WORKDIR /ros2_ws

@@ -41,12 +41,14 @@ auth**. Client programs need no ROS, no Docker, no DDS — just a URL and a key.
 | `galvo_tests/` | standalone hardware bench scripts for calibrating the galvo (independent of everything above) |
 | `temperature.py`, `galvo.py` | the instrument driver classes (TC LAB controller, Rigol AWG). The backend runs **copies** of these in `ros2_ws/…/scopio_microscope/drivers/` and exposes every method of them over the API |
 | `temperature_test.py` | prove the temperature controller works with nothing but pyvisa — run this before blaming the stack |
+| `instrument_scan.py` | when VISA "can't see" an instrument: shows every USB device with its interface **class** (USBTMC vs virtual-COM decides whether pyvisa can *ever* list it), the bound kernel driver, the serial ports, and `--probe`s each for `*IDN?` |
 
 ## Quick start
 
 **On the Pi** (once):
 ```bash
 cd ros2_ws
+cp .env.example .env                            # which VISA instrument is which
 python3 scripts/generate_api_key.py laptop      # note the printed key
 docker compose up -d --build                    # graph + camera + gateway
 ```
