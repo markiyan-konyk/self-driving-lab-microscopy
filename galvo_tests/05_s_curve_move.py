@@ -9,7 +9,7 @@ import numpy as np
 import pyvisa
 from _common import resolve_resource
 
-STEPS = 150   
+STEPS = 80   
 
 
 def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
