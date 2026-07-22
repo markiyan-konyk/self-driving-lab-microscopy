@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Step 5 - Smooth S-Curve using PyVISA with reliable DC offset updates.
-Debug version: prints each step's voltage.
+Step 5 - Smooth S-Curve using PyVISA with real-time voltage stepping.
 """
 
 import sys
@@ -10,12 +9,14 @@ import numpy as np
 import pyvisa
 from _common import resolve_resource
 
+STEPS = 150   
+
 
 def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
-                        steps=30, s_factor=4.0, volt_per_deg=1.0):
+                        steps=STEPS, s_factor=4.0, volt_per_deg=1.0):
     """
-    Move using S-curve by updating :VOLT:OFFS in DC mode.
-    One-time DC mode setup, then only offset changes.
+    Move using S-curve by stepping DC voltage in real-time.
+    No large data transfers -> no USB timeout.
     """
     if duration <= 0:
         awg.write(f':SOUR1:APPL:DC {x1 * volt_per_deg}')
@@ -27,12 +28,12 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
     # Turn off outputs to reset state
     awg.write(':OUTP1 OFF')
     awg.write(':OUTP2 OFF')
-    time.sleep(0.2)
+    time.sleep(0.1)
 
     # Set both channels to DC mode (do this only once!)
     awg.write(':SOUR1:FUNC:SHAP DC')
     awg.write(':SOUR2:FUNC:SHAP DC')
-    time.sleep(0.2)
+    time.sleep(0.1)
 
     # Generate S-curve weights (0 to 1)
     t = np.linspace(-s_factor, s_factor, steps)
@@ -48,33 +49,29 @@ def move_s_curve_pyvisa(awg, x1, y1, x2, y2, duration,
     y_volts = vy1 + (vy2 - vy1) * weights
 
     print(f"Moving ({x1:.1f},{y1:.1f}) -> ({x2:.1f},{y2:.1f}) over {duration}s "
-          f"with {steps} steps")
-    print(f"Voltage range: X = {min(x_volts):.3f}V ~ {max(x_volts):.3f}V, "
-          f"Y = {min(y_volts):.3f}V ~ {max(y_volts):.3f}V")
+          f"with {steps} steps (interval: {duration/steps*1000:.1f}ms)")
 
-    # Set initial position using :VOLT:OFFS (mode already DC)
+    # Set initial position
     awg.write(f':SOUR1:VOLT:OFFS {vx1:.3f}')
     awg.write(f':SOUR2:VOLT:OFFS {vy1:.3f}')
     awg.write(':OUTP1 ON')
     awg.write(':OUTP2 ON')
-    time.sleep(0.3)  # Give time to settle
+    time.sleep(0.1)
 
     # Step through the curve
     interval = duration / steps
     for i, (vx, vy) in enumerate(zip(x_volts, y_volts)):
-        # Send both commands
         awg.write(f':SOUR1:VOLT:OFFS {vx:.3f}')
         awg.write(f':SOUR2:VOLT:OFFS {vy:.3f}')
-        # Wait for the step interval
         time.sleep(interval)
 
-        # Print progress every 5 steps
-        if (i + 1) % 5 == 0 or i == 0:
-            print(f"  Step {i+1}/{steps}: X={vx:.3f}V, Y={vy:.3f}V")
+        # Print progress every 20 steps
+        if (i + 1) % 20 == 0 or i == 0:
+            print(f"  Progress: {int((i+1)/steps*100)}%")
 
-    # Hold final position for 3 seconds
-    print("Holding final position for 3 seconds...")
-    time.sleep(3.0)
+    # Hold final position for 2 seconds
+    print("Holding final position for 2 seconds...")
+    time.sleep(2.0)
 
     print("Motion completed. Laser held at final position.")
 
@@ -99,27 +96,27 @@ def main():
         return 1
 
     try:
-        # Move from (0,0) to (5,5) in 5 seconds
+        # First move: (0,0) -> (5,5)
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
-            x2=3.0, y2=3.0,
+            x2=5.0, y2=5.0,
             duration=5.0,
-            steps=30,           # 30 steps -> ~0.167s per step
+            steps=STEPS,        # Use global STEPS
             s_factor=4.0,
             volt_per_deg=1.0
         )
 
         time.sleep(1.0)
 
-        # Move back to origin
+        # Second move: (5,5) -> (0,0) (back to origin)
         print("\nMoving back to origin...")
         move_s_curve_pyvisa(
             awg=awg,
-            x1=3.0, y1=3.0,
+            x1=5.0, y1=5.0,
             x2=0.0, y2=0.0,
             duration=5.0,
-            steps=30,
+            steps=STEPS,        # Use global STEPS
             s_factor=4.0,
             volt_per_deg=1.0
         )
