@@ -144,7 +144,7 @@ def main():
         move_s_curve_pyvisa(
             awg=awg,
             x1=0.0, y1=0.0,
-            x2=5.0, y2=5.0,
+            x2=5.0, y2=0.0,
             duration=DURATION,   # Use global variable
             steps=STEPS,         # Use global variable
             s_factor=4.0,
@@ -152,14 +152,9 @@ def main():
         )
 
         time.sleep(1.0)
-
-        # ============================================================
-        # Second move: (5,5) -> (0,0) back to origin
-        # ============================================================
-        print("\nMoving back to origin...")
         move_s_curve_pyvisa(
             awg=awg,
-            x1=5.0, y1=5.0,
+            x1=5.0, y1=0.0,
             x2=0.0, y2=0.0,
             duration=DURATION,   # Use global variable
             steps=STEPS,         # Use global variable
@@ -167,6 +162,31 @@ def main():
             volt_per_deg=1.0
         )
 
+        time.sleep(1.0)
+        # ============================================================
+        # Second move: (5,5) -> (0,0) back to origin
+        # ============================================================
+        print("\nMoving back to origin...")
+        move_s_curve_pyvisa(
+            awg=awg,
+            x1=0.0, y1=0.0,
+            x2=0.0, y2=5.0,
+            duration=DURATION,   # Use global variable
+            steps=STEPS,         # Use global variable
+            s_factor=4.0,
+            volt_per_deg=1.0
+        )
+        move_s_curve_pyvisa(
+            awg=awg,
+            x1=0.0, y1=5.0,
+            x2=0.0, y2=0.0,
+            duration=DURATION,   # Use global variable
+            steps=STEPS,         # Use global variable
+            s_factor=4.0,
+            volt_per_deg=1.0
+        )
+
+        time.sleep(1.0)
     except KeyboardInterrupt:
         print("\nInterrupted.")
     except Exception as e:
