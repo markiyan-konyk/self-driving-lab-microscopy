@@ -17,7 +17,7 @@ from _common import resolve_resource
 # - 80  : Good balance (recommended)
 # - 100 : Smooth, may glitch on slow USB
 # ============================================================
-STEPS = 80   # ← Recommended for stable operation
+STEPS = 50   # ← Recommended for stable operation
 # ============================================================
 
 
