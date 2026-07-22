@@ -13,7 +13,7 @@ from _common import resolve_resource
 # ★★★ USER CONFIGURABLE PARAMETERS ★★★
 # Change these values to adjust motion.
 # ============================================================
-STEPS = 50          # Number of steps (higher = smoother, but more USB load)
+STEPS = 30          # Number of steps (higher = smoother, but more USB load)
 DURATION = 4.0      # Total movement time in seconds
 # ============================================================
 
