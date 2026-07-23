@@ -1,5 +1,4 @@
 import pyvisa
-import pygame as pg
 import time
 
 rm  = pyvisa.ResourceManager('@py')
