@@ -63,6 +63,24 @@ def rd(path, default=""):
         return default
 
 
+def node_access(node):
+    """Can THIS user open the device node? libusb must, to read the descriptors
+    pyvisa needs -- and a root-only node is invisible, not an error."""
+    try:
+        st = os.stat(node)
+    except OSError as exc:
+        return f"(cannot stat: {exc.strerror})"
+    try:
+        import grp
+        import pwd
+        owner = f"{pwd.getpwuid(st.st_uid).pw_name}:{grp.getgrgid(st.st_gid).gr_name}"
+    except (ImportError, KeyError, AttributeError):   # non-POSIX, or unnamed ids
+        owner = f"{st.st_uid}:{st.st_gid}"
+    mode = oct(st.st_mode & 0o777)[2:]
+    ok = os.access(node, os.R_OK | os.W_OK)
+    return f"{mode} {owner}  {'read/write OK' if ok else 'NOT WRITABLE BY YOU <<<<'}"
+
+
 def classify(cls, sub):
     for key in ((cls, sub), (cls, None)):
         if key in USB_CLASSES:
@@ -112,6 +130,7 @@ def usb_from_sysfs():
         vid, pid = rd(f"{path}/idVendor"), rd(f"{path}/idProduct")
         if not vid:
             continue
+        busnum, devnum = rd(f"{path}/busnum"), rd(f"{path}/devnum")
         interfaces = []
         for ipath in sorted(glob.glob(f"{path}:*")):
             try:
@@ -131,6 +150,10 @@ def usb_from_sysfs():
             "manufacturer": rd(f"{path}/manufacturer"),
             "serial": rd(f"{path}/serial"),
             "interfaces": interfaces,
+            # The node libusb must open. Its permissions are the usual reason a
+            # perfectly good USBTMC instrument is invisible to a non-root user.
+            "node": (f"/dev/bus/usb/{int(busnum):03d}/{int(devnum):03d}"
+                     if busnum.isdigit() and devnum.isdigit() else ""),
         })
     return devices
 
@@ -211,6 +234,8 @@ def section_usb():
         if d["serial"]:
             print(f"      serial#   {d['serial']}")
         print(f"      sysfs/bus {d['bus_id']}")
+        if d.get("node"):
+            print(f"      node      {d['node']}  {node_access(d['node'])}")
         for (label, note, driver) in kinds:
             drv = f"driver={driver or 'none'}"
             print(f"      iface     {label:<16} {drv:<18} {note}")
@@ -312,6 +337,155 @@ def probe_serial(port, baud, timeout_s=1.0):
         return reply
 
 
+def section_deep(devices):
+    """Replay pyvisa-py's USB enumeration STEP BY STEP for each USBTMC device.
+
+    `list_resources()` is all-or-nothing: a device that fails any step just
+    isn't there, with no error. pyvisa-py's own path is
+
+        find_tmc_devices()            <- filters on the interface descriptor
+          -> usb.core.find(find_all)
+          -> find_interfaces(0xFE/3)  <- needs the CONFIG descriptor
+        dev.serial_number             <- needs the device to be OPENED
+
+    so we run each step separately and report exactly which one loses your
+    instrument, and with which errno. Nothing here writes to the instrument;
+    if a kernel driver has to be detached to test claiming, it is put back.
+    """
+    print()
+    print("=" * 78)
+    print("6. DEEP: pyvisa-py's own enumeration, one step at a time")
+    print("=" * 78)
+    try:
+        import usb.core
+        import usb.util
+    except ImportError:
+        print("  pyusb not installed -- nothing to test.")
+        return
+
+    # What pyvisa-py's list_resources() actually iterates over.
+    try:
+        from pyvisa_py.protocols import usbtmc as pvp_usbtmc
+        from pyvisa_py.protocols import usbutil as pvp_usbutil
+        tmc_devs = list(pvp_usbtmc.find_tmc_devices())
+        print(f"  pyvisa_py.find_tmc_devices() -> {len(tmc_devs)} device(s):")
+        for d in tmc_devs:
+            print(f"      {d.idVendor:04x}:{d.idProduct:04x}")
+        print("  Any USBTMC device MISSING from that list is invisible to")
+        print("  list_resources() no matter what else is right.\n")
+    except Exception as exc:
+        pvp_usbutil = None
+        print(f"  (could not use pyvisa_py internals: {exc})\n")
+
+    targets = [d for d in devices
+               if any(i["class"] == 0xFE and i["subclass"] == 0x03 for i in d["interfaces"])]
+    if not targets:
+        print("  No USBTMC device in the sysfs scan to test.")
+        return
+
+    for d in targets:
+        title = " / ".join(x for x in (d["manufacturer"], d["product"]) if x)
+        print(f"  --- {d['vid']}:{d['pid']}  {title} ---")
+        vid, pid = int(d["vid"], 16), int(d["pid"], 16)
+
+        dev = None
+        try:
+            dev = usb.core.find(idVendor=vid, idProduct=pid)
+            step("usb.core.find()", "found" if dev is not None else "NOT FOUND", dev is not None)
+        except Exception as exc:
+            step("usb.core.find()", f"{type(exc).__name__}: {exc}", False)
+            continue
+        if dev is None:
+            continue
+
+        # 1. config descriptor -> the USBTMC interface filter
+        try:
+            if pvp_usbutil is not None:
+                intfs = pvp_usbutil.find_interfaces(dev, bInterfaceClass=0xFE,
+                                                    bInterfaceSubClass=3)
+            else:
+                intfs = [i for cfg in dev for i in cfg
+                         if i.bInterfaceClass == 0xFE and i.bInterfaceSubClass == 3]
+            step("USBTMC interface filter", f"{len(intfs)} match(es)", bool(intfs),
+                 "" if intfs else "the config descriptor could not be read -> "
+                                  "find_tmc_devices() drops this device SILENTLY")
+        except Exception as exc:
+            step("USBTMC interface filter", f"{type(exc).__name__}: {exc}", False)
+
+        # 2. serial number -> the first step that must OPEN the device
+        try:
+            serial = dev.serial_number
+            step("read serial (opens device)", repr(serial), True)
+        except Exception as exc:
+            step("read serial (opens device)", f"{type(exc).__name__}: {exc}", False,
+                 explain_usb_error(exc))
+
+        # 3. kernel driver -- pyvisa-py detaches it when opening a session
+        detached = False
+        try:
+            active = dev.is_kernel_driver_active(0)
+            step("kernel driver on iface 0", "ACTIVE (usbtmc)" if active else "none", True,
+                 "pyvisa-py detaches this itself when it opens a session"
+                 if active else "")
+            if active:
+                try:
+                    dev.detach_kernel_driver(0)
+                    detached = True
+                    step("detach_kernel_driver(0)", "ok", True)
+                except Exception as exc:
+                    step("detach_kernel_driver(0)", f"{type(exc).__name__}: {exc}", False,
+                         explain_usb_error(exc))
+        except Exception as exc:
+            step("kernel driver on iface 0", f"{type(exc).__name__}: {exc}", False,
+                 explain_usb_error(exc))
+
+        # 4. claim -- what a real session needs
+        try:
+            usb.util.claim_interface(dev, 0)
+            step("claim_interface(0)", "ok", True)
+            usb.util.release_interface(dev, 0)
+        except Exception as exc:
+            step("claim_interface(0)", f"{type(exc).__name__}: {exc}", False,
+                 explain_usb_error(exc))
+
+        # leave the device exactly as found
+        if detached:
+            try:
+                dev.attach_kernel_driver(0)
+                step("kernel driver restored", "ok", True)
+            except Exception as exc:
+                step("kernel driver restored", f"{type(exc).__name__}: {exc}", False,
+                     "re-plug the instrument to restore /dev/usbtmc*")
+        try:
+            usb.util.dispose_resources(dev)
+        except Exception:
+            pass                      # never let cleanup hide the diagnosis
+        print()
+
+
+def step(label, result, ok, note=""):
+    print(f"    {'ok  ' if ok else 'FAIL'}  {label:<28} {result}")
+    if note:
+        print(f"          -> {note}")
+
+
+def explain_usb_error(exc):
+    """Turn a libusb errno into the actual fix."""
+    errno = getattr(exc, "errno", None)
+    text = str(exc).lower()
+    if errno == 13 or "access" in text or "permission" in text:
+        return ("PERMISSIONS. libusb cannot open the device node as this user. "
+                "Install the udev rule (ros2_ws/udev/99-scopio-instruments.rules) "
+                "or re-run with sudo to confirm.")
+    if errno == 16 or "busy" in text:
+        return ("BUSY. Another process holds the interface -- the kernel usbtmc "
+                "driver, or a running container/node that already opened it. "
+                "Stop the SCOPIO stack and retry.")
+    if errno == 19 or "no such device" in text:
+        return "The device went away (re-enumerated?). Re-plug and retry."
+    return ""
+
+
 def section_probe(resources, ports, skip):
     print()
     print("=" * 78)
@@ -406,6 +580,10 @@ def main():
     p = argparse.ArgumentParser(description="Find out why VISA can't see an instrument.")
     p.add_argument("--probe", action="store_true",
                    help="ask each candidate '*IDN?' (opens the port; read-only query)")
+    p.add_argument("--deep", action="store_true",
+                   help="replay pyvisa-py's USB enumeration step by step to find "
+                        "WHICH step drops an instrument (use when a USBTMC device "
+                        "is enumerated by the kernel but missing from list_resources)")
     p.add_argument("--skip", action="append", default=[],
                    help="port/resource substring not to touch (repeatable), "
                         "e.g. the Sangaboard's /dev/ttyACM0")
@@ -420,6 +598,8 @@ def main():
     tmc, serialish = section_usb()
     ports = section_serial()
     resources = section_visa()
+    if args.deep:
+        section_deep(usb_from_sysfs() or usb_from_pyusb())
     hits = section_probe(resources, ports, args.skip) if args.probe else []
     verdict(libs, tmc, serialish, ports, resources, hits, args.probe)
     return 0

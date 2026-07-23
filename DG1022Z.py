@@ -23,7 +23,7 @@ import threading
 import pyvisa
 
 
-class WaveGen:
+class DG1022Z:
     # ----- Handy constants (waveform shapes) ------------------------------------
     SINE = "SIN"; SQUARE = "SQU"; RAMP = "RAMP"; PULSE = "PULS"
     NOISE = "NOIS"; DC = "DC"; USER = "USER"; HARMONIC = "HARM"
@@ -47,7 +47,7 @@ class WaveGen:
     # ============================================================================
     # Connection
     # ============================================================================
-    def __init__(self, resource="TCPIP::192.168.1.10::INSTR", timeout_ms=5000, backoff_s=0.5):
+    def __init__(self, resource="", timeout_ms=5000, backoff_s=0.5):
         # Ethernet (TCPIP/VXI-11) is strongly preferred inside Docker: USB (USBTMC)
         # needs device passthrough and re-enumerates on any clear/reset, breaking the
         # session. A USB resource string looks like: USB0::0x1AB1::0x0642::SERIAL::INSTR
@@ -61,10 +61,14 @@ class WaveGen:
         self._open()
 
     def _open(self):
-        self.rm = pyvisa.ResourceManager("@py")     # pure-Python backend
-        self.inst = self.rm.open_resource(self.resource)
-        self.inst.read_termination = "\n"
-        self.inst.write_termination = "\n"
+        self.rm = pyvisa.ResourceManager()
+        if not self.resource:
+            resources = self.rm.list_resources('USB?*INSTR')
+            if not resources:
+                raise RuntimeError("No USB VISA instruments found. Check physical connection.")
+            self.inst= self.rm.open_resource(resources[0])
+        else:
+            self.inst = self.rm.open_resource(self.resource)
         self.inst.timeout = self.timeout_ms
 
     def _recover(self):

@@ -93,6 +93,7 @@ def main():
     services = ifs.get("services", {})
     actions = ifs.get("actions", {})
     for s in ("/scopio/stage/jog", "/scopio/awg/write", "/scopio/awg/query",
+              "/scopio/awg/call", "/scopio/temperature/call",
               "/scopio/camera/set_controls", "/scopio/calibration/set",
               "/scopio/tracker/set_active"):
         check(f"interfaces lists {s}", s in services)
@@ -110,6 +111,37 @@ def main():
     else:
         check("AWG degraded gracefully", resp.get("success") is False,
               str(resp.get("error", ""))[:60])
+
+    # 4b. the instrument-call surface. list_methods is answered by the NODE
+    #     (introspecting the driver class), so it proves the whole path even
+    #     with no controller attached -- and tells you the node is the version
+    #     you think it is.
+    r = requests.post(f"{base}/api/v1/service/temperature/call", headers=H,
+                      json={"method": "list_methods"}, timeout=20)
+    resp = r.json() if r.status_code == 200 else {}
+    check("temperature/call reachable", r.status_code == 200,
+          f"got {r.status_code}: {r.text[:120]}")
+    methods = json.loads(resp.get("result") or "[]") if resp.get("success") else []
+    check("temperature exposes the driver class", len(methods) > 50,
+          f"{len(methods)} methods")
+    check("temperature exposes set_setpoint",
+          any(m.get("name") == "set_setpoint" for m in methods))
+
+    r = requests.post(f"{base}/api/v1/service/temperature/call", headers=H,
+                      json={"method": "connected"}, timeout=20)
+    resp = r.json() if r.status_code == 200 else {}
+    connected = resp.get("result") == "true"
+    if args.hardware:
+        check("TC LAB connected", connected,
+              "set TCLAB_RESOURCE in ros2_ws/.env, then docker compose up -d")
+        r = requests.post(f"{base}/api/v1/service/temperature/call", headers=H,
+                          json={"method": "temperature"}, timeout=20)
+        resp = r.json() if r.status_code == 200 else {}
+        check("TC LAB reads a temperature", resp.get("success") is True,
+              str(resp.get("result") or resp.get("error"))[:60])
+    else:
+        check("temperature degraded gracefully", not connected,
+              "reports connected=false without hardware, as it should")
 
     # unknown service -> 404
     r = requests.post(f"{base}/api/v1/service/no/such/service", headers=H,
@@ -221,6 +253,12 @@ def main():
     # status telemetry sanity
     tel = status.get("telemetry", {})
     check("status caches stage/position", tel.get("stage/position") is not None)
+    check("status caches temperature/status", tel.get("temperature/status") is not None,
+          "the temperature node isn't publishing -- is it in the launch file / image?")
+    if args.hardware:
+        t = (tel.get("temperature/status") or {}).get("msg", {})
+        check("temperature telemetry shows connected", t.get("connected") is True,
+              f"last_error: {str(t.get('last_error'))[:60]}")
 
     _summary()
 
