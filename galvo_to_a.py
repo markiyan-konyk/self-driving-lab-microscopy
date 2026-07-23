@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Galvo Controller with Stepwise Motion (exactly like mytest.py)
-
-Click to set a target; the laser moves step by step (0.01V per frame)
-with per-axis updates and sleep like mytest.py.
+Galvo Controller with Stepwise Motion
+EXACTLY like mytest.py, but moves toward a clicked target.
 """
 
 import sys
@@ -14,10 +12,11 @@ import pyvisa
 # Constants
 WINDOW_SIZE = 400
 CENTER = WINDOW_SIZE // 2
-VOLT_RANGE = 2.0          # ±2V
+VOLT_RANGE = 2.0
 PIXELS_PER_VOLT = CENTER / VOLT_RANGE
+STEP_SIZE = 0.01
 
-# Initialize Pygame
+# Pygame init
 pygame.init()
 screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
 pygame.display.set_caption("Stepwise Galvo (mytest.py style)")
@@ -47,20 +46,17 @@ current_Y = 0.0
 target_X = 0.0
 target_Y = 0.0
 
-# Motion flag
+# Motion flag (True when target is set)
 moving = False
 
 # ============================================================
-# Helper: Convert pixel to voltage
+# Helper functions
 # ============================================================
 def pixel_to_voltage(px, py):
     vx = (px - CENTER) / PIXELS_PER_VOLT
     vy = (py - CENTER) / PIXELS_PER_VOLT
     return vx, vy
 
-# ============================================================
-# Helper: Convert voltage to pixel
-# ============================================================
 def voltage_to_pixel(vx, vy):
     px = int(CENTER + vx * PIXELS_PER_VOLT)
     py = int(CENTER + vy * PIXELS_PER_VOLT)
@@ -68,67 +64,18 @@ def voltage_to_pixel(vx, vy):
     py = max(0, min(WINDOW_SIZE-1, py))
     return px, py
 
-# ============================================================
-# Stepwise motion update (EXACTLY like mytest.py)
-# Each axis is handled independently with its own write and sleep.
-# ============================================================
-def update_stepwise_motion():
-    global current_X, current_Y, moving
-    step = 0.01
-    moved = False
-
-    # --- X axis ---
-    if abs(target_X - current_X) > step / 2:
-        if target_X > current_X:
-            current_X += step
-        else:
-            current_X -= step
-        dev.write(f":SOURce1:VOLTage:OFFSet {current_X:.3f}")
-        time.sleep(1/60)          # sleep immediately after X update
-        moved = True
-    else:
-        if current_X != target_X:
-            current_X = target_X
-            dev.write(f":SOURce1:VOLTage:OFFSet {current_X:.3f}")
-            time.sleep(1/60)
-            moved = True
-
-    # --- Y axis ---
-    if abs(target_Y - current_Y) > step / 2:
-        if target_Y > current_Y:
-            current_Y += step
-        else:
-            current_Y -= step
-        dev.write(f":SOURce2:VOLTage:OFFSet {current_Y:.3f}")
-        time.sleep(1/60)          # sleep immediately after Y update
-        moved = True
-    else:
-        if current_Y != target_Y:
-            current_Y = target_Y
-            dev.write(f":SOURce2:VOLTage:OFFSet {current_Y:.3f}")
-            time.sleep(1/60)
-            moved = True
-
-    # If both axes are exactly at target, stop moving
-    if abs(target_X - current_X) < 1e-6 and abs(target_Y - current_Y) < 1e-6:
-        moving = False
-
-    return moved
-
-# ============================================================
-# Set target and start moving
-# ============================================================
 def set_target(vx, vy):
     global target_X, target_Y, moving
-    target_X = vx
-    target_Y = vy
+    target_X = max(-VOLT_RANGE, min(VOLT_RANGE, vx))
+    target_Y = max(-VOLT_RANGE, min(VOLT_RANGE, vy))
     moving = True
-    print(f"Target set to X={vx:.3f}V, Y={vy:.3f}V")
+    print(f"Target set to X={target_X:.3f}V, Y={target_Y:.3f}V")
 
 # ============================================================
-# Main loop
+# Main loop (structure is IDENTICAL to mytest.py)
 # ============================================================
 while running:
+    # --- Event handling ---
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
@@ -138,22 +85,59 @@ while running:
             elif event.key == pygame.K_r:
                 set_target(0.0, 0.0)
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1:
+            if event.button == 1:  # Left click
                 mx, my = pygame.mouse.get_pos()
                 vx, vy = pixel_to_voltage(mx, my)
-                vx = max(-VOLT_RANGE, min(VOLT_RANGE, vx))
-                vy = max(-VOLT_RANGE, min(VOLT_RANGE, vy))
                 print(f"Click at ({mx},{my}) -> target ({vx:.3f}V, {vy:.3f}V)")
                 set_target(vx, vy)
 
-    # Update motion if moving
+    # --- Motion update (EXACTLY like mytest.py's WASD logic) ---
+    # Each axis is checked independently in the same loop iteration.
+    # Just like mytest.py checks if keys[K_w] and keys[K_a] in the same frame.
     if moving:
-        update_stepwise_motion()
+        moved = False
 
-    # Drawing
+        # X axis (like mytest.py's A/D keys)
+        if target_X > current_X and current_X < VOLT_RANGE:
+            current_X += STEP_SIZE
+            if current_X > target_X:
+                current_X = target_X
+            dev.write(f":SOURce1:VOLTage:OFFSet {current_X:.3f}")
+            time.sleep(1/60)      # ← Exactly like mytest.py!
+            moved = True
+        elif target_X < current_X and current_X > -VOLT_RANGE:
+            current_X -= STEP_SIZE
+            if current_X < target_X:
+                current_X = target_X
+            dev.write(f":SOURce1:VOLTage:OFFSet {current_X:.3f}")
+            time.sleep(1/60)      # ← Exactly like mytest.py!
+            moved = True
+
+        # Y axis (like mytest.py's W/S keys)
+        if target_Y > current_Y and current_Y < VOLT_RANGE:
+            current_Y += STEP_SIZE
+            if current_Y > target_Y:
+                current_Y = target_Y
+            dev.write(f":SOURce2:VOLTage:OFFSet {current_Y:.3f}")
+            time.sleep(1/60)      # ← Exactly like mytest.py!
+            moved = True
+        elif target_Y < current_Y and current_Y > -VOLT_RANGE:
+            current_Y -= STEP_SIZE
+            if current_Y < target_Y:
+                current_Y = target_Y
+            dev.write(f":SOURce2:VOLTage:OFFSet {current_Y:.3f}")
+            time.sleep(1/60)      # ← Exactly like mytest.py!
+            moved = True
+
+        # Stop moving if both axes are exactly at target
+        if abs(target_X - current_X) < 1e-6 and abs(target_Y - current_Y) < 1e-6:
+            moving = False
+            print("Reached target!")
+
+    # --- Drawing (identical UI) ---
     screen.fill((0, 0, 0))
 
-    # Grid
+    # Grid lines (every 0.5V)
     grid_color = (40, 40, 40)
     for v in range(-2, 3, 1):
         if v == 0:
@@ -162,20 +146,21 @@ while running:
         if 0 <= px < WINDOW_SIZE:
             pygame.draw.line(screen, grid_color, (px, 0), (px, WINDOW_SIZE), 1)
             pygame.draw.line(screen, grid_color, (0, px), (WINDOW_SIZE, px), 1)
+    # Axes
     pygame.draw.line(screen, (80, 80, 80), (0, CENTER), (WINDOW_SIZE, CENTER), 1)
     pygame.draw.line(screen, (80, 80, 80), (CENTER, 0), (CENTER, WINDOW_SIZE), 1)
     pygame.draw.circle(screen, (100, 100, 100), (CENTER, CENTER), 3, 1)
 
-    # Target
+    # Target point (green hollow)
     if moving or (target_X != 0 or target_Y != 0):
         tx, ty = voltage_to_pixel(target_X, target_Y)
         pygame.draw.circle(screen, (0, 255, 0), (tx, ty), 6, 2)
 
-    # Current position
+    # Current position (red dot)
     cx, cy = voltage_to_pixel(current_X, current_Y)
     pygame.draw.circle(screen, (255, 0, 0), (cx, cy), 5)
 
-    # Info texts
+    # UI Text
     coord_text = font.render(f"X: {current_X:+.3f}V  Y: {current_Y:+.3f}V", True, (200, 200, 200))
     screen.blit(coord_text, (10, WINDOW_SIZE - 30))
     info_text = font.render("Click: target  |  R: Origin  |  ESC: Quit", True, (150, 150, 150))
@@ -186,7 +171,7 @@ while running:
     pygame.display.flip()
     clock.tick(60)
 
-# Cleanup
+# --- Cleanup ---
 dev.write(":OUTP1 OFF;:OUTP2 OFF")
 dev.close()
 pygame.quit()
