@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 Galvo Controller - Sequential Motion (X first, then Y)
-
-Click to set target → X moves first, then Y moves.
-Identical to mytest.py: step=0.01V, sleep=1/60 per step.
+Click anytime to set new target, even during motion.
 """
 
 import sys
@@ -50,7 +48,7 @@ targetX = 0.0
 targetY = 0.0
 
 # Motion state
-# 0 = idle, 1 = moving X, 2 = moving Y, 3 = done
+# 0 = idle, 1 = moving X, 2 = moving Y
 state = 0
 
 def pixel_to_voltage(px, py):
@@ -70,7 +68,7 @@ def set_target(vx, vy):
     targetX = max(-VOLT_RANGE, min(VOLT_RANGE, vx))
     targetY = max(-VOLT_RANGE, min(VOLT_RANGE, vy))
     state = 1   # Start with X axis
-    print(f"Target set: X={targetX:.3f}V, Y={targetY:.3f}V")
+    print(f"New target: X={targetX:.3f}V, Y={targetY:.3f}V")
 
 # ============================================================
 # Sequential motion update: X first, then Y
@@ -78,14 +76,14 @@ def set_target(vx, vy):
 def update_sequential():
     global curX, curY, state
 
-    # --- X axis: move if not at target ---
+    # --- X axis ---
     if state == 1:
         if abs(curX - targetX) < STEP / 2:
             curX = targetX
             dev.write(f":SOURce1:VOLTage:OFFSet {curX:.3f}")
             time.sleep(SLEEP)
             print(f"X reached: {curX:.3f}V → Now moving Y")
-            state = 2   # Move to Y phase
+            state = 2
         elif targetX > curX:
             curX += STEP
             if curX > targetX: curX = targetX
@@ -97,14 +95,14 @@ def update_sequential():
             dev.write(f":SOURce1:VOLTage:OFFSet {curX:.3f}")
             time.sleep(SLEEP)
 
-    # --- Y axis: move if X is done and Y not at target ---
+    # --- Y axis ---
     elif state == 2:
         if abs(curY - targetY) < STEP / 2:
             curY = targetY
             dev.write(f":SOURce2:VOLTage:OFFSet {curY:.3f}")
             time.sleep(SLEEP)
             print(f"Y reached: {curY:.3f}V → Motion complete!")
-            state = 3   # Done
+            state = 0   # ← IDLE, ready for new target
         elif targetY > curY:
             curY += STEP
             if curY > targetY: curY = targetY
@@ -129,13 +127,13 @@ while running:
             elif event.key == pygame.K_r:
                 set_target(0.0, 0.0)
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1 and state == 0:
+            if event.button == 1:  # Left click - always allowed
                 mx, my = pygame.mouse.get_pos()
                 vx, vy = pixel_to_voltage(mx, my)
                 print(f"Click → target: ({vx:.3f}V, {vy:.3f}V)")
                 set_target(vx, vy)
 
-    # Update motion only if not done
+    # Update motion if state is 1 or 2
     if state == 1 or state == 2:
         update_sequential()
 
@@ -163,7 +161,7 @@ while running:
     pygame.draw.circle(screen, (255, 0, 0), (cx, cy), 5)
 
     # Info text
-    state_text = ["IDLE", "MOVING X", "MOVING Y", "DONE"][state]
+    state_text = ["IDLE", "MOVING X", "MOVING Y"][state]
     screen.blit(font.render(f"X: {curX:+.3f}V  Y: {curY:+.3f}V", True, (200,200,200)), (10, WINDOW_SIZE-30))
     screen.blit(font.render(f"State: {state_text}", True, (200,200,200)), (10, WINDOW_SIZE-60))
     screen.blit(font.render(f"Target: ({targetX:+.2f}, {targetY:+.2f})", True, (150,200,150)), (10, 10))
