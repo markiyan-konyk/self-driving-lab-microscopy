@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Galvo Controller - Sequential Motion (X first, then Y)
-Click anytime to set new target, even during motion.
+Galvo Controller - Sequential Motion with Debug Prints
+Click anytime to set new target.
 """
 
 import sys
@@ -47,8 +47,7 @@ curY = 0.0
 targetX = 0.0
 targetY = 0.0
 
-# Motion state
-# 0 = idle, 1 = moving X, 2 = moving Y
+# Motion state: 0=idle, 1=moving X, 2=moving Y
 state = 0
 
 def pixel_to_voltage(px, py):
@@ -67,22 +66,18 @@ def set_target(vx, vy):
     global targetX, targetY, state
     targetX = max(-VOLT_RANGE, min(VOLT_RANGE, vx))
     targetY = max(-VOLT_RANGE, min(VOLT_RANGE, vy))
-    state = 1   # Start with X axis
-    print(f"New target: X={targetX:.3f}V, Y={targetY:.3f}V")
+    state = 1
+    print(f"🔵 SET TARGET: ({targetX:.3f}V, {targetY:.3f}V) → state=1")
 
-# ============================================================
-# Sequential motion update: X first, then Y
-# ============================================================
 def update_sequential():
     global curX, curY, state
-
     # --- X axis ---
     if state == 1:
         if abs(curX - targetX) < STEP / 2:
             curX = targetX
             dev.write(f":SOURce1:VOLTage:OFFSet {curX:.3f}")
             time.sleep(SLEEP)
-            print(f"X reached: {curX:.3f}V → Now moving Y")
+            print(f"  ✅ X reached: {curX:.3f} → moving to Y")
             state = 2
         elif targetX > curX:
             curX += STEP
@@ -101,8 +96,8 @@ def update_sequential():
             curY = targetY
             dev.write(f":SOURce2:VOLTage:OFFSet {curY:.3f}")
             time.sleep(SLEEP)
-            print(f"Y reached: {curY:.3f}V → Motion complete!")
-            state = 0   # ← IDLE, ready for new target
+            print(f"  ✅ Y reached: {curY:.3f} → motion complete, back to IDLE")
+            state = 0
         elif targetY > curY:
             curY += STEP
             if curY > targetY: curY = targetY
@@ -118,6 +113,7 @@ def update_sequential():
 # Main Loop
 # ============================================================
 while running:
+    # --- Event handling ---
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
@@ -125,15 +121,16 @@ while running:
             if event.key == pygame.K_ESCAPE:
                 running = False
             elif event.key == pygame.K_r:
+                print("🔄 Origin requested")
                 set_target(0.0, 0.0)
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1:  # Left click - always allowed
+            if event.button == 1:
                 mx, my = pygame.mouse.get_pos()
                 vx, vy = pixel_to_voltage(mx, my)
-                print(f"Click → target: ({vx:.3f}V, {vy:.3f}V)")
+                print(f"🖱️ Click at ({mx},{my}) → ({vx:.3f}V, {vy:.3f}V)")
                 set_target(vx, vy)
 
-    # Update motion if state is 1 or 2
+    # --- Update motion ---
     if state == 1 or state == 2:
         update_sequential()
 
