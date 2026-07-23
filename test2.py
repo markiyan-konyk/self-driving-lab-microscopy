@@ -37,7 +37,7 @@ import pyvisa
 # ============================================================
 # ★★★ CONFIG ★★★
 # ============================================================
-RESOURCE   = ""      # e.g. "USB0::0x1AB1::0x0642::DG1ZA278M01038::INSTR"
+RESOURCE   = "USB0::0x1AB1::0x0642::DG1ZA278M01038::INSTR"      # e.g. "USB0::0x1AB1::0x0642::DG1ZA278M01038::INSTR"
                      # leave "" to auto-pick the first USB instrument
 CH         = 1
 TIMEOUT_MS = 5000    # per-write; an over-large block STALLS, so keep this modest
@@ -83,8 +83,11 @@ def main():
     print(f"Opening {res}")
     dev = rm.open_resource(res)
     dev.timeout = TIMEOUT_MS
-    dev.chunk_size = 20 * 1024 * 1024   # don't let pyvisa pre-split the write:
-                                        # we want the device's true single-write limit
+    # NOTE: do NOT inflate chunk_size. It also sizes the READ buffer, and a
+    # huge value makes libusb try to allocate a giant URB on the Pi ->
+    # "[Errno 12] Insufficient memory" on the very first read. The default
+    # (~20 KB) is correct here: the stall we're hunting for happens well
+    # below 20 KB, so every block up to that size is still one USBTMC write.
     try:
         dev.clear()                     # reset any endpoint left stalled by a prior run
     except Exception:
