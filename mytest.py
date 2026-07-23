@@ -30,34 +30,27 @@ while running:
             running = False
 
     keys = pygame.key.get_pressed()
-    
-    # Use a single flag to update BOTH channels if ANY key is pressed
-    changed = False
 
     if keys[pygame.K_w] and Y < 2:
         y -= 1
         Y -= 0.01
-        changed = True
+        dev.write(f":SOURce2:VOLTage:OFFSet {Y:.3f}")
+        time.sleep(1/60)
     if keys[pygame.K_s] and Y > -2:
         y += 1
         Y += 0.01
-        changed = True
+        dev.write(f":SOURce2:VOLTage:OFFSet {Y:.3f}")
+        time.sleep(1/60)
     if keys[pygame.K_a] and X > -2:  
         x -= 1
         X -= 0.01
-        changed = True
+        dev.write(f":SOURce1:VOLTage:OFFSet {X:.3f}")
+        time.sleep(1/60)
     if keys[pygame.K_d] and X < 2:
         x += 1
         X += 0.01
-        changed = True
-
-    # 2. SCPI COMMAND CHAINING
-    # Send both offsets in a single USB packet to prevent the firmware from 
-    # executing a channel context switch.
-    if changed:
-        # Note the semicolon and leading colon: ';:SOURce2'
-        # The semicolon chains the command, the colon resets the parser to the root directory.
-        dev.write(f":SOURce1:VOLTage:OFFSet {X:.3f};:SOURce2:VOLTage:OFFSet {Y:.3f}")
+        dev.write(f":SOURce1:VOLTage:OFFSet {X:.3f}")
+        time.sleep(1/60)
 
     screen.fill((0, 0, 0))
     pygame.draw.circle(screen, (255, 0, 0), (x, y), 5)
