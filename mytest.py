@@ -51,6 +51,15 @@ while running:
         X += 0.01
         dev.write(f":SOURce1:VOLTage:OFFSet {X:.3f}")
         time.sleep(1/60)
+    
+    if keys[pygame.K_e] and X < 2 and Y > -2:
+        x += 1
+        X += 0.01
+        dev.write(f":SOURce1:VOLTage:OFFSet {X:.3f}")
+        y -= 1
+        Y -= 0.01
+        dev.write(f":SOURce2:VOLTage:OFFSet {Y:.3f}")
+        time.sleep(1/60)
         
     X = max(-2.0, min(2.0, X))
     Y = max(-2.0, min(2.0, Y))
