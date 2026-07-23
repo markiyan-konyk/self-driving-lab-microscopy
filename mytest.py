@@ -9,10 +9,9 @@ dev.timeout = 20000
 dev.query("*IDN?")
 dev.write(f"SOURce1:APPLy:DC 1,1,0")
 dev.write(f"OUTP1 ON")
-for x in range(1,10001,1000):
-    print(f"{x} COMMANDS PER SECOND SENT")
-    for y in range(x):
-        i = y * (3/x)
-        dev.write(f"SOURce1:APPLy:DC 1,1,{i}")
-        time.sleep(1/x)
-    time.sleep(0.25)
+
+for y in range(30000):
+    i = y * (4/30000)
+    dev.write(f"SOURce1:APPLy:DC 1,1,{i}")
+    time.sleep(1/10000)
+
