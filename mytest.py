@@ -31,11 +31,11 @@ while running:
     if keys[pygame.K_w] and Y < 2:
         y -= 1
         Y -= 1/100
-        dev.write(f"SOURce1:APPly:DC 1,1,{Y}")
+        dev.write(f"SOURce2:APPly:DC 1,1,{Y}")
     if keys[pygame.K_s] and Y > -2:
         y += 1
         Y += 1/100
-        dev.write(f"SOURce1:APPly:DC 1,1,{Y}")
+        dev.write(f"SOURce2:APPly:DC 1,1,{Y}")
     if keys[pygame.K_a] and X < 2:
         x -= 1
         X -= 1/100
