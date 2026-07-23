@@ -56,6 +56,7 @@ while running:
         x += 1
         X += 0.01
         dev.write(f":SOURce1:VOLTage:OFFSet {X:.3f}")
+        time.sleep(1/60)
         y -= 1
         Y -= 0.01
         dev.write(f":SOURce2:VOLTage:OFFSet {Y:.3f}")
