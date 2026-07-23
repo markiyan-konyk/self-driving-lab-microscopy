@@ -40,9 +40,6 @@ class DG1022Z:
     VPP = "VPP"; VRMS = "VRMS"; DBM = "DBM"
     NORMAL = "NORMal"; INVERTED = "INVerted"
 
-    # ============================================================================
-    # Connection
-    # ============================================================================
     def __init__(self, resource="", timeout_ms=5000, backoff_s=0.5):
         # Ethernet (TCPIP/VXI-11) is strongly preferred inside Docker: USB (USBTMC)
         # needs device passthrough and re-enumerates on any clear/reset, breaking the
@@ -52,8 +49,9 @@ class DG1022Z:
         self._backoff_s = backoff_s
         self._lock = threading.RLock()   # VISA sessions are NOT thread-safe
         self.reconnects = 0
+        
         self.rm = None
-        self.inst = None
+        self.device = None
         self._open()
 
     def _open(self):
@@ -62,23 +60,23 @@ class DG1022Z:
             resources = self.rm.list_resources('USB?*INSTR')
             if not resources:
                 raise RuntimeError("No USB VISA instruments found. Check physical connection.")
-            self.inst= self.rm.open_resource(resources[0])
+            self.device= self.rm.open_resource(resources[0])
         else:
-            self.inst = self.rm.open_resource(self.resource)
-        self.inst.read_termination = "\n"
-        self.inst.write_termination = "\n"
-        self.inst.timeout = self.timeout_ms
+            self.device = self.rm.open_resource(self.resource)
+        self.device.read_termination = "\n"
+        self.device.write_termination = "\n"
+        self.device.timeout = self.timeout_ms
 
     def _recover(self):
         # A single hiccup must not crash the app: abort/clear the stalled USBTMC
         # session, then fully reconnect with a short backoff before the caller retries.
         self.reconnects += 1
         try:
-            self.inst.clear()          # USBTMC abort/clear - un-wedges a stalled session
+            self.device.clear()          # USBTMC abort/clear - un-wedges a stalled session
         except Exception:
             pass
         try:
-            self.inst.close()
+            self.device.close()
         except Exception:
             pass
         time.sleep(self._backoff_s)
@@ -95,8 +93,8 @@ class DG1022Z:
 
     def close(self):
         try:
-            if self.inst is not None:
-                self.inst.close()
+            if self.device is not None:
+                self.device.close()
         finally:
             if self.rm is not None:
                 self.rm.close()
@@ -112,11 +110,11 @@ class DG1022Z:
     # ============================================================================
     def command(self, cmd):
         """Send one SCPI command, no response."""
-        return self._io(lambda: self.inst.write(cmd))
+        return self._io(lambda: self.device.write(cmd))
 
     def query(self, cmd):
         """Send one SCPI query, return the stripped string response."""
-        return self._io(lambda: self.inst.query(cmd).strip())
+        return self._io(lambda: self.device.query(cmd).strip())
 
     def query_float(self, cmd):
         return float(self.query(cmd))
@@ -277,7 +275,7 @@ class DG1022Z:
             dac = [max(0, min(16383, int(p))) for p in points]
         # DAC16 words are 16-bit little-endian, valid range 0..16383; END = final block.
         prefix = f"{self._src(channel)}:TRAC:DATA:DAC16 VOLATILE,END,"
-        self._io(lambda: self.inst.write_binary_values(prefix, dac, datatype="H", is_big_endian=False))
+        self._io(lambda: self.device.write_binary_values(prefix, dac, datatype="H", is_big_endian=False))
         self.query("*OPC?")                                    # wait for transfer to finish
         self.command(f"{self._src(channel)}:FUNC USER")        # ASSUMPTION: selects the volatile arb
 
