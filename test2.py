@@ -1,35 +1,28 @@
 #!/usr/bin/env python3
 """
-buffer_probe.py — Find the largest arb-data block the DG1022Z will accept
-in a single USBTMC write on this Raspberry Pi + pyvisa-py setup.
+usbtmc_diagnose.py — Find out WHY the DG1022Z arb upload fails, because a
+24-point "limit" is not a real buffer limit (48 bytes; USB moves data in
+512-byte packets, and we already put ~14 KB on the wire earlier).
 
-How it works:
-  It uploads dummy DAC blocks of INCREASING size using
-      :SOUR<CH>:DATA:DAC VOLATILE,#<block>
-  The plain DAC command OVERWRITES volatile memory each time, so every
-  test is independent (nothing accumulates). After each write it queries
-  :SYST:ERR? — a write can pass at the USB level but still be rejected by
-  the instrument's SCPI parser, and that counts as a failure too.
+The old size-probe read :SYST:ERR? with NO pause after the write, and lumped
+the write and that readback into one try/except. A DATA:DAC upload makes the
+instrument reallocate the arb and switch output mode, which takes time — query
+too soon and the READ times out, looking like a small-write failure.
 
-  The sweep starts very small and grows in gentle steps (never a big
-  jump), printing each attempt before sending it. It STOPS at the first
-  failure — USB timeout OR instrument error. The last size that PASSED is
-  your safe per-command ceiling.
+This tests the two things that actually matter:
+  * REPRODUCIBILITY — retry each size several times. Consistent failure at a
+    size = real limit. Random failure = transport instability.
+  * PACING          — wait after each write before reading back, and report
+    write-failures and readback-failures in SEPARATE columns.
 
-What to do with the result:
-  Chunk your real waveform to a size safely BELOW the ceiling and assemble
-  it on the instrument with the CON/END mechanism:
-      all chunks but the last:  :SOUR1:DATA:DAC16 VOLATILE,CON,#<block>
-      the final chunk:          :SOUR1:DATA:DAC16 VOLATILE,END,#<block>
-  (END makes the instrument switch to arbitrary-waveform output.)
-
-Note: the number that matters is BYTES, not points — binary is 2 bytes
-per point, plus ~32 bytes of command/header overhead. 8 points is the
-instrument's minimum valid waveform, so the sweep starts there (smaller
-blocks are rejected for being too short, not for buffer reasons).
+How to read the result:
+  * If the big sizes now pass once there's a pause -> the problem was pacing,
+    not size. The real uploader just needs a settle + a retry.
+  * If sizes still fail at random even small -> it's a pyvisa-py USBTMC
+    transport issue: retry the whole upload on failure (with dev.clear()
+    between tries), or switch to the python-usbtmc backend.
 """
 
-import sys
 import time
 import numpy as np
 import pyvisa
@@ -37,103 +30,77 @@ import pyvisa
 # ============================================================
 # ★★★ CONFIG ★★★
 # ============================================================
-RESOURCE   = "USB0::0x1AB1::0x0642::DG1ZA278M01038::INSTR"      # e.g. "USB0::0x1AB1::0x0642::DG1ZA278M01038::INSTR"
-                     # leave "" to auto-pick the first USB instrument
+RESOURCE   = "USB0::0x1AB1::0x0642::DG1ZA278M01038::INSTR"  # "" to auto-pick
 CH         = 1
-TIMEOUT_MS = 5000    # per-write; an over-large block STALLS, so keep this modest
-SETTLE_S   = 0.05    # pause between tests
+TIMEOUT_MS = 4000
+TEST_SIZES = [16, 32, 64, 128, 256, 512, 1024]   # points
+REPEATS    = 6
+SETTLE_AFTER_WRITE = 0.3     # KEY: let the instrument finish before reading back
+SETTLE_BETWEEN     = 0.1
 # ============================================================
 
 
-def build_sizes():
-    """Increasing point counts: tiny at first, gently growing steps, never
-    a big jump. Edit the (cap, step) tiers to probe finer or coarser."""
-    sizes = [8]
-    tiers = [(128, 8), (512, 32), (2048, 64), (8192, 256), (16384, 512)]
-    n = 8
-    for cap, step in tiers:
-        while n < cap:
-            n += step
-            if n <= 16384:
-                sizes.append(n)
-    return sizes
-
-
 def err_code(resp):
-    """Parse the leading integer of a :SYST:ERR? response ('0,"No error"')."""
     try:
         return int(resp.split(",")[0])
     except Exception:
-        return -9999  # unparseable -> treat as an error
+        return -9999
 
 
-def pick_resource(rm):
-    if RESOURCE:
-        return RESOURCE
-    usb = [r for r in rm.list_resources() if r.upper().startswith("USB")]
-    if not usb:
-        print("No USB instrument found. Set RESOURCE manually.")
-        sys.exit(1)
-    return usb[0]
+def recover(dev):
+    """Reset the USBTMC endpoints after a timeout so one failure doesn't
+    cascade into the next attempt."""
+    try:
+        dev.clear()
+    except Exception:
+        pass
+    time.sleep(0.2)
 
 
 def main():
     rm = pyvisa.ResourceManager("@py")
-    res = pick_resource(rm)
-    print(f"Opening {res}")
+    res = RESOURCE or next(r for r in rm.list_resources()
+                           if r.upper().startswith("USB"))
+    print("Opening", res)
     dev = rm.open_resource(res)
     dev.timeout = TIMEOUT_MS
-    # NOTE: do NOT inflate chunk_size. It also sizes the READ buffer, and a
-    # huge value makes libusb try to allocate a giant URB on the Pi ->
-    # "[Errno 12] Insufficient memory" on the very first read. The default
-    # (~20 KB) is correct here: the stall we're hunting for happens well
-    # below 20 KB, so every block up to that size is still one USBTMC write.
-    try:
-        dev.clear()                     # reset any endpoint left stalled by a prior run
-    except Exception:
-        pass
+    recover(dev)
     print("IDN:", dev.query("*IDN?").strip())
-    dev.write("*CLS")                   # clear the instrument's error queue
 
     header = f":SOUR{CH}:DATA:DAC VOLATILE,"
-    last_ok = None
+    print(f"\n{'points':>7} {'bytes':>7} | {'writes':>9} {'readbacks':>10} "
+          f"{'scpi_ok':>9}")
+    print("-" * 52)
 
-    for n in build_sizes():
-        payload = 2 * n                 # uint16 -> 2 bytes/point
-        data = np.linspace(0, 16383, n).astype(np.uint16)   # dummy ramp; content irrelevant
-        preview = ", ".join(str(v) for v in data[:4])
-        print(f"\n-> Trying {n:>6} pts | {payload:>6} data bytes "
-              f"(~{payload + 32} total) | first vals: [{preview}, ...]")
+    for n in TEST_SIZES:
+        data = np.linspace(0, 16383, n).astype(np.uint16)
+        w_ok = r_ok = e_ok = 0
+        for _ in range(REPEATS):
+            # --- write path (binary block accepted over USB?) ---
+            try:
+                dev.write("*CLS")
+                dev.write_binary_values(header, data,
+                                        datatype="H", is_big_endian=False)
+                w_ok += 1
+            except Exception:
+                recover(dev)
+                time.sleep(SETTLE_BETWEEN)
+                continue
 
-        try:
-            dev.write_binary_values(header, data,
-                                    datatype="H", is_big_endian=False)
-            resp = dev.query(":SYST:ERR?").strip()
-        except Exception as e:
-            print(f"   USB WRITE FAILED: {e}")
-            print(f"\n==> LIMIT reached: {n} pts ({payload} bytes) would not transfer.")
-            break
+            time.sleep(SETTLE_AFTER_WRITE)     # <-- the pacing fix being tested
 
-        code = err_code(resp)
-        if code != 0:
-            print(f"   INSTRUMENT REJECTED IT: :SYST:ERR? -> {resp}")
-            print(f"\n==> LIMIT reached: instrument refused {n} pts ({payload} bytes).")
-            break
+            # --- readback path (did the instrument answer, and was it happy?) ---
+            try:
+                resp = dev.query(":SYST:ERR?").strip()
+                r_ok += 1
+                if err_code(resp) == 0:
+                    e_ok += 1
+            except Exception:
+                recover(dev)
+            time.sleep(SETTLE_BETWEEN)
 
-        print(f"   OK  (:SYST:ERR? -> {resp})")
-        last_ok = (n, payload)
-        time.sleep(SETTLE_S)
-
-    print("\n" + "=" * 56)
-    if last_ok:
-        n, payload = last_ok
-        safe = int(n * 0.8)
-        print(f"Largest block that PASSED : {n} pts  ({payload} data bytes)")
-        print(f"Suggested safe chunk size : ~{safe} pts  (20% margin)")
-        print("Assemble your full waveform with :DATA:DAC16 VOLATILE,CON/END.")
-    else:
-        print("Even the smallest block failed — check the error printed above.")
-    print("=" * 56)
+        print(f"{n:>7} {2*n:>7} | {w_ok:>4}/{REPEATS:<4} {r_ok:>5}/{REPEATS:<4} "
+              f"{e_ok:>4}/{REPEATS:<4}")
 
     try:
         dev.write(f":OUTP{CH} OFF")
@@ -141,6 +108,12 @@ def main():
         pass
     dev.close()
 
+    print("\nColumns:")
+    print("  writes    = binary block accepted over USB without timeout")
+    print("  readbacks = :SYST:ERR? actually answered")
+    print("  scpi_ok   = of those, how many reported 0 / No error")
+    print("All three at or near REPEATS for a size = that size is reliable.")
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
