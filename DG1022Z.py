@@ -19,29 +19,24 @@ Quick start:
 
 import time
 import threading
-
 import pyvisa
 
 
 class DG1022Z:
-    CH1, CH2 = "SOUR1", "SOUR2"
-    # ----- Handy constants (waveform shapes) ------------------------------------
+    CH1, CH2 = 1, 2
+
     SINE = "SIN"; SQUARE = "SQU"; RAMP = "RAMP"; PULSE = "PULS"
     NOISE = "NOIS"; DC = "DC"; USER = "USER"; HARMONIC = "HARM"
 
-    # ----- Output load / impedance ----------------------------------------------
     HIGH_Z = "INFinity"          # High-Z; pass a number (e.g. 50) for a fixed load
     LOAD_50 = 50
 
-    # ----- Trigger / modulation sources -----------------------------------------
     TRIG_INTERNAL = "INTernal"; TRIG_EXTERNAL = "EXTernal"; TRIG_MANUAL = "MANual"
     MOD_INTERNAL = "INTernal"; MOD_EXTERNAL = "EXTernal"
 
-    # ----- Sweep spacing / burst modes ------------------------------------------
     SWEEP_LINEAR = "LINear"; SWEEP_LOG = "LOGarithmic"; SWEEP_STEP = "STEp"
     BURST_TRIGGERED = "TRIGgered"; BURST_GATED = "GATed"; BURST_INFINITE = "INFinity"
 
-    # ----- Voltage units / polarity ---------------------------------------------
     VPP = "VPP"; VRMS = "VRMS"; DBM = "DBM"
     NORMAL = "NORMal"; INVERTED = "INVerted"
 
@@ -62,7 +57,7 @@ class DG1022Z:
         self._open()
 
     def _open(self):
-        self.rm = pyvisa.ResourceManager()
+        self.rm = pyvisa.ResourceManager("@py")
         if not self.resource:
             resources = self.rm.list_resources('USB?*INSTR')
             if not resources:
@@ -335,7 +330,7 @@ class DG1022Z:
 # Smoke test
 # ================================================================================
 if __name__ == "__main__":
-    with WaveGen() as gen:                 # edit the default resource string to match your unit
+    with DG1022Z() as gen:                 # edit the default resource string to match your unit
         print("IDN          :", gen.idn())
         print("CH1 function :", gen.get_function(1))
         print("CH1 frequency:", gen.get_frequency(1))
