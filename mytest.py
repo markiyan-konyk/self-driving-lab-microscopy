@@ -30,21 +30,23 @@ while running:
     keys = pygame.key.get_pressed()
     if keys[pygame.K_w] and Y < 2:
         y -= 1
-        Y += 1/100
+        Y -= 1/100
+        dev.write(f"SOURce1:APPly:DC 1,1,{Y}")
     if keys[pygame.K_s] and Y > -2:
         y += 1
-        Y -= 1/100
+        Y += 1/100
+        dev.write(f"SOURce1:APPly:DC 1,1,{Y}")
     if keys[pygame.K_a] and X < 2:
         x -= 1
-        X += 1/100
+        X -= 1/100
+        dev.write(f"SOURce1:APPly:DC 1,1,{X}")
     if keys[pygame.K_d] and X > -2:
         x += 1
-        X -= 1/100
+        X += 1/100
+        dev.write(f"SOURce1:APPly:DC 1,1,{X}")
 
     screen.fill((0, 0, 0))
     pygame.draw.circle(screen, (255, 0, 0), (x, y), 5)  # Simulated laser dot
     pygame.display.flip()
-    dev.write(f"SOURce1:APPly:DC 1,1,{Y}")
-    dev.write(f"SOURce1:APPly:DC 1,1,{X}")
-    clock.tick(100)  # Run at 60
+    clock.tick(60)  # Run at 60
 
