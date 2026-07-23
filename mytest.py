@@ -31,7 +31,7 @@ while running:
 
     keys = pygame.key.get_pressed()
 
-    if keys[pygame.K_w] and Y > 2:
+    if keys[pygame.K_w] and Y < 2:
         y -= 1
         Y -= 0.01
         dev.write(f":SOURce2:VOLTage:OFFSet {Y:.3f}")
