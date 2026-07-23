@@ -8,7 +8,7 @@ def create_custom_waveform(num_points=1000):
     between -1.0 and 1.0.
     """
     t = np.linspace(0, 2 * np.pi, num_points)
-    # Example custom wave: fundamental sine + 3rd harmonic overshoot
+    # Custom wave: fundamental sine + 3rd harmonic overshoot
     wave = np.sin(t) + 0.3 * np.sin(3 * t)
     
     # Normalize wave strictly between -1.0 and +1.0
@@ -28,44 +28,48 @@ def upload_and_run():
     
     print(f"Found instruments: {resources}")
     
-    # Open connection to the first USB device (adjust index if multiple instruments are plugged in)
-    dg1022z = rm.open_resource(resources[0])
-    dg1022z.timeout = 5000  # 5 second timeout
+    # Open connection
+    dg1022 = rm.open_resource(resources[0])
+    dg1022.timeout = 5000  # 5 second timeout
     
-    # Optional: Verify identity
-    idn = dg1022z.query('*IDN?')
+    # Verify identity
+    idn = dg1022.query('*IDN?')
     print(f"Connected to: {idn.strip()}")
 
     # 2. Generate sample waveform data
     points = create_custom_waveform(num_points=1000)
     
-    # Convert numbers to a comma-separated string format
-    # format: ",val1,val2,val3..."
-    data_str = "," + ",".join([f"{val:.4f}" for val in points])
+    # Format floating point array into comma-separated string
+    data_str = ",".join([f"{val:.4f}" for val in points])
 
     print("Uploading waveform data...")
     
-    # 3. Send SCPI Commands to DG1022Z
-    # Select Channel 1
-    dg1022z.write(":SOURce1:FUNCtion ARBitrary")
+    # 3. Send SCPI Commands to DG1022 (Legacy SCPI Syntax)
+    #
+    # Upload data directly to VOLATILE memory.
+    # DG1022 format: DATA VOLATILE,val1,val2,...
+    dg1022.write(f"DATA VOLATILE,{data_str}")
     
-    # Send waveform vector to volatile memory
-    dg1022z.write(f":SOURce1:DATA VOLATILE{data_str}")
+    # Select VOLATILE memory as the current custom waveform output
+    # Note: VOLATILE cannot be abbreviated here
+    dg1022.write("FUNC:USER VOLATILE")
     
-    # Set the channel to use the VOLATILE memory waveform
-    dg1022z.write(":SOURce1:FUNCtion:ARBitrary VOLATILE")
+    # Switch output function to USER (Arbitrary)
+    dg1022.write("FUNC USER")
     
     # 4. Configure Output Properties (Frequency, Amplitude, Offset)
-    dg1022z.write(":SOURce1:FREQuency 1000")       # 1 kHz
-    dg1022z.write(":SOURce1:VOLTage 2.0")          # 2.0 Vpp
-    dg1022z.write(":SOURce1:VOLTage:OFFSet 0.0")   # 0 V Offset
+    # Note: No :SOURce1: prefix for Channel 1 on DG1022
+    dg1022.write("FREQ 2")          # 1 kHz
+    dg1022.write("VOLT 2.0")           # 2.0 Vpp
+    dg1022.write("VOLT:OFFS 0.0")      # 0 V Offset
     
-    # 5. Enable the channel output
-    dg1022z.write(":OUTPUT1 ON")
+    # 5. Enable Output
+    # DG1022 uses OUTP ON (or OUTP:CH2 ON for Channel 2)
+    dg1022.write("OUTP ON")
     print("Waveform successfully sent and Channel 1 enabled!")
 
-    # Close resource connection
-    dg1022z.close()
+    # Close connection
+    dg1022.close()
 
 if __name__ == "__main__":
     upload_and_run()

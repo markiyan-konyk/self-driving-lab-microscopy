@@ -24,6 +24,7 @@ import pyvisa
 
 
 class DG1022Z:
+    CH1, CH2 = "SOUR1", "SOUR2"
     # ----- Handy constants (waveform shapes) ------------------------------------
     SINE = "SIN"; SQUARE = "SQU"; RAMP = "RAMP"; PULSE = "PULS"
     NOISE = "NOIS"; DC = "DC"; USER = "USER"; HARMONIC = "HARM"
@@ -69,6 +70,8 @@ class DG1022Z:
             self.inst= self.rm.open_resource(resources[0])
         else:
             self.inst = self.rm.open_resource(self.resource)
+        self.inst.read_termination = "\n"
+        self.inst.write_termination = "\n"
         self.inst.timeout = self.timeout_ms
 
     def _recover(self):
