@@ -20,7 +20,7 @@ Quick start:
 import time
 import threading
 import pyvisa
-
+import os
 
 class DG1022Z:
     CH1, CH2 = 1, 2
@@ -66,6 +66,32 @@ class DG1022Z:
         self.device.read_termination = "\n"
         self.device.write_termination = "\n"
         self.device.timeout = self.timeout_ms
+
+    def _open_debug(self):
+        self.rm = pyvisa.ResourceManager("@py")
+        env = os.environ.get("DAC_ID")
+        if env:
+            return env
+        else:
+            print("No os.environ input detected")
+        
+        if not self.resource:
+            resources = self.rm.list_resources()
+            print("ALL VISA resources:", resources or "(none found)")
+            resources = self.rm.list_resources('USB?*INSTR')
+            print("VISA resources starting with USB:", resources or "(none found)")
+            if not resources:
+                raise RuntimeError("No USB VISA instruments found. Check physical connection.")
+            self.device= self.rm.open_resource(resources[0])
+            print(f"Using the device with ID:{self.resource[0]}")
+        else:
+            self.device = self.rm.open_resource(self.resource)
+            print(f"Using the device with ID:{self.resource[0]}")
+
+        self.device.read_termination = "\n"
+        self.device.write_termination = "\n"
+        self.device.timeout = self.timeout_ms
+        print(f"Timeout set to {self.timeout_ms}")
 
     def _recover(self):
         # A single hiccup must not crash the app: abort/clear the stalled USBTMC
