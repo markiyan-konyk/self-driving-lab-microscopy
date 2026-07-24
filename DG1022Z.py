@@ -21,6 +21,7 @@ import time
 import threading
 import pyvisa
 import os
+import readchar
 
 class DG1022Z:
     CH1, CH2 = 1, 2
@@ -105,9 +106,48 @@ class DG1022Z:
                   "resource address.")
         print("OK - connection works.")
 
-    def close(self):
+    def _close(self):
         self.device.write(":OUTP1 OFF;:OUTP2 OFF")
         self.device.close()
+
+    def _calibrate_offset(self):
+        self.dcinit()
+        print("Calibrate the X axis")
+        print(f"Starting at {self.xoffset}")
+        print("Controls: [UP/DOWN] Change number | [s] Save\n")
+        while True:
+            key = readchar.readkey()
+
+            if key == readchar.key.UP:
+                self.xoffset += 0.01
+                print(f"Current offset: {self.xoffset}    ", end='\r') 
+                
+            elif key == readchar.key.DOWN:
+                self.xoffset -= 0.01
+                print(f"Current offset: {self.xoffset}    ", end='\r')
+                
+            elif key.lower() == 's':
+                print(f"\n[Saved] Number stored as: {self.xoffset}")
+                print(f"Current number: {self.xoffset}    ", end='\r')
+                break
+
+        print("Calibrate the X axis")
+        print(f"Starting at {self.yoffset}")
+        while True:
+            key = readchar.readkey()
+
+            if key == readchar.key.UP:
+                self.yoffset += 0.01
+                print(f"Current offset: {self.yoffset}    ", end='\r') 
+                
+            elif key == readchar.key.DOWN:
+                self.yoffset -= 0.01
+                print(f"Current offset: {self.yoffset}    ", end='\r')
+                
+            elif key.lower() == 's':
+                print(f"\n[Saved] Number stored as: {self.yoffset}")
+                print(f"Current number: {self.yoffset}    ", end='\r')
+                break   
 
     def dcinit(self):
         self.device.write(f":OUTPut1:LOAD INFinity;:OUTPut2:LOAD INFinity")
