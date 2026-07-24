@@ -14,10 +14,13 @@ class DG1022Z:
         self.rm = None
         self.device = None
 
-        self.xpos = 0
-        self.ypos = 0
-        self.xoffset:float = 0
-        self.yoffset:float = 0
+        self.xpos = 0.0
+        self.ypos = 0.0
+        self.xoffset = 0.0
+        self.yoffset = 0.0
+        self.freq = 10.0
+        self.amp = 0.0
+        self.phase = 0.0
 
 
     def _open(self):
@@ -126,19 +129,21 @@ class DG1022Z:
             self.xpos = val
             val = self.xpos + self.xoffset
         if ch == 2:
-            self.ypos = val
+            self.ypos = val 
             val = self.ypos + self.yoffset
-
         self.device.write(f"SOURce{ch}:VOLTage:OFFSet {val:.3f}")
-    
-    def sininit(self, freq="10.0":float, amp="0.0":float, phase="0.0":float):
+    '''
+    def sininit(self, freq=self.freq:float, amp=self.amp:float, phase=self.phase:float):
         x = self.xoffset + self.xpos
         y = self.yoffset + self.ypos
         self.device.write(f":SOUR1:APPL:SIN {freq},{amp},{x},{phase}")
         self.device.write(f":SOUR2:APPL:SIN {freq},{amp},{y},{phase}")
 
-    def sinupdate():
-
+    def sinupdate(self, ch:int, freq=self.freq, amp=self.amp, phase=self.phase):
+        self.device.write(f":SOURce{ch}:FREQ {freq}")
+        self.device.write(f":SOURce{ch}:PHAS {phase}")
+        self.device.write(f":SOURce{ch}:VOLT {amp}")
+'''
 
 ## DO NOT USE ANYTHING IN THIS FILE THAT IS COMMENTED HERE BELOW
 '''
