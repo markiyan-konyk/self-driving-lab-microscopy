@@ -21,7 +21,7 @@ setup(
     maintainer="Mark Konyk",
     maintainer_email="mark.konyk@gmail.com",
     description="SCOPIO microscope driver nodes (camera, stage, galvo, "
-                "temperature, tracker).",
+                "tracker).",
     license="MIT",
     tests_require=["pytest"],
     entry_points={
@@ -29,7 +29,6 @@ setup(
             "camera_node = scopio_microscope.camera_node:main",
             "stage_node = scopio_microscope.stage_node:main",
             "galvo_node = scopio_microscope.galvo_node:main",
-            "temperature_node = scopio_microscope.temperature_node:main",
             "tracker_node = scopio_microscope.tracker_node:main",
             "calibration_node = scopio_microscope.calibration_node:main",
         ],

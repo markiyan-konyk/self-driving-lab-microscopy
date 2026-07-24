@@ -1,42 +1,39 @@
 """galvo_node - the galvo/laser AWG, exposed whole.
 
 The node owns the VISA session to the arbitrary-waveform generator (a Rigol
-DG1022Z: CH1 = X mirror, CH2 = Y mirror) through the vendored
-`drivers/wavegen.WaveGen` class, and offers it to clients two ways:
+DG1022Z: CH1 = X mirror, CH2 = Y mirror) through the vendored, EDITABLE
+`drivers/dg1022z.DG1022Z` class, and offers it to clients two ways:
 
   1. `awg/call`  -- ANY public method of the driver class, by name, with JSON
-     args. Sine, sweep, burst, modulation, arb upload, paced command bursts,
-     error-queue drain: whatever the class can do, a client can do. New driver
-     methods are reachable the moment they exist -- no new .srv, no gateway or
-     client change.
-  2. `awg/write` / `awg/query` -- the original raw SCPI passthrough, unchanged,
-     because a raw string still is the right tool when the client composes its
-     own SCPI (galvo_draw, ui/galvo_geometry.py). These now route through the
-     driver's `command()` / `query()`, which is what the class calls them.
+     args. Today that is `dcinit`, `dcupdate`, `dcmove`, `sininit`, `sinupdate`;
+     the moment you add a method to dg1022z.py it is reachable here, with no new
+     .srv, no gateway and no client change. Example: a UI button that nudges the
+     laser calls `awg/call` with method="dcupdate", args=[1, 0.20].
+  2. `awg/write` / `awg/query` -- raw SCPI passthrough, for clients that compose
+     their own SCPI. The DG1022Z driver keeps its SCPI escape hatches commented
+     out, so these route straight to the underlying VISA session it holds.
 
-What the class buys us over the old bare-pyvisa passthrough: one lock so
-concurrent clients can't interleave mid-protocol, auto-recovery (USBTMC clear,
-then reconnect) after a link hiccup instead of a dead node, and `send_sequence`
-pacing for the long command bursts that used to wedge the session.
-
-The node still takes NO view of what the commands mean: no volts, no pixels, no
-waveform semantics. Laser GEOMETRY (volts->pixels->micrometres, homing, jogging)
-stays in client code (ui/galvo_geometry.py, galvo_draw/) -- see DECISIONS.md.
+Connection is the NODE's job, not the client's: DG1022Z() does not open on
+construction, so `_connect` builds the object and calls its `_open()`. `_open`
+(and every other private, underscore-prefixed method) is therefore NOT callable
+over `awg/call` -- re-opening the link is exposed as the `reconnect` meta-method
+instead. The mirror geometry (volts<->pixels<->micrometres) stays in client
+code; this node takes no view of what a command means.
 
 Topics / services (under /scopio):
   pub  awg/status   scopio_interfaces/AwgStatus       (connected, idn, last cmd/err)
-  srv  awg/call     scopio_interfaces/InstrumentCall  (any driver method)
+  srv  awg/call     scopio_interfaces/InstrumentCall  (any public driver method)
   srv  awg/write    scopio_interfaces/AwgWrite        (raw SCPI command)
   srv  awg/query    scopio_interfaces/AwgQuery        (raw SCPI query -> reply)
 
 Meta-methods handled by the NODE, not the driver:
   list_methods()  -> [{name, signature, doc}] of everything callable (works
                      even while disconnected -- it introspects the class)
-  reconnect()     -> re-open the VISA session; True on success
+  reconnect()     -> re-open the VISA session (rebuild + _open); True on success
   connected()     -> bool
 
-Degrades gracefully: with no resource / no pyvisa it reports connected=false and
-calls return success=false; the rest of the graph still comes up.
+Degrades gracefully: with no resource / no instrument it reports connected=false
+and calls fail with a readable error; the rest of the graph still comes up.
 """
 
 import os
@@ -51,7 +48,7 @@ from scopio_interfaces.msg import AwgStatus
 from scopio_interfaces.srv import AwgQuery, AwgWrite, InstrumentCall
 
 from .drivers import dispatch
-from .drivers.wavegen import WaveGen
+from .drivers.dg1022z import DG1022Z
 
 META_METHODS = (
     {"name": "list_methods", "signature": "()",
@@ -72,7 +69,7 @@ class GalvoNode(Node):
         self.declare_parameter("reconnect_period", 15.0)
         self.declare_parameter("auto_discover", True)
 
-        self._lock = threading.Lock()   # guards _gen swaps; VISA I/O is locked inside WaveGen
+        self._lock = threading.Lock()   # guards _gen swaps; VISA I/O is locked inside DG1022Z
         self.gen = None
         self.idn = ""
         self.last_command = ""
@@ -97,16 +94,17 @@ class GalvoNode(Node):
     def _resolve_resource(self):
         """GALVO_RESOURCE env > `resource` param > the first USB instrument.
 
-        Auto-discovery matters: without it the node silently stayed disabled
-        unless the operator remembered to export GALVO_RESOURCE. Ethernet units
-        can't be discovered (pyvisa-py doesn't scan the LAN) -- name those.
+        (The driver's own `_open` also honours a DAC_ID env var and will fall
+        back to USB discovery itself, but we resolve here too so the node logs
+        the choice and warns when several USB instruments share the bus.)
+        Ethernet units can't be discovered (pyvisa-py doesn't scan the LAN) --
+        name those explicitly.
         """
         resource = os.environ.get("GALVO_RESOURCE") or self.get_parameter("resource").value
         if resource or not self.get_parameter("auto_discover").value:
             return resource
         try:
             import pyvisa
-            # Same backend the driver opens with, so we list what it can open.
             usb = [r for r in pyvisa.ResourceManager("@py").list_resources()
                    if r.upper().startswith("USB")]
         except Exception as exc:
@@ -115,7 +113,6 @@ class GalvoNode(Node):
         if not usb:
             return ""
         if len(usb) > 1:
-            # The temperature controller is a USB instrument too.
             self.get_logger().warning(
                 f"{len(usb)} USB instruments present {usb}; set GALVO_RESOURCE "
                 "to pick the AWG deliberately.")
@@ -124,13 +121,11 @@ class GalvoNode(Node):
 
     def _connect(self):
         resource = self._resolve_resource()
-        if not resource:
-            self.get_logger().warning(
-                "No galvo VISA resource found (set GALVO_RESOURCE); AWG disabled.")
-            return False
         try:
-            gen = WaveGen(resource, timeout_ms=int(self.get_parameter("timeout_ms").value))
-            idn = gen.idn()
+            # DG1022Z() does NOT open on construction -- the node opens it.
+            gen = DG1022Z(resource, timeout_ms=int(self.get_parameter("timeout_ms").value))
+            gen._open()
+            idn = gen.device.query("*IDN?").strip()
             with self._lock:
                 self.gen = gen
                 self.idn = idn
@@ -139,7 +134,8 @@ class GalvoNode(Node):
             return True
         except Exception as exc:
             self.last_error = str(exc)
-            self.get_logger().warning(f"AWG connect failed ({exc}); disabled.")
+            self.get_logger().warning(
+                f"AWG connect failed ({exc}); node runs, reports connected=false.")
             return False
 
     def _retry_connect(self):
@@ -147,13 +143,18 @@ class GalvoNode(Node):
             self._connect()
 
     def _release(self):
-        """Give up the session so the retry timer can rebuild it."""
+        """Give up the session so the retry timer can rebuild it. Closes the raw
+        VISA handles WITHOUT sending SCPI (the link may already be dead, and a
+        write would just burn a full timeout)."""
         with self._lock:
             gen, self.gen = self.gen, None
         if gen is None:
             return False
         try:
-            gen.close()
+            if gen.device is not None:
+                gen.device.close()
+            if gen.rm is not None:
+                gen.rm.close()
         except Exception:
             pass
         return True
@@ -182,7 +183,7 @@ class GalvoNode(Node):
         self.status_pub.publish(msg)
 
     # ------------------------------------------------------------------ #
-    #  The API: call any method on the driver
+    #  The API: call any public method on the driver
     # ------------------------------------------------------------------ #
     def _on_call(self, request, response):
         method = (request.method or "").strip()
@@ -190,7 +191,7 @@ class GalvoNode(Node):
 
         if method == "list_methods":
             response.success = True
-            response.result = dispatch.to_json(dispatch.describe(WaveGen, META_METHODS))
+            response.result = dispatch.to_json(dispatch.describe(DG1022Z, META_METHODS))
             response.error = ""
             return response
         if method == "connected":
@@ -226,7 +227,8 @@ class GalvoNode(Node):
         return response
 
     # ------------------------------------------------------------------ #
-    #  Raw SCPI passthrough (unchanged contract, now via the driver)
+    #  Raw SCPI passthrough (driver's command()/query() are commented out,
+    #  so these talk to the VISA session the driver holds, under its lock).
     # ------------------------------------------------------------------ #
     def _on_write(self, request, response):
         gen = self.gen
@@ -235,7 +237,8 @@ class GalvoNode(Node):
             response.error = "AWG unavailable"
             return response
         try:
-            gen.command(request.command)
+            with gen._lock:
+                gen.device.write(request.command)
             self.last_command = request.command
             self.last_error = ""
             response.success = True
@@ -252,7 +255,8 @@ class GalvoNode(Node):
             response.error = "AWG unavailable"
             return response
         try:
-            reply = gen.query(request.command)
+            with gen._lock:
+                reply = gen.device.query(request.command)
             self.last_command = request.command
             self.last_error = ""
             response.success = True
@@ -264,8 +268,14 @@ class GalvoNode(Node):
         return response
 
     def destroy_node(self):
-        # Leave the mirrors wherever the client parked them: a node restart
-        # must not slam a galvo or drop an experiment's beam.
+        # Clean shutdown: use the driver's own close (outputs off), best-effort,
+        # then drop the session. On a restart the retry timer re-opens it.
+        gen = self.gen
+        if gen is not None:
+            try:
+                gen._close()
+            except Exception:
+                pass
         self._release()
         super().destroy_node()
 

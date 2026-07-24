@@ -1,7 +1,7 @@
 """Turn a driver class into a ROS service surface: call a method by name.
 
-Shared by galvo_node (WaveGen) and temperature_node (TCLab). The node owns the
-instrument object; a client sends `{method, args, kwargs}` as JSON strings
+Used by galvo_node (DG1022Z), and by any future instrument node the same way.
+The node owns the instrument object; a client sends `{method, args, kwargs}` as JSON strings
 (scopio_interfaces/srv/InstrumentCall) and gets the JSON-encoded return value
 back. That is the whole API -- every method the driver class has ever had, or
 will have, is reachable the day it is written, with no new .srv files, no
@@ -121,7 +121,6 @@ def is_link_error(exc):
         return True
     return type(exc).__name__ in (
         "VisaIOError", "InvalidSession", "LibraryError",   # pyvisa
-        "TCLabError",                                      # drivers/tclab.py
     )
 
 

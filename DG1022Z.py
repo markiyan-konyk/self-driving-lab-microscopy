@@ -3,6 +3,7 @@ import threading
 import pyvisa
 import os
 import readchar
+import numpy as np
 
 class DG1022Z:
     def __init__(self, resource="", timeout_ms=5000, backoff_s=0.5):
@@ -124,7 +125,7 @@ class DG1022Z:
         self.device.write(f":SOURce2:APPLy:DC 1,1,{self.yoffset:.3f}")
         self.device.write(":OUTP1 ON;:OUTP2 ON")
 
-    def dcupdate(self, ch:int, val:float):
+    def update(self, ch:int, val:float):
         if ch == 1:
             self.xpos = val
             val = self.xpos + self.xoffset
@@ -132,18 +133,59 @@ class DG1022Z:
             self.ypos = val 
             val = self.ypos + self.yoffset
         self.device.write(f"SOURce{ch}:VOLTage:OFFSet {val:.3f}")
-    '''
-    def sininit(self, freq=self.freq:float, amp=self.amp:float, phase=self.phase:float):
+
+    def move(self, ch:int, endval:float, t:float=1.0, resolution:int=60):
+        if ch == 1:
+            if endval > self.xpos:
+                step = 1/resolution
+            if endval < self.xpos:
+                step = -1/resolution
+            else: return
+            for i in np.arange(self.xpos, endval, step):
+                self.device.write(f"SOURce1:VOLTage:OFFSet {(self.xoffset + i):.3f}")
+                time.sleep(t/resolution)
+            self.xpos = endval
+
+        if ch == 2:
+            if endval > self.ypos:
+                step = 1/resolution
+            if endval < self.ypos:
+                step = -1/resolution
+            else: return
+            for i in np.arange(self.ypos, endval, step):
+                self.device.write(f"SOURce2:VOLTage:OFFSet {(self.yoffset + i):.3f}")
+                time.sleep(t/resolution)
+            self.ypos = endval
+    
+    def sininit(self, freq=0.0:float, amp=0.0:float, phase=0.0):
+        if freq == 0:
+            freq = self.freq
+        if amp = 0:
+            amp = self.amp
+        if phase = 0:
+            phase = self.phase
+
         x = self.xoffset + self.xpos
         y = self.yoffset + self.ypos
         self.device.write(f":SOUR1:APPL:SIN {freq},{amp},{x},{phase}")
         self.device.write(f":SOUR2:APPL:SIN {freq},{amp},{y},{phase}")
 
-    def sinupdate(self, ch:int, freq=self.freq, amp=self.amp, phase=self.phase):
+    def sinupdate(self, ch:int, freq=0, amp=0, phase=0):
+        if freq == 0:
+            freq = self.freq
+        if amp = 0:
+            amp = self.amp
+        if phase = 0:
+            phase = self.phase
+
         self.device.write(f":SOURce{ch}:FREQ {freq}")
         self.device.write(f":SOURce{ch}:PHAS {phase}")
         self.device.write(f":SOURce{ch}:VOLT {amp}")
-'''
+
+        self.freq = freq
+        self.amp = amp
+        self.phase = phase
+
 
 ## DO NOT USE ANYTHING IN THIS FILE THAT IS COMMENTED HERE BELOW
 '''

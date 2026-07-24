@@ -35,21 +35,6 @@
     # (galvo_draw does). Takes effect on container restart.
     timeout_ms: 15000
 
-/scopio/temperature_node:
-  ros__parameters:
-    # VISA resource of the TC LAB controller. Empty => auto-discover the first
-    # USB instrument. NORMALLY SET IN ros2_ws/.env (TCLAB_RESOURCE), which wins
-    # over this. An ETHERNET unit CANNOT be discovered (pyvisa-py doesn't scan
-    # the LAN) -- it must be named: "TCPIP::192.168.1.50::INSTR".
-    # With both the AWG and the controller on USB, name BOTH resources rather
-    # than trusting enumeration order.
-    resource: ""
-    auto_discover: true
-    publish_rate: 1.0        # Hz, TemperatureStatus (each tick = ~7 VISA queries)
-    reconnect_period: 15.0   # s between reconnect attempts while offline
-    timeout_ms: 5000
-    units: 0                 # applied on connect: 0=Celsius 1=Kelvin 2=Fahrenheit 3=raw
-
 /scopio/calibration_node:
   ros__parameters:
     # Persisted spatial calibration (survives restarts). Relative paths are

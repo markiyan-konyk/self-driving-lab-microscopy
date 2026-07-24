@@ -1,90 +1,198 @@
-# ------------------------------------------------------------------------
-# VENDORED COPY of the repo-root galvo.py, on purpose: ros2_ws/ builds into a
-# container and must never import from the repo root. Keep the two in sync by
-# hand (`diff galvo.py ros2_ws/.../drivers/wavegen.py` -- only this banner and
-# the import line in the docstring should differ).
-# galvo_node.py exposes EVERY public method below over one ROS service, so
-# extending this class is all it takes to give clients a new capability.
-# ------------------------------------------------------------------------
-"""
-wavegen.py - Clean SCPI driver for the Rigol DG1022Z function/arbitrary waveform generator.
 
-The DG1022Z is the 25 MHz, 2-channel member of Rigol's DG1000Z series; every command
-below is mapped from the DG1000Z Programming Guide (RIGOL, pub. PGB09106). Numeric
-queries return decimal/scientific notation - there is no hex/2's-complement return mode
-on this series to disable.
-
-Install:
-    pip install pyvisa pyvisa-py         # pure-Python backend, no NI-VISA needed
-
-Quick start:
-    from scopio_microscope.drivers.wavegen import WaveGen
-    gen = WaveGen("TCPIP::192.168.1.10::INSTR")          # Ethernet: preferred in Docker
-    gen.reset()
-    gen.apply_sine(freq=1_000, amp=2.0, offset=0.0, phase=0.0, channel=1)
-    gen.set_output_load(1, gen.HIGH_Z); gen.output(True, 1)   # amplitude ~doubles vs 50 ohm!
-"""
-
-import time
-import threading
-
-import pyvisa
-
-
-class WaveGen:
-    # ----- Handy constants (waveform shapes) ------------------------------------
-    SINE = "SIN"; SQUARE = "SQU"; RAMP = "RAMP"; PULSE = "PULS"
-    NOISE = "NOIS"; DC = "DC"; USER = "USER"; HARMONIC = "HARM"
-
-    # ----- Output load / impedance ----------------------------------------------
-    HIGH_Z = "INFinity"          # High-Z; pass a number (e.g. 50) for a fixed load
-    LOAD_50 = 50
-
-    # ----- Trigger / modulation sources -----------------------------------------
-    TRIG_INTERNAL = "INTernal"; TRIG_EXTERNAL = "EXTernal"; TRIG_MANUAL = "MANual"
-    MOD_INTERNAL = "INTernal"; MOD_EXTERNAL = "EXTernal"
-
-    # ----- Sweep spacing / burst modes ------------------------------------------
-    SWEEP_LINEAR = "LINear"; SWEEP_LOG = "LOGarithmic"; SWEEP_STEP = "STEp"
-    BURST_TRIGGERED = "TRIGgered"; BURST_GATED = "GATed"; BURST_INFINITE = "INFinity"
-
-    # ----- Voltage units / polarity ---------------------------------------------
-    VPP = "VPP"; VRMS = "VRMS"; DBM = "DBM"
-    NORMAL = "NORMal"; INVERTED = "INVerted"
-
-    # ============================================================================
-    # Connection
-    # ============================================================================
-    def __init__(self, resource="TCPIP::192.168.1.10::INSTR", timeout_ms=5000, backoff_s=0.5):
-        # Ethernet (TCPIP/VXI-11) is strongly preferred inside Docker: USB (USBTMC)
-        # needs device passthrough and re-enumerates on any clear/reset, breaking the
-        # session. A USB resource string looks like: USB0::0x1AB1::0x0642::SERIAL::INSTR
+class DG1022Z:
+    def __init__(self, resource="", timeout_ms=5000, backoff_s=0.5):
         self.resource = resource
         self.timeout_ms = timeout_ms
         self._backoff_s = backoff_s
         self._lock = threading.RLock()   # VISA sessions are NOT thread-safe
         self.reconnects = 0
         self.rm = None
-        self.inst = None
-        self._open()
+        self.device = None
+
+        self.xpos = 0.0
+        self.ypos = 0.0
+        self.xoffset = 0.0
+        self.yoffset = 0.0
+        self.freq = 10.0
+        self.amp = 0.0
+        self.phase = 0.0
+
 
     def _open(self):
-        self.rm = pyvisa.ResourceManager("@py")     # pure-Python backend
-        self.inst = self.rm.open_resource(self.resource)
-        self.inst.read_termination = "\n"
-        self.inst.write_termination = "\n"
-        self.inst.timeout = self.timeout_ms
+        self.rm = pyvisa.ResourceManager("@py")
+        env = os.environ.get("DAC_ID")
+        if env:
+            self.resource = env
+        if not self.resource:
+            resources = self.rm.list_resources('USB?*INSTR')
+            if not resources:
+                raise RuntimeError("No USB VISA instruments found. Check physical connection.")
+            self.resource = resources[0]
+            self.device = self.rm.open_resource(self.resource)
+        else:
+            self.device = self.rm.open_resource(self.resource)
+        self.device.read_termination = "\n"
+        self.device.write_termination = "\n"
+        self.device.timeout = self.timeout_ms
 
+    def _open_debug(self):
+        self.rm = pyvisa.ResourceManager("@py")
+        env = os.environ.get("DAC_ID")
+        if env:
+            self.resource = env
+        else:
+            print("No os.environ input detected")
+        
+        if not self.resource:
+            resources = self.rm.list_resources()
+            print("ALL VISA resources:", resources or "(none found)")
+            resources = self.rm.list_resources('USB?*INSTR')
+            print("VISA resources starting with USB:", resources or "(none found)")
+            if not resources:
+                raise RuntimeError("No USB VISA instruments found. Check physical connection.")
+            print(type(resources[0]))
+            print(f"Using the device with ID:{resources[0]}")
+            self.device= self.rm.open_resource(resources[0])
+            print(f"Using the device with ID:{resources[0]}")
+        else:
+            print(f"Using the device with ID:{resources[0]}")
+            self.device = self.rm.open_resource(self.resource)
+            print(f"Using the device with ID:{self.resource}")
+
+        self.device.read_termination = "\n"
+        self.device.write_termination = "\n"
+        self.device.timeout = self.timeout_ms
+        print(f"Timeout set to {self.timeout_ms}")
+        id = self.device.query("*IDN?").strip()
+        print(f"IDN:{id}")
+        if "DG1" not in id.upper():
+            print("WARNING: this does not look like a DG1022Z. Double-check the "
+                  "resource address.")
+        print("OK - connection works.")
+
+    def _close(self):
+        self.device.write(":OUTP1 OFF;:OUTP2 OFF")
+        self.device.close()
+
+    def _calibrate_offset(self):
+        self.dcinit()
+        print("Calibrate the X axis")
+        print(f"Starting at {self.xoffset}")
+        print("Controls: [UP/DOWN] Change number | [s] Save\n")
+        while True:
+            key = readchar.readkey()
+
+            if key == readchar.key.UP:
+                self.xoffset += 0.01
+                print(f"Current offset: {self.xoffset}    ", end='\r') 
+                
+            elif key == readchar.key.DOWN:
+                self.xoffset -= 0.01
+                print(f"Current offset: {self.xoffset}    ", end='\r')
+                
+            elif key.lower() == 's':
+                print(f"\n[Saved] Number stored as: {self.xoffset}")
+                print(f"Current number: {self.xoffset}    ", end='\r')
+                break
+
+        print("Calibrate the X axis")
+        print(f"Starting at {self.yoffset}")
+        while True:
+            key = readchar.readkey()
+
+            if key == readchar.key.UP:
+                self.yoffset += 0.01
+                print(f"Current offset: {self.yoffset}    ", end='\r') 
+                
+            elif key == readchar.key.DOWN:
+                self.yoffset -= 0.01
+                print(f"Current offset: {self.yoffset}    ", end='\r')
+                
+            elif key.lower() == 's':
+                print(f"\n[Saved] Number stored as: {self.yoffset}")
+                print(f"Current number: {self.yoffset}    ", end='\r')
+                break   
+
+    def dcinit(self):
+        self.device.write(f":OUTPut1:LOAD INFinity;:OUTPut2:LOAD INFinity")
+        self.device.write(f":SOURce1:APPLy:DC 1,1,{self.xoffset:.3f}")
+        self.device.write(f":SOURce2:APPLy:DC 1,1,{self.yoffset:.3f}")
+        self.device.write(":OUTP1 ON;:OUTP2 ON")
+
+    def update(self, ch:int, val:float):
+        if ch == 1:
+            self.xpos = val
+            val = self.xpos + self.xoffset
+        if ch == 2:
+            self.ypos = val 
+            val = self.ypos + self.yoffset
+        self.device.write(f"SOURce{ch}:VOLTage:OFFSet {val:.3f}")
+
+    def move(self, ch:int, endval:float, t:float=1.0, resolution:int=60):
+        if ch == 1:
+            if endval > self.xpos:
+                step = 1/resolution
+            if endval < self.xpos:
+                step = -1/resolution
+            else: return
+            for i in np.arange(self.xpos, endval, step):
+                self.device.write(f"SOURce1:VOLTage:OFFSet {(self.xoffset + i):.3f}")
+                time.sleep(t/resolution)
+            self.xpos = endval
+
+        if ch == 2:
+            if endval > self.ypos:
+                step = 1/resolution
+            if endval < self.ypos:
+                step = -1/resolution
+            else: return
+            for i in np.arange(self.ypos, endval, step):
+                self.device.write(f"SOURce2:VOLTage:OFFSet {(self.yoffset + i):.3f}")
+                time.sleep(t/resolution)
+            self.ypos = endval
+    
+    def sininit(self, freq=0.0:float, amp=0.0:float, phase=0.0):
+        if freq == 0:
+            freq = self.freq
+        if amp = 0:
+            amp = self.amp
+        if phase = 0:
+            phase = self.phase
+
+        x = self.xoffset + self.xpos
+        y = self.yoffset + self.ypos
+        self.device.write(f":SOUR1:APPL:SIN {freq},{amp},{x},{phase}")
+        self.device.write(f":SOUR2:APPL:SIN {freq},{amp},{y},{phase}")
+
+    def sinupdate(self, ch:int, freq=0, amp=0, phase=0):
+        if freq == 0:
+            freq = self.freq
+        if amp = 0:
+            amp = self.amp
+        if phase = 0:
+            phase = self.phase
+
+        self.device.write(f":SOURce{ch}:FREQ {freq}")
+        self.device.write(f":SOURce{ch}:PHAS {phase}")
+        self.device.write(f":SOURce{ch}:VOLT {amp}")
+
+        self.freq = freq
+        self.amp = amp
+        self.phase = phase
+
+
+## DO NOT USE ANYTHING IN THIS FILE THAT IS COMMENTED HERE BELOW
+'''
     def _recover(self):
         # A single hiccup must not crash the app: abort/clear the stalled USBTMC
         # session, then fully reconnect with a short backoff before the caller retries.
         self.reconnects += 1
         try:
-            self.inst.clear()          # USBTMC abort/clear - un-wedges a stalled session
+            self.device.clear()          # USBTMC abort/clear - un-wedges a stalled session
         except Exception:
             pass
         try:
-            self.inst.close()
+            self.device.close()
         except Exception:
             pass
         time.sleep(self._backoff_s)
@@ -101,8 +209,8 @@ class WaveGen:
 
     def close(self):
         try:
-            if self.inst is not None:
-                self.inst.close()
+            if self.device is not None:
+                self.device.close()
         finally:
             if self.rm is not None:
                 self.rm.close()
@@ -118,11 +226,11 @@ class WaveGen:
     # ============================================================================
     def command(self, cmd):
         """Send one SCPI command, no response."""
-        return self._io(lambda: self.inst.write(cmd))
+        return self._io(lambda: self.device.write(cmd))
 
     def query(self, cmd):
         """Send one SCPI query, return the stripped string response."""
-        return self._io(lambda: self.inst.query(cmd).strip())
+        return self._io(lambda: self.device.query(cmd).strip())
 
     def query_float(self, cmd):
         return float(self.query(cmd))
@@ -283,7 +391,7 @@ class WaveGen:
             dac = [max(0, min(16383, int(p))) for p in points]
         # DAC16 words are 16-bit little-endian, valid range 0..16383; END = final block.
         prefix = f"{self._src(channel)}:TRAC:DATA:DAC16 VOLATILE,END,"
-        self._io(lambda: self.inst.write_binary_values(prefix, dac, datatype="H", is_big_endian=False))
+        self._io(lambda: self.device.write_binary_values(prefix, dac, datatype="H", is_big_endian=False))
         self.query("*OPC?")                                    # wait for transfer to finish
         self.command(f"{self._src(channel)}:FUNC USER")        # ASSUMPTION: selects the volatile arb
 
@@ -336,10 +444,11 @@ class WaveGen:
 # Smoke test
 # ================================================================================
 if __name__ == "__main__":
-    with WaveGen() as gen:                 # edit the default resource string to match your unit
+    with DG1022Z() as gen:                 # edit the default resource string to match your unit
         print("IDN          :", gen.idn())
         print("CH1 function :", gen.get_function(1))
         print("CH1 frequency:", gen.get_frequency(1))
         print("CH1 load     :", gen.query(":OUTP1:LOAD?"))
         print("Errors       :", gen.get_errors())
         print("Reconnects   :", gen.reconnects)
+        '''

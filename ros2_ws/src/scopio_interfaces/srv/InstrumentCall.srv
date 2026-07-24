@@ -1,14 +1,13 @@
 # Call ANY public method on an instrument driver class living inside a node.
 #
 # This is the generic "the node owns the whole driver, the client picks what to
-# use" surface (galvo_node -> WaveGen, temperature_node -> TCLab). One service
-# covers every present and future capability of the instrument, so the ROS
-# contract never grows a method-per-service combinatorial API and the node
-# stays instrument-agnostic.
+# use" surface (galvo_node -> DG1022Z). One service covers every present and
+# future capability of the instrument, so the ROS contract never grows a
+# method-per-service combinatorial API and the node stays instrument-agnostic.
 #
-#   method: "set_setpoint"   args: "[25.0]"                    kwargs: ""
-#   method: "apply_sine"     args: "[1000, 2.0]"               kwargs: "{\"channel\": 2}"
-#   method: "command"        args: "[\":OUTPut1 ON\"]"         kwargs: ""
+#   method: "dcupdate"       args: "[1, 0.20]"                 kwargs: ""
+#   method: "dcinit"         args: ""                          kwargs: ""
+#   method: "sinupdate"      args: "[1]"                       kwargs: "{\"freq\": 50}"
 #   method: "list_methods"   args: ""                          kwargs: ""
 #
 # Discoverability: call "list_methods" -- it returns the name, signature and
