@@ -2,8 +2,11 @@ import time
 import threading
 import pyvisa
 import os
-import readchar
-import numpy as np
+
+try:
+    import readchar
+except ImportError:            # interactive-only (used by _calibrate_offset); may be absent
+    readchar = None
 
 class DG1022Z:
     def __init__(self, resource="", timeout_ms=5000, backoff_s=0.5):
@@ -160,9 +163,9 @@ class DG1022Z:
     def sininit(self, freq=0.0:float, amp=0.0:float, phase=0.0):
         if freq == 0:
             freq = self.freq
-        if amp = 0:
+        if amp == 0:
             amp = self.amp
-        if phase = 0:
+        if phase == 0:
             phase = self.phase
 
         x = self.xoffset + self.xpos
@@ -173,9 +176,9 @@ class DG1022Z:
     def sinupdate(self, ch:int, freq=0, amp=0, phase=0):
         if freq == 0:
             freq = self.freq
-        if amp = 0:
+        if amp == 0:
             amp = self.amp
-        if phase = 0:
+        if phase == 0:
             phase = self.phase
 
         self.device.write(f":SOURce{ch}:FREQ {freq}")
