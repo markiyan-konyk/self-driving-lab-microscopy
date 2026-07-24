@@ -52,7 +52,7 @@ class DG1022Z:
         
         self.rm = None
         self.device = None
-        self._open_debug
+        self._open_debug()
 
     def _open(self):
         self.rm = pyvisa.ResourceManager("@py")
