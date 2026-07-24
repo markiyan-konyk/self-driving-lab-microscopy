@@ -41,25 +41,29 @@ class DG1022Z:
     NORMAL = "NORMal"; INVERTED = "INVerted"
 
     def __init__(self, resource="", timeout_ms=5000, backoff_s=0.5):
-        # Ethernet (TCPIP/VXI-11) is strongly preferred inside Docker: USB (USBTMC)
-        # needs device passthrough and re-enumerates on any clear/reset, breaking the
-        # session. A USB resource string looks like: USB0::0x1AB1::0x0642::SERIAL::INSTR
         self.resource = resource
         self.timeout_ms = timeout_ms
         self._backoff_s = backoff_s
         self._lock = threading.RLock()   # VISA sessions are NOT thread-safe
         self.reconnects = 0
-        
         self.rm = None
         self.device = None
 
+        self.xoffset:float = 0
+        self.yoffset:float = 0
+
+
     def _open(self):
         self.rm = pyvisa.ResourceManager("@py")
+        env = os.environ.get("DAC_ID")
+        if env:
+            self.resource = env
         if not self.resource:
             resources = self.rm.list_resources('USB?*INSTR')
             if not resources:
                 raise RuntimeError("No USB VISA instruments found. Check physical connection.")
-            self.device= self.rm.open_resource(resources[0])
+            self.resource = resources[0]
+            self.device = self.rm.open_resource(self.resource)
         else:
             self.device = self.rm.open_resource(self.resource)
         self.device.read_termination = "\n"
@@ -70,7 +74,7 @@ class DG1022Z:
         self.rm = pyvisa.ResourceManager("@py")
         env = os.environ.get("DAC_ID")
         if env:
-            return env
+            self.resource = env
         else:
             print("No os.environ input detected")
         
@@ -101,6 +105,19 @@ class DG1022Z:
                   "resource address.")
         print("OK - connection works.")
 
+    def close(self):
+        self.device.write(":OUTP1 OFF;:OUTP2 OFF")
+        self.device.close()
+
+    def dcinit(self):
+        self.device.write(f":OUTPut1:LOAD INFinity;:OUTPut2:LOAD INFinity")
+        self.device.write(f":SOURce1:APPLy:DC 1,1,{self.xoffset:.3f}")
+        self.device.write(f":SOURce2:APPLy:DC 1,1,{self.yoffset:.3f}")
+        self.device.write(":OUTP1 ON;:OUTP2 ON")
+
+    def dcupdate(self, ch:int, val:float):
+        self.device.write(f"SOURce{ch}:VOLTage:OFFSet {val:.3f}")
+'''
     def _recover(self):
         # A single hiccup must not crash the app: abort/clear the stalled USBTMC
         # session, then fully reconnect with a short backoff before the caller retries.
@@ -369,3 +386,4 @@ if __name__ == "__main__":
         print("CH1 load     :", gen.query(":OUTP1:LOAD?"))
         print("Errors       :", gen.get_errors())
         print("Reconnects   :", gen.reconnects)
+        '''
