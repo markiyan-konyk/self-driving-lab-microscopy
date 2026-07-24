@@ -52,7 +52,6 @@ class DG1022Z:
         
         self.rm = None
         self.device = None
-        self._open_debug()
 
     def _open(self):
         self.rm = pyvisa.ResourceManager("@py")
@@ -95,6 +94,12 @@ class DG1022Z:
         self.device.write_termination = "\n"
         self.device.timeout = self.timeout_ms
         print(f"Timeout set to {self.timeout_ms}")
+        id = self.device.query("*IDN?").strip()
+        print(f"IDN:{id}")
+        if "DG1" not in id.upper():
+            print("WARNING: this does not look like a DG1022Z. Double-check the "
+                  "resource address.")
+        print("OK - connection works.")
 
     def _recover(self):
         # A single hiccup must not crash the app: abort/clear the stalled USBTMC
