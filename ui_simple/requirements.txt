@@ -1,0 +1,8 @@
+# SCOPIO UI (standalone API client) Python deps.
+#
+# No ROS, no Docker: the UI talks to the microscope's API gateway over
+# HTTP/WebSocket through the scopio_client SDK.
+flask
+opencv-python
+numpy
+-e ../scopio_client

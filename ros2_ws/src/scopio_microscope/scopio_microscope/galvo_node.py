@@ -68,6 +68,7 @@ class GalvoNode(Node):
         self.declare_parameter("timeout_ms", 15000)
         self.declare_parameter("reconnect_period", 15.0)
         self.declare_parameter("auto_discover", True)
+        self.declare_parameter("init_on_connect", True)
 
         self._lock = threading.Lock()   # guards _gen swaps; VISA I/O is locked inside DG1022Z
         self.gen = None
@@ -126,6 +127,15 @@ class GalvoNode(Node):
             gen = DG1022Z(resource, timeout_ms=int(self.get_parameter("timeout_ms").value))
             gen._open()
             idn = gen.device.query("*IDN?").strip()
+            # Put both channels in DC mode at their offsets with outputs ON, so a
+            # client's `update(ch, val)` positions the galvo immediately -- no
+            # separate init call needed. Best-effort: a connected-but-uninitable
+            # AWG still counts as connected. (Set init_on_connect:false to skip.)
+            if self.get_parameter("init_on_connect").value:
+                try:
+                    gen.dcinit()
+                except Exception as exc:
+                    self.get_logger().warning(f"AWG dcinit failed ({exc}).")
             with self._lock:
                 self.gen = gen
                 self.idn = idn

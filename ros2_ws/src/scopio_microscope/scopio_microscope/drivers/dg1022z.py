@@ -2,6 +2,7 @@ import time
 import threading
 import pyvisa
 import os
+import numpy as np   # used by move() for fractional stepping
 
 try:
     import readchar
@@ -160,7 +161,7 @@ class DG1022Z:
                 time.sleep(t/resolution)
             self.ypos = endval
     
-    def sininit(self, freq=0.0:float, amp=0.0:float, phase=0.0):
+    def sininit(self, freq: float = 0.0, amp: float = 0.0, phase: float = 0.0):
         if freq == 0:
             freq = self.freq
         if amp == 0:

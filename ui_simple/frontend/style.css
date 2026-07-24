@@ -63,39 +63,12 @@ main {
     letter-spacing: 2.2px; text-transform: uppercase;
 }
 
-/* ===== Left column: galvo laser + recordings library ===== */
+/* ===== Recordings library (left) ===== */
 .library {
     display: flex; flex-direction: column; min-height: 0;
     padding: 14px; border: 1px solid var(--line); border-radius: 12px;
     background: var(--panel);
 }
-
-/* Galvo laser (top) — X = CH1, Y = CH2. Sliders only stage a value; nothing is
-   sent to the wavegen until "Update Galvo" is pressed (its buffer is small). */
-.galvo-section {
-    display: flex; flex-direction: column; gap: 10px;
-    padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line);
-}
-.galvo-status { color: var(--muted); font-family: var(--mono); font-size: 12px; }
-.galvo-status.on { color: var(--accent-bright); }
-.galvo-status.off { color: #fca5a5; }
-.galvo-slider { display: flex; flex-direction: column; gap: 6px; }
-.galvo-head { display: flex; align-items: center; gap: 6px; }
-.galvo-axis { color: var(--text); font-weight: 800; font-size: 14px; }
-.galvo-ch { color: var(--muted); font-family: var(--mono); font-size: 10.5px; letter-spacing: .5px; }
-.galvo-val {
-    margin-left: auto; min-height: 30px; width: 64px;
-    border: 1px solid var(--line); border-radius: 7px;
-    background: var(--bg); color: var(--text); font: inherit; font-size: 13px;
-    text-align: center; font-variant-numeric: tabular-nums; padding: 2px; outline: none;
-}
-.galvo-val:focus { border-color: var(--accent); }
-.galvo-section input[type=range] { width: 100%; accent-color: var(--accent); }
-.galvo-update { min-height: 46px; }
-.galvo-section.disabled input[type=range], .galvo-section.disabled .galvo-val { opacity: .5; }
-
-/* Recordings (below the galvo) fills the remaining height */
-.rec-library { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
 .rec-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; padding-right: 2px; }
 .rec-empty { color: var(--muted); font-size: 13px; text-align: center; margin-top: 20px; }
 .rec-item {

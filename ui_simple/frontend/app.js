@@ -521,56 +521,6 @@
         resizeOverlay();
 
         // ============================================================
-        //  Galvo laser  (X = CH1, Y = CH2)
-        // ============================================================
-        // The wavegen buffer is tiny, so we DELIBERATELY do not stream on slider
-        // drag: moving a slider only stages a value in its number box. Nothing
-        // reaches the instrument until the operator clicks "Update Galvo", which
-        // sends exactly one update() per channel.
-        const galvoX = $('galvoX'), galvoY = $('galvoY');
-        const galvoXVal = $('galvoXVal'), galvoYVal = $('galvoYVal');
-        const galvoUpdateBtn = $('galvoUpdateBtn'), galvoReadout = $('galvoReadout');
-        const galvoSection = document.querySelector('.galvo-section'), galvoStatusEl = $('galvoStatus');
-        let galvoConnected = false;
-
-        const clampGalvo = v => { v = parseFloat(v); return isFinite(v) ? Math.max(-5, Math.min(5, v)) : 0; };
-        function stageGalvo(slider, box, v) { v = clampGalvo(v); slider.value = v; box.value = v.toFixed(2); }
-
-        // Slider drag -> update the paired number box only (no network traffic).
-        galvoX.addEventListener('input', () => { galvoXVal.value = clampGalvo(galvoX.value).toFixed(2); });
-        galvoY.addEventListener('input', () => { galvoYVal.value = clampGalvo(galvoY.value).toFixed(2); });
-        galvoXVal.addEventListener('change', () => stageGalvo(galvoX, galvoXVal, galvoXVal.value));
-        galvoYVal.addEventListener('change', () => stageGalvo(galvoY, galvoYVal, galvoYVal.value));
-
-        function setGalvoStatus(connected) {
-            galvoConnected = !!connected;
-            galvoSection.classList.toggle('disabled', !galvoConnected);
-            galvoUpdateBtn.disabled = !galvoConnected;
-            galvoStatusEl.textContent = galvoConnected ? 'Galvo online' : 'Galvo offline';
-            galvoStatusEl.className = 'galvo-status ' + (galvoConnected ? 'on' : 'off');
-        }
-
-        galvoUpdateBtn.addEventListener('click', async () => {
-            if (!galvoConnected) { msg('Galvo offline'); return; }
-            const x = clampGalvo(galvoX.value), y = clampGalvo(galvoY.value);
-            galvoUpdateBtn.disabled = true;
-            try {
-                const d = await (await postJSON('/galvo/update', { x, y })).json();
-                if (d.error) throw new Error(d.error);
-                setGalvoStatus(d.connected);
-                galvoReadout.textContent = `CH1 ${x.toFixed(2)} V · CH2 ${y.toFixed(2)} V`;
-                msg('Galvo updated.');
-            } catch (e) { msg('Galvo update failed: ' + e.message); }
-            finally { galvoUpdateBtn.disabled = !galvoConnected; }
-        });
-
-        async function pollGalvo() {
-            try { setGalvoStatus((await (await request('/galvo/status')).json()).connected); }
-            catch (e) { setGalvoStatus(false); }
-        }
-        setInterval(pollGalvo, 3000); pollGalvo();
-
-        // ============================================================
         //  Mobile mode
         // ============================================================
         $('mobileToggle').addEventListener('click', () => {

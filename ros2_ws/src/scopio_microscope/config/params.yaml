@@ -26,6 +26,8 @@
     # wins over this -- that file is the one place the rig is described.
     resource: ""
     auto_discover: true      # set false (+ resource) when several USB instruments share the bus
+    init_on_connect: true    # on connect, put both channels in DC mode + outputs ON (dcinit),
+                             # so a client's update(ch,val) moves the galvo right away. false => leave as-is.
     publish_rate: 5.0        # Hz, AwgStatus
     reconnect_period: 15.0   # s between reconnect attempts while offline
     # VISA read/write timeout. Bumped from 5000: a large arbitrary-waveform

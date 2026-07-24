@@ -110,7 +110,6 @@ class State:
         self.stream_fps = 0.0       # measured fps of the ingested stream
         self.camera = None          # camera/state message dict
         self.stage = None           # stage/position message dict
-        self.awg = None             # awg/status message dict (galvo wavegen)
         self.beads = None           # beads message dict
         self.calibration = None     # calibration message dict (latched)
         self.connected = False      # gateway subscriptions established
@@ -148,7 +147,6 @@ def _subscribe_loop():
         try:
             scope.subscribe("camera/state", store("camera"), rate_hz=4)
             scope.subscribe("stage/position", store("stage"), rate_hz=10)
-            scope.subscribe("awg/status", store("awg"), rate_hz=2)
             scope.subscribe("beads", store("beads"), rate_hz=5)
             scope.subscribe("calibration", store("calibration"))
             state.connected = True
@@ -432,46 +430,6 @@ def set_calibration():
     except ScopioError as e:
         return jsonify({"error": str(e)}), 503
     return jsonify({"um_per_px": um / px, "ref_pixels": px, "ref_micrometres": um})
-
-
-# ---- galvo laser (X = CH1, Y = CH2 on the Rigol DG1022Z) ----
-# The galvo_node owns the DG1022Z driver and exposes its methods over awg/call;
-# we call update(ch, val) through the scopio_client SDK. The node runs dcinit()
-# on connect (DC mode + outputs on), so update() positions the mirror right
-# away. The wavegen buffer is small, so the UI sends ONE update per button
-# press -- never on slider drag.
-_galvo = {"x": 0.0, "y": 0.0}     # last commanded volts, for display
-GALVO_V_MIN, GALVO_V_MAX = -5.0, 5.0
-
-
-def _galvo_connected():
-    with state.lock:
-        awg = state.awg
-    return bool(awg and awg["connected"])
-
-
-@app.route("/galvo/status")
-@login_required
-def galvo_status():
-    return jsonify({"connected": _galvo_connected(), "x": _galvo["x"], "y": _galvo["y"]})
-
-
-@app.route("/galvo/update", methods=["POST"])
-@login_required
-def galvo_update():
-    d = request.get_json() or {}
-    try:
-        x = max(GALVO_V_MIN, min(GALVO_V_MAX, float(d.get("x", 0.0))))
-        y = max(GALVO_V_MIN, min(GALVO_V_MAX, float(d.get("y", 0.0))))
-    except (TypeError, ValueError):
-        return jsonify({"error": "x and y must be numbers"}), 400
-    try:
-        scope.galvo.call("update", 1, x)      # DG1022Z.update(ch=1, val=x)
-        scope.galvo.call("update", 2, y)      # DG1022Z.update(ch=2, val=y)
-    except ScopioError as e:
-        return jsonify({"error": str(e)}), 503
-    _galvo["x"], _galvo["y"] = x, y
-    return jsonify({"connected": _galvo_connected(), "x": x, "y": y})
 
 
 # ========== Client-side recording ==========

@@ -20,39 +20,12 @@ __STYLE__
     </div>
 
     <main>
-        <!-- ===== LEFT: galvo laser + recordings library ===== -->
+        <!-- ===== LEFT: recordings library ===== -->
         <aside class="library">
-            <!-- Galvo laser: X = CH1, Y = CH2 on the Rigol wavegen -->
-            <section class="galvo-section">
-                <p class="section-title">Galvo Laser</p>
-                <div class="galvo-status off" id="galvoStatus">Connecting…</div>
-                <div class="galvo-slider">
-                    <div class="galvo-head">
-                        <span class="galvo-axis">X</span><span class="galvo-ch">CH1</span>
-                        <input type="number" class="galvo-val" id="galvoXVal" min="-5" max="5" step="0.01" value="0.00">
-                        <span class="ctrl-unit">V</span>
-                    </div>
-                    <input type="range" id="galvoX" min="-5" max="5" step="0.01" value="0">
-                </div>
-                <div class="galvo-slider">
-                    <div class="galvo-head">
-                        <span class="galvo-axis">Y</span><span class="galvo-ch">CH2</span>
-                        <input type="number" class="galvo-val" id="galvoYVal" min="-5" max="5" step="0.01" value="0.00">
-                        <span class="ctrl-unit">V</span>
-                    </div>
-                    <input type="range" id="galvoY" min="-5" max="5" step="0.01" value="0">
-                </div>
-                <button id="galvoUpdateBtn" class="action-btn primary galvo-update">Update Galvo</button>
-                <div class="measure-readout" id="galvoReadout">—</div>
-            </section>
-
-            <!-- Recordings -->
-            <section class="rec-library">
-                <p class="section-title">Recordings</p>
-                <div class="rec-list" id="recordingsList">
-                    <p class="rec-empty" id="recEmpty">No recordings yet.</p>
-                </div>
-            </section>
+            <p class="section-title">Recordings</p>
+            <div class="rec-list" id="recordingsList">
+                <p class="rec-empty" id="recEmpty">No recordings yet.</p>
+            </div>
         </aside>
 
         <!-- ===== CENTER: live video ===== -->
