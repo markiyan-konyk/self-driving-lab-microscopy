@@ -1,22 +1,3 @@
-"""
-wavegen.py - Clean SCPI driver for the Rigol DG1022Z function/arbitrary waveform generator.
-
-The DG1022Z is the 25 MHz, 2-channel member of Rigol's DG1000Z series; every command
-below is mapped from the DG1000Z Programming Guide (RIGOL, pub. PGB09106). Numeric
-queries return decimal/scientific notation - there is no hex/2's-complement return mode
-on this series to disable.
-
-Install:
-    pip install pyvisa pyvisa-py         # pure-Python backend, no NI-VISA needed
-
-Quick start:
-    from wavegen import WaveGen
-    gen = WaveGen("TCPIP::192.168.1.10::INSTR")          # Ethernet: preferred in Docker
-    gen.reset()
-    gen.apply_sine(freq=1_000, amp=2.0, offset=0.0, phase=0.0, channel=1)
-    gen.set_output_load(1, gen.HIGH_Z); gen.output(True, 1)   # amplitude ~doubles vs 50 ohm!
-"""
-
 import time
 import threading
 import pyvisa
@@ -24,23 +5,6 @@ import os
 import readchar
 
 class DG1022Z:
-    CH1, CH2 = 1, 2
-
-    SINE = "SIN"; SQUARE = "SQU"; RAMP = "RAMP"; PULSE = "PULS"
-    NOISE = "NOIS"; DC = "DC"; USER = "USER"; HARMONIC = "HARM"
-
-    HIGH_Z = "INFinity"          # High-Z; pass a number (e.g. 50) for a fixed load
-    LOAD_50 = 50
-
-    TRIG_INTERNAL = "INTernal"; TRIG_EXTERNAL = "EXTernal"; TRIG_MANUAL = "MANual"
-    MOD_INTERNAL = "INTernal"; MOD_EXTERNAL = "EXTernal"
-
-    SWEEP_LINEAR = "LINear"; SWEEP_LOG = "LOGarithmic"; SWEEP_STEP = "STEp"
-    BURST_TRIGGERED = "TRIGgered"; BURST_GATED = "GATed"; BURST_INFINITE = "INFinity"
-
-    VPP = "VPP"; VRMS = "VRMS"; DBM = "DBM"
-    NORMAL = "NORMal"; INVERTED = "INVerted"
-
     def __init__(self, resource="", timeout_ms=5000, backoff_s=0.5):
         self.resource = resource
         self.timeout_ms = timeout_ms
@@ -50,6 +14,8 @@ class DG1022Z:
         self.rm = None
         self.device = None
 
+        self.xpos = 0
+        self.ypos = 0
         self.xoffset:float = 0
         self.yoffset:float = 0
 
@@ -157,6 +123,20 @@ class DG1022Z:
 
     def dcupdate(self, ch:int, val:float):
         self.device.write(f"SOURce{ch}:VOLTage:OFFSet {val:.3f}")
+        if ch == 1:
+            self.xpos = val
+        if ch == 2:
+            self.ypos = val
+    
+    def sininit(self, freq="10.0":float, amp="0.0":float, phase="0.0":float):
+        x = self.xoffset + self.xpos
+        y = self.yoffset + self.ypos
+        self.device.write(f":SOUR1:APPL:SIN {freq},{amp},{x},{phase}")
+        self.device.write(f":SOUR2:APPL:SIN {freq},{amp},{y},{phase}")
+
+    def sinupdate():
+
+## DO NOT USE ANYTHING IN THIS FILE THAT IS COMMENTED HERE BELOW
 '''
     def _recover(self):
         # A single hiccup must not crash the app: abort/clear the stalled USBTMC
