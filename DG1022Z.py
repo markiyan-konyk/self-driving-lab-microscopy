@@ -122,11 +122,14 @@ class DG1022Z:
         self.device.write(":OUTP1 ON;:OUTP2 ON")
 
     def dcupdate(self, ch:int, val:float):
-        self.device.write(f"SOURce{ch}:VOLTage:OFFSet {val:.3f}")
         if ch == 1:
             self.xpos = val
+            val = self.xpos + self.xoffset
         if ch == 2:
             self.ypos = val
+            val = self.ypos + self.yoffset
+
+        self.device.write(f"SOURce{ch}:VOLTage:OFFSet {val:.3f}")
     
     def sininit(self, freq="10.0":float, amp="0.0":float, phase="0.0":float):
         x = self.xoffset + self.xpos
@@ -135,6 +138,7 @@ class DG1022Z:
         self.device.write(f":SOUR2:APPL:SIN {freq},{amp},{y},{phase}")
 
     def sinupdate():
+
 
 ## DO NOT USE ANYTHING IN THIS FILE THAT IS COMMENTED HERE BELOW
 '''

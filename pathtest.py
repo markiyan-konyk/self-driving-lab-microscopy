@@ -15,12 +15,16 @@ The loop is closed: after each bead is placed, the bead positions are read again
 (here from the simulation, on the microscope from the tracker) and the planner
 picks the next bead from scratch.
 
-Run:  python pathtest.py        [SPACE] fast-forward   [R] reset   [ESC] quit
+Run:  python pathtest.py                simulation only
+      python pathtest.py --galvo        also drive the real DG1022Z
+      [SPACE] fast-forward   [R] reset   [ESC] quit
 """
 
+import argparse
 import heapq
 import math
 import random
+import time
 from collections import namedtuple
 
 import numpy as np
@@ -47,6 +51,11 @@ TURN_COST = 120.0       # a channel switch costs this many px of travel
 CROWD_R = 160.0         # targets with neighbours inside this radius ...
 CROWD_W = 90.0          # ... get this bonus each, so tight spots are filled first
 ESCAPE_D = 70.0         # how far to slew away to drop a bead
+
+# --- hardware ---
+VOLT = 2.0              # DC output range is -VOLT..+VOLT and spans the whole frame
+WRITE_HZ = 30.0         # cap on DC writes per second (the DG1022Z tolerates ~100)
+WRITE_STEP = 0.3        # px; smaller moves than this are not worth a command
 
 Move = namedtuple("Move", "axis value fast")   # axis 'x'|'y' -> CH1|CH2
 
@@ -254,6 +263,72 @@ class Executor:
 
 
 # =============================================================================
+#  Galvo -- mirrors the simulated beam onto the real wavegen (optional)
+# =============================================================================
+
+def to_volts(axis, px):
+    """Frame pixels -> DC volts. Each axis uses the full -VOLT..+VOLT swing."""
+    return (px / (W if axis == "x" else H) * 2.0 - 1.0) * VOLT
+
+
+class Galvo:
+    """Streams the beam position to the DG1022Z: CH1 = x, CH2 = y.
+
+    Command budget is kept low three ways: writes are capped at `hz`, a value
+    that moved less than WRITE_STEP is not sent at all, and a FAST move is sent
+    as a single endpoint write -- the galvo slews there on its own, which is
+    exactly what the simulation's "teleport" is. Over-rate updates are DROPPED,
+    never queued, so the render loop never blocks and the instrument can never
+    fall behind the simulation.
+    """
+
+    def __init__(self, hz=WRITE_HZ):
+        from DG1022Z import DG1022Z
+        self.dg = DG1022Z()
+        self.dg._open()
+        self.dg.dcinit()
+        self.period = 1.0 / hz
+        self.last = [None, None]
+        self.ch = None
+        self.t_last = self.t_next = self.t_check = 0.0
+        self.writes, self.rate, self._recent = 0, 0, []
+        self.error = ""
+
+    def write(self, pos, force=False):
+        """Send whichever channel changed. `force` lands exactly on a move's end."""
+        now = time.monotonic()
+        if not force and now < self.t_next:
+            return
+        for k, ch in ((0, 1), (1, 2)):
+            if self.last[k] is None or abs(pos[k] - self.last[k]) > (0.0 if force else WRITE_STEP):
+                if ch != self.ch and self.ch is not None:
+                    # never hit the other channel before its relay has settled.
+                    # Normally already elapsed (the plan pauses on every switch),
+                    # so this sleeps 0 -- it is the backstop, not the mechanism.
+                    time.sleep(max(0.0, SWITCH_DELAY - (now - self.t_last)))
+                self.dg.dcupdate(ch, to_volts("x" if k == 0 else "y", pos[k]))
+                self.ch, self.t_last = ch, time.monotonic()
+                self.last[k] = pos[k]
+                self.writes += 1
+                self._recent.append(self.t_last)
+        now = time.monotonic()
+        self.t_next = now + self.period
+        self._recent = [t for t in self._recent if now - t < 1.0]
+        self.rate = len(self._recent)
+
+    def check(self):
+        """Drain one error-queue entry. Call only while the beam is parked -- it
+        is a round trip, and a clean queue is the proof nothing is backing up."""
+        now = time.monotonic()
+        if now >= self.t_check:
+            self.t_check = now + 1.0
+            self.error = self.dg.device.query(":SYSTem:ERRor?").strip()
+
+    def close(self):
+        self.dg._close()
+
+
+# =============================================================================
 #  Simulation
 # =============================================================================
 
@@ -307,7 +382,7 @@ def to_screen(p):
     return int(p[0] * SCALE), int(p[1] * SCALE)
 
 
-def main():
+def main(use_galvo=False, hz=WRITE_HZ):
     pygame.init()
     screen = pygame.display.set_mode((int(W * SCALE), int(H * SCALE)))
     pygame.display.set_caption("optical tweezer path test")
@@ -322,85 +397,88 @@ def main():
     held, cycle, plan, trail = None, 0, [], []
     running = True
 
-    while running:
-        dt = clock.tick(60) / 1000.0
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
-                running = False
-            elif e.type == pygame.KEYDOWN and e.key == pygame.K_r:
-                beads, laser, ex = spawn_beads(9, rng), (EDGE, EDGE), Executor()
-                held, cycle, plan, trail = None, 0, [], []
-        if pygame.key.get_pressed()[pygame.K_SPACE]:
-            dt *= 6
+    galvo = Galvo(hz) if use_galvo else None
+    if galvo:
+        galvo.write(laser, force=True)
 
-        if not ex.busy:
-            # closed loop: re-read every bead position, then plan the next one
-            held, moves = plan_next(list(beads), targets, laser)
-            if moves:
-                ex.load(moves)
-                plan = move_points(laser, moves)
-                cycle += 1
-            else:
-                held = None
+    try:
+        while running:
+            dt = clock.tick(60) / 1000.0
+            for e in pygame.event.get():
+                if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
+                    running = False
+                elif e.type == pygame.KEYDOWN and e.key == pygame.K_r:
+                    beads, laser, ex = spawn_beads(9, rng), (EDGE, EDGE), Executor()
+                    held, cycle, plan, trail = None, 0, [], []
+            # fast-forward is simulation-only: with the galvo attached the beam
+            # has to move in real time or it is not the same test.
+            if pygame.key.get_pressed()[pygame.K_SPACE] and not galvo:
+                dt *= 6
 
-        laser = ex.step(laser, min(dt, 0.05))
-        pull_beads(beads, laser, min(dt, 0.05))
-        trail.append(laser)
-        trail = trail[-260:]
+            if not ex.busy:
+                # closed loop: re-read every bead position, then plan the next one
+                held, moves = plan_next(list(beads), targets, laser)
+                if moves:
+                    ex.load(moves)
+                    plan = move_points(laser, moves)
+                    cycle += 1
+                else:
+                    held = None
 
-        screen.fill(BG)
-        for t in targets:
-            pygame.draw.circle(screen, C_TARGET, to_screen(t), int(BEAD_R * SCALE) + 3, 1)
-        if plan:
-            for i, m in enumerate(ex.moves):
-                col = C_FAST if m.fast else C_SLOW
-                pygame.draw.line(screen, col, to_screen(plan[i]), to_screen(plan[i + 1]),
-                                 1 if m.fast else 2)
-        if len(trail) > 1:
-            pygame.draw.lines(screen, (40, 70, 75), False, [to_screen(p) for p in trail], 1)
-        for i, b in enumerate(beads):
-            pygame.draw.circle(screen, C_HELD if i == held else C_BEAD,
-                               to_screen(b), max(2, int(BEAD_R * SCALE)))
-        pygame.draw.circle(screen, (255, 60, 40), to_screen(laser), int(LASER_R * SCALE), 1)
-        pygame.draw.circle(screen, (255, 60, 40), to_screen(laser), int(TRAP_R * SCALE), 1)
+            dt = min(dt, 0.05)
+            move, i0 = (ex.moves[ex.i] if ex.busy else None), ex.i
+            laser = ex.step(laser, dt)
+            pull_beads(beads, laser, dt)
+            trail.append(laser)
+            trail = trail[-260:]
 
-        left = sum(1 for ti, t in enumerate(targets)
-                   if min(math.dist(b, t) for b in beads) > PLACED_TOL)
-        hud = [f"cycle {cycle}   bead {held if held is not None else '-'}   remaining {left}",
-               f"channel {ex.axis or '-'}   switches {ex.switches}"
-               f"   move {min(ex.i + 1, len(ex.moves))}/{len(ex.moves)}",
-               "SPACE fast-forward   R reset   ESC quit"]
-        for i, line in enumerate(hud):
-            screen.blit(font.render(line, True, C_TEXT), (10, 8 + i * 18))
-        pygame.display.flip()
+            if galvo and move:
+                if not move.fast:
+                    galvo.write(laser)                 # rate-limited drag stream
+                if ex.i != i0:
+                    galvo.write(laser, force=True)     # land exactly on the endpoint
+            if galvo and (ex.wait > 0 or not ex.busy):
+                galvo.check()                          # only while the beam is parked
 
-    pygame.quit()
+            screen.fill(BG)
+            for t in targets:
+                pygame.draw.circle(screen, C_TARGET, to_screen(t), int(BEAD_R * SCALE) + 3, 1)
+            if plan:
+                for i, m in enumerate(ex.moves):
+                    col = C_FAST if m.fast else C_SLOW
+                    pygame.draw.line(screen, col, to_screen(plan[i]), to_screen(plan[i + 1]),
+                                     1 if m.fast else 2)
+            if len(trail) > 1:
+                pygame.draw.lines(screen, (40, 70, 75), False, [to_screen(p) for p in trail], 1)
+            for i, b in enumerate(beads):
+                pygame.draw.circle(screen, C_HELD if i == held else C_BEAD,
+                                   to_screen(b), max(2, int(BEAD_R * SCALE)))
+            pygame.draw.circle(screen, (255, 60, 40), to_screen(laser), int(LASER_R * SCALE), 1)
+            pygame.draw.circle(screen, (255, 60, 40), to_screen(laser), int(TRAP_R * SCALE), 1)
 
-
-# =============================================================================
-#  Hardware bridge -- the same move list, sent to the galvos instead of pygame.
-#  (not used by the simulation; kept here so the planner output stays reusable)
-# =============================================================================
-
-def run_on_galvo(dg, moves, to_volts, step_px=1.0, pos=(0.0, 0.0)):
-    """Execute a plan on a DG1022Z. `to_volts(axis, px)` is your calibration."""
-    import time
-    pos = list(pos)
-    for m in moves:
-        k = 0 if m.axis == "x" else 1
-        ch = 1 if m.axis == "x" else 2
-        time.sleep(SWITCH_DELAY)                      # let the relay settle
-        if m.fast:
-            dg.dcupdate(ch, to_volts(m.axis, m.value))   # single write = slew
-        else:
-            n = max(1, int(abs(m.value - pos[k]) / step_px))
-            for i in range(1, n + 1):
-                v = pos[k] + (m.value - pos[k]) * i / n
-                dg.dcupdate(ch, to_volts(m.axis, v))
-                time.sleep(step_px / DRAG_SPEED)
-        pos[k] = m.value
-    return tuple(pos)
+            left = sum(1 for t in targets
+                       if min(math.dist(b, t) for b in beads) > PLACED_TOL)
+            hud = [f"cycle {cycle}   bead {held if held is not None else '-'}   remaining {left}",
+                   f"channel {ex.axis or '-'}   switches {ex.switches}"
+                   f"   move {min(ex.i + 1, len(ex.moves))}/{len(ex.moves)}",
+                   f"beam  {to_volts('x', laser[0]):+.3f} V  {to_volts('y', laser[1]):+.3f} V"]
+            if galvo:
+                hud.append(f"galvo {galvo.rate:3d} wr/s   {galvo.writes} total   {galvo.error}")
+            hud.append("SPACE fast-forward   R reset   ESC quit")
+            for i, line in enumerate(hud):
+                screen.blit(font.render(line, True, C_TEXT), (10, 8 + i * 18))
+            pygame.display.flip()
+    finally:
+        if galvo:
+            galvo.close()
+        pygame.quit()
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(description="optical tweezer path test")
+    ap.add_argument("--galvo", action="store_true",
+                    help="mirror the simulated beam onto the real DG1022Z")
+    ap.add_argument("--hz", type=float, default=WRITE_HZ,
+                    help=f"max DC writes per second (default {WRITE_HZ:.0f})")
+    args = ap.parse_args()
+    main(args.galvo, args.hz)

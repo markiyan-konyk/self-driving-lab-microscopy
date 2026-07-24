@@ -27,7 +27,7 @@ def resolve_resource(verbose=True):
     if verbose:
         print("VISA resources:", resources or "(none found)")
 
-    env = os.environ.get("GALVO_RESOURCE")
+    env = os.environ.get("DAC_ID")
     if env:
         return env
 
