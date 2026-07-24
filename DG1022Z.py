@@ -83,9 +83,11 @@ class DG1022Z:
             if not resources:
                 raise RuntimeError("No USB VISA instruments found. Check physical connection.")
             print(type(resources[0]))
+            print(f"Using the device with ID:{resources[0]}")
             self.device= self.rm.open_resource(resources[0])
             print(f"Using the device with ID:{resources[0]}")
         else:
+            print(f"Using the device with ID:{resources[0]}")
             self.device = self.rm.open_resource(self.resource)
             print(f"Using the device with ID:{self.resource}")
 
