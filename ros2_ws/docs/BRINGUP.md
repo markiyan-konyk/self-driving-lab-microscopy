@@ -142,13 +142,23 @@ python3 ros2_ws/scripts/smoke_test_api.py --url http://<pi-ip>:8000 --key $KEY
 
 ## 7b. Temperature controller 💻
 
-Prove the box FIRST, off the microscope entirely — plug it into any machine and
-run `python temperature_test.py` (repo root). If that fails, nothing below can
-work. Then, on the Pi:
+Prove the box FIRST, outside Docker: `python3 tc10_read.py` (repo root) scans
+`/dev/usbtmc*` and VISA, picks the TC10 LAB and prints its temperature. If that
+fails, nothing below can work — `--debug` shows every byte exchanged.
+
+> On USB the Pi's **kernel usbtmc driver** owns this instrument (`/dev/usbtmc0`)
+> and pyvisa/libusb then *hangs* on it. That is expected, not a fault; the
+> driver talks to the char device. You need
+> `KERNEL=="usbtmc[0-9]*", MODE="0666"` from `ros2_ws/udev/` for a non-root
+> process (and the container) to open it.
+
+Then, on the Pi:
 
 - [ ] `temperature/status` shows `connected: true` in `/api/v1/status`.
-      If it's false with the controller plugged in, check `TCLAB_RESOURCE` in
-      `ros2_ws/.env` (step 0), then `docker compose up -d` to apply it.
+      If it's false with the controller plugged in, read the container log —
+      `docker compose logs scopio | grep -A6 "TC10 LAB NOT CONNECTED"` — the
+      node prints an ERROR banner saying what it tried. Then check
+      `TCLAB_RESOURCE` in `ros2_ws/.env` (step 0) and `docker compose up -d`.
 - [ ] Read it: `curl ... -d '{"method": "temperature"}' .../api/v1/service/temperature/call`
 - [ ] Drive it: `-d '{"method": "set_setpoint", "args": "[25.0]"}'`, then
       `-d '{"method": "output", "args": "[true]"}'` and watch `temperature`

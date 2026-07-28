@@ -42,6 +42,7 @@ TELEMETRY_TOPICS = [
     "stage/position",
     "camera/state",
     "awg/status",
+    "temperature/status",
     "calibration",
 ]
 
@@ -234,12 +235,13 @@ class RosBridge:
     # ---------------------------------------------------------- telemetry
     def _subscribe_telemetry(self):
         from scopio_interfaces.msg import (  # noqa: F401 (types resolved here)
-            AwgStatus, Calibration, CameraState, StagePosition,
+            AwgStatus, Calibration, CameraState, StagePosition, TemperatureStatus,
         )
         type_map = {
             "stage/position": StagePosition,
             "camera/state": CameraState,
             "awg/status": AwgStatus,
+            "temperature/status": TemperatureStatus,
             "calibration": Calibration,
         }
         for rel in TELEMETRY_TOPICS:

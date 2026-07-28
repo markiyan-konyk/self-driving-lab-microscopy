@@ -68,8 +68,8 @@ ros2 action send_goal /scopio/scan_region scopio_interfaces/action/ScanRegion \
 ```
 
 ## galvo_node — the laser AWG, exposed whole
-Owns the VISA session through the `WaveGen` driver class
-(`scopio_microscope/drivers/wavegen.py`, a copy of the repo-root `galvo.py`) and
+Owns the VISA session through the `DG1022Z` driver class
+(`scopio_microscope/drivers/dg1022z.py`, a copy of the repo-root `DG1022Z.py`) and
 offers it two ways:
 
 - `awg/call` — **any public method of the class**, by name, with JSON args:
@@ -109,30 +109,47 @@ reconnect) after a hiccup instead of a wedged node, and `send_sequence` pacing
 for the long command bursts that used to jam the session.
 
 ## temperature_node — the sample temperature controller, exposed whole
-Same pattern, for a Wavelength Electronics **TC LAB** (USB/USBTMC or
-Ethernet/VXI-11) through the `TCLab` driver class
-(`scopio_microscope/drivers/tclab.py`, a copy of the repo-root `temperature.py`).
-Every method — setpoint, PID, IntelliTune, limits, tolerance, sensor profiles,
-stored profiles/scripts, raw `command`/`query` — is callable by any client.
+Same pattern, for a Wavelength Electronics **TC10 LAB** through the `TC10LAB`
+driver class (`scopio_microscope/drivers/TC10LAB.py`). Every method — setpoint,
+PID, IntelliTune, limits, tolerance, sensor calibration, stored
+profiles/scripts, raw `command`/`query` — is callable by any client.
 
-- **Publishes:** `temperature/status` (polled at `publish_rate`).
-  **Service:** `temperature/call`.
-- **Params:** `resource` (or `TCLAB_RESOURCE`), `auto_discover`, `publish_rate`,
-  `timeout_ms`, `reconnect_period`, `units` (forced on connect so the published
-  degrees are unambiguous).
+Unlike `galvo_node` this node **polls** (`publish_rate`, default 1 Hz): a
+temperature loop is a sensor, clients want the trend, and the controller is idle
+between commands anyway.
+
+- **Publishes:** `temperature/status`. **Service:** `temperature/call`.
+- **Params:** `resource` (or `TCLAB_RESOURCE`), `publish_rate`, `timeout_ms`,
+  `reconnect_period`, `units` (forced on connect so the published degrees are
+  unambiguous; `""` leaves the instrument's own setting alone).
 
 ```bash
 ros2 topic echo /scopio/temperature/status
+ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall \
+  "{method: 'list_methods'}"                # name, signature, doc for all ~110
 ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall \
   "{method: 'set_setpoint', args: '[25.0]'}"
 ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall \
   "{method: 'output', args: '[true]'}"      # nothing heats/cools until this is on
 ```
-> **Two USB instruments, one bus:** with both the AWG and the controller on USB,
-> name `GALVO_RESOURCE` *and* `TCLAB_RESOURCE` in `ros2_ws/.env` (see
-> `.env.example`) — auto-discovery picks the first USB device it sees, which is
-> a coin flip. An Ethernet TC LAB must always be named (`TCPIP::<ip>::INSTR`);
-> pyvisa-py cannot scan the LAN.
+> **Transport:** on USB this instrument is claimed by the Pi's **kernel usbtmc
+> driver** and appears as `/dev/usbtmc0`. Once the kernel owns it, pyvisa-py /
+> libusb cannot open it — it *hangs* rather than failing — so the driver speaks
+> SCPI to the char device directly, and auto-discovery checks `/dev/usbtmc*`
+> before VISA. Set `TCLAB_RESOURCE=/dev/usbtmc0` (confirm which node is the
+> controller with `udevadm info -a -n /dev/usbtmc0 | grep -m1 idVendor` →
+> `1a45`). Give the container the node with `privileged: true` (already set) and
+> the `KERNEL=="usbtmc[0-9]*", MODE="0666"` udev rule in `ros2_ws/udev/`.
+>
+> **Two USB instruments, one bus:** with both the AWG and the controller
+> plugged in, name `GALVO_RESOURCE` *and* `TCLAB_RESOURCE` in `ros2_ws/.env`
+> (see `.env.example`). An Ethernet TC10 LAB must always be named
+> (`TCPIP::<ip>::INSTR`); pyvisa-py cannot scan the LAN.
+>
+> **It complains loudly.** No controller at startup ⇒ an ERROR banner in the
+> container log on every retry, not a quiet `connected=false`. The node still
+> comes up (the rest of the graph must not die with it) and reconnects by
+> itself once you replug.
 >
 > **Ramping is a client concern.** The controller has no ramp command, so an app
 > that wants one walks the setpoint itself (`ui/run_ui.py` does, at °/min) —

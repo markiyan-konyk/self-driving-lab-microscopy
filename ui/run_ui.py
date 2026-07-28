@@ -111,6 +111,7 @@ class State:
         self.camera = None          # camera/state message dict
         self.stage = None           # stage/position message dict
         self.awg = None             # awg/status message dict (galvo wavegen)
+        self.temp = None            # temperature/status message dict (TC10 LAB)
         self.calibration = None     # calibration message dict (latched)
         self.connected = False      # gateway subscriptions established
 
@@ -149,6 +150,12 @@ def _subscribe_loop():
             scope.subscribe("stage/position", store("stage"), rate_hz=10)
             scope.subscribe("awg/status", store("awg"), rate_hz=2)
             scope.subscribe("calibration", store("calibration"))
+            # Separate try: an older backend without temperature_node must not
+            # stop the UI from getting camera/stage/galvo telemetry.
+            try:
+                scope.subscribe("temperature/status", store("temp"), rate_hz=2)
+            except ScopioError as e:
+                log.warning(f"no temperature telemetry ({e}); controls stay offline")
             state.connected = True
             log.info("subscribed to microscope telemetry")
             return
@@ -470,6 +477,74 @@ def galvo_update():
         return jsonify({"error": str(e)}), 503
     _galvo["x"], _galvo["y"] = x, y
     return jsonify({"connected": _galvo_connected(), "x": x, "y": y})
+
+
+# ---- sample temperature (Wavelength TC10 LAB) ----
+# temperature_node owns the TC10LAB driver and exposes it over temperature/call.
+# TWO separate commands, exactly like the instrument: set_setpoint only stores a
+# target; output(True) is what actually drives the TEC. The reading comes from
+# the cached status topic, so polling the UI costs the instrument nothing.
+TEMP_MIN, TEMP_MAX = -20.0, 120.0
+
+
+def _num(v):
+    """NaN/inf -> None. The node publishes NaN while disconnected, and NaN is
+    not valid JSON -- json.dumps emits a bare `NaN` that JSON.parse rejects."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v and abs(v) != float("inf") else None
+
+
+def _temp_payload():
+    with state.lock:
+        t = state.temp
+    if not t:
+        return {"connected": False, "temperature": None, "setpoint": None,
+                "output": False, "in_tolerance": False, "units": "C", "faults": []}
+    return {"connected": bool(t["connected"]),
+            "temperature": _num(t["temperature"]), "setpoint": _num(t["setpoint"]),
+            "output": bool(t["output"]), "in_tolerance": bool(t["in_tolerance"]),
+            "units": t["units"] or "C", "faults": list(t["faults"])}
+
+
+@app.route("/temperature/status")
+@login_required
+def temperature_status():
+    return jsonify(_temp_payload())
+
+
+@app.route("/temperature/set", methods=["POST"])
+@login_required
+def temperature_set():
+    d = request.get_json() or {}
+    try:
+        sp = float(d.get("setpoint"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "setpoint must be a number"}), 400
+    if not (TEMP_MIN <= sp <= TEMP_MAX):
+        return jsonify({"error": f"setpoint must be {TEMP_MIN:g}..{TEMP_MAX:g} °C"}), 400
+    try:
+        scope.temperature.setpoint(sp)
+    except ScopioError as e:
+        return jsonify({"error": str(e)}), 503
+    payload = _temp_payload()
+    payload["setpoint"] = sp        # the status topic is up to a poll behind
+    return jsonify(payload)
+
+
+@app.route("/temperature/output", methods=["POST"])
+@login_required
+def temperature_output():
+    on = bool((request.get_json() or {}).get("on"))
+    try:
+        scope.temperature.output(on)
+    except ScopioError as e:
+        return jsonify({"error": str(e)}), 503
+    payload = _temp_payload()
+    payload["output"] = on
+    return jsonify(payload)
 
 
 # ========== Client-side recording ==========

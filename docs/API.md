@@ -178,8 +178,8 @@ gateway change, no SDK update.
 
 | Service | Instrument | Driver class |
 |---|---|---|
-| `awg/call` | Rigol DG1022Z AWG (galvo mirrors) | `ros2_ws/…/drivers/wavegen.py` (`WaveGen`) |
-| `temperature/call` | Wavelength TC LAB controller | `ros2_ws/…/drivers/tclab.py` (`TCLab`) |
+| `awg/call` | Rigol DG1022Z AWG (galvo mirrors) | `ros2_ws/…/drivers/dg1022z.py` (`DG1022Z`) |
+| `temperature/call` | Wavelength TC10 LAB controller | `ros2_ws/…/drivers/TC10LAB.py` (`TC10LAB`) |
 
 Request `{method, args, kwargs}` → `{success, result, error}`. `args` is a JSON
 **array**, `kwargs` a JSON **object**, both as *strings* (ROS fields are

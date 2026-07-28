@@ -41,6 +41,21 @@
     # (galvo_draw does). Takes effect on container restart.
     timeout_ms: 15000
 
+/scopio/temperature_node:
+  ros__parameters:
+    # Address of the TC10 LAB. NORMALLY SET IN ros2_ws/.env (TCLAB_RESOURCE),
+    # which wins over this. Empty => auto-discover: /dev/usbtmc* first, then USB
+    # VISA. On the Pi the kernel's usbtmc driver claims this instrument, so the
+    # char device IS the normal path -- pyvisa/libusb cannot open it once the
+    # kernel has it (it hangs rather than failing). An Ethernet unit must be
+    # named explicitly ("TCPIP::<ip>::INSTR"); pyvisa-py cannot scan the LAN.
+    resource: ""
+    units: "C"               # forced on connect, so published degrees are unambiguous
+                             # ("" => leave the instrument's current units alone)
+    publish_rate: 1.0        # Hz, TemperatureStatus (this node POLLS, unlike galvo_node)
+    reconnect_period: 10.0   # s between reconnect attempts while offline
+    timeout_ms: 5000
+
 /scopio/calibration_node:
   ros__parameters:
     # Persisted spatial calibration (survives restarts). Relative paths are

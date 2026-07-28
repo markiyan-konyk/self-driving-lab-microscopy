@@ -187,8 +187,9 @@ result out). `temperature/call` and `awg/call` are the whole API.
   time; the controller has no ramp command, so the UI does it — the same split
   that keeps galvo geometry in `ui/galvo_geometry.py`. The node holds hardware,
   never experiment intent.
-- **Driver classes are vendored, not imported.** `ros2_ws/…/drivers/tclab.py`
-  and `…/drivers/wavegen.py` are copies of the repo-root `temperature.py` /
+- **Driver classes are vendored, not imported.** `ros2_ws/…/drivers/dg1022z.py`
+  is a copy of the repo-root `DG1022Z.py`; `…/drivers/TC10LAB.py` has no root
+  twin (it is the single source of truth for the controller). Historically:
   `galvo.py`: the workspace builds into a container and must not reach outside
   itself. Keep them in sync by hand (`diff`); the banner in each says so.
 - **Prove the box before the stack.** `temperature_test.py` (repo root) drives

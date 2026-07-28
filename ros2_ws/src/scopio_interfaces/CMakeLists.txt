@@ -15,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/StagePoint.msg"
   "msg/CameraState.msg"
   "msg/AwgStatus.msg"
+  "msg/TemperatureStatus.msg"
   "msg/Calibration.msg"
   # ---- Services ----
   "srv/StageJog.srv"

@@ -94,6 +94,41 @@ main {
 .galvo-update { min-height: 46px; }
 .galvo-section.disabled input[type=range], .galvo-section.disabled .galvo-val { opacity: .5; }
 
+/* Sample temperature (TC10 LAB) — deliberately one row. Colour is the status
+   display, so no extra line is spent on it:
+     grey  = connected, TEC output off      amber = driving towards setpoint
+     green = at setpoint (in tolerance)     red   = offline or faulted        */
+.temp-section {
+    display: flex; flex-direction: column; gap: 8px;
+    padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line);
+}
+.temp-row { display: flex; align-items: center; gap: 8px; }
+.temp-read {
+    flex: 1; min-height: 34px;
+    display: flex; align-items: baseline; justify-content: center; gap: 2px;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+    font-family: var(--mono); font-size: 17px; font-weight: 700;
+    font-variant-numeric: tabular-nums; color: var(--muted);
+}
+.temp-read i { font-style: normal; font-size: 11px; opacity: .7; }
+.temp-read.on     { color: #fbbf24; border-color: #6b4d10; }
+.temp-read.stable { color: var(--accent-bright); border-color: var(--accent-deep); }
+.temp-read.fault  { color: #fca5a5; border-color: #7f1d1d; }
+.temp-set {
+    width: 62px; min-height: 34px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--text); font: inherit; font-size: 13px;
+    text-align: center; font-variant-numeric: tabular-nums; padding: 2px; outline: none;
+}
+.temp-set:focus { border-color: var(--accent); }
+.temp-enable { min-height: 34px; padding: 0 10px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.temp-enable.on {
+    background: linear-gradient(90deg, var(--accent-deep), var(--accent));
+    border-color: transparent; color: #06140e;
+}
+.temp-enable:disabled { opacity: .5; cursor: not-allowed; }
+.temp-section.disabled .temp-set { opacity: .5; }
+
 /* Recordings (below the galvo) fills the remaining height */
 .rec-library { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
 .rec-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; padding-right: 2px; }

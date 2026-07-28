@@ -571,6 +571,74 @@
         setInterval(pollGalvo, 3000); pollGalvo();
 
         // ============================================================
+        //  Sample temperature  (Wavelength TC10 LAB)
+        // ============================================================
+        // Two separate commands, mirroring the instrument: writing a number sets
+        // the SETPOINT, and the TEC only drives once "Enable" is on. Reading and
+        // setpoint come from cached telemetry, so polling costs the instrument
+        // nothing.
+        const tempRead = $('tempRead'), tempSet = $('tempSet'), tempEnableBtn = $('tempEnableBtn');
+        const tempSection = document.querySelector('.temp-section');
+        let tempConnected = false, tempOn = false, tempEditing = false;
+
+        // Don't fight the operator: while the box has focus, polling leaves it alone.
+        tempSet.addEventListener('focus', () => { tempEditing = true; });
+        tempSet.addEventListener('blur', () => { tempEditing = false; });
+
+        function paintTemp(d) {
+            tempConnected = !!d.connected;
+            tempOn = !!d.output;
+            const t = d.temperature, unit = d.units || 'C';
+            tempRead.innerHTML = (t === null || t === undefined ? '—' : t.toFixed(2)) +
+                                 '<i>°' + unit + '</i>';
+            // grey = idle, amber = driving, green = in tolerance, red = offline/fault
+            const faults = d.faults || [];
+            let cls = 'fault';
+            if (tempConnected && !faults.length) cls = !tempOn ? 'off' : (d.in_tolerance ? 'stable' : 'on');
+            tempRead.className = 'temp-read ' + cls;
+            tempRead.title = !tempConnected ? 'Temperature controller offline'
+                           : faults.length ? 'Fault: ' + faults.join(', ')
+                           : 'Measured sample temperature';
+
+            tempEnableBtn.classList.toggle('on', tempOn && tempConnected);
+            tempEnableBtn.textContent = tempOn ? 'Enabled' : 'Enable';
+            tempEnableBtn.disabled = !tempConnected;
+            tempSection.classList.toggle('disabled', !tempConnected);
+            if (!tempEditing && d.setpoint !== null && d.setpoint !== undefined)
+                tempSet.value = d.setpoint.toFixed(1);
+        }
+
+        tempSet.addEventListener('change', async () => {
+            const v = parseFloat(tempSet.value);
+            if (!isFinite(v)) return;
+            try {
+                const d = await (await postJSON('/temperature/set', { setpoint: v })).json();
+                if (d.error) throw new Error(d.error);
+                paintTemp(d);
+                msg(`Setpoint ${v.toFixed(1)} °C.` + (tempOn ? '' : ' Press Enable to drive it.'));
+            } catch (e) { msg('Setpoint failed: ' + e.message); }
+        });
+
+        tempEnableBtn.addEventListener('click', async () => {
+            if (!tempConnected) { msg('Temperature controller offline'); return; }
+            const want = !tempOn;
+            tempEnableBtn.disabled = true;
+            try {
+                const d = await (await postJSON('/temperature/output', { on: want })).json();
+                if (d.error) throw new Error(d.error);
+                paintTemp(d);
+                msg(want ? 'TEC output enabled.' : 'TEC output disabled.');
+            } catch (e) { msg('TEC switch failed: ' + e.message); }
+            finally { tempEnableBtn.disabled = !tempConnected; }
+        });
+
+        async function pollTemp() {
+            try { paintTemp(await (await request('/temperature/status')).json()); }
+            catch (e) { paintTemp({ connected: false }); }
+        }
+        setInterval(pollTemp, 2000); pollTemp();
+
+        // ============================================================
         //  Mobile mode
         // ============================================================
         $('mobileToggle').addEventListener('click', () => {

@@ -22,13 +22,17 @@ backend (Pi: ros2_ws + gateway)  ──HTTP/WS──►  this UI  ──HTTP/MJP
   runs the UI (the Pi takes no recording load).
 - **Galvo/laser** control composes SCPI strings in `galvo_geometry.py` and
   sends them through the `awg/write` passthrough.
-- **Temperature** shows the live reading and sets a target, with an optional
-  ramp in °/min. The ramp is *this app's* policy — the controller has no ramp
-  command, so the UI walks its setpoint (in a background thread, so it stops if
-  the UI does). The backend node exposes the controller's *entire* driver class
-  (`temperature/call`), of which this panel deliberately uses only read /
-  setpoint / TEC-output — a dedicated temperature app can use the rest
-  (`scope.temperature.methods()` lists everything).
+- **Temperature** is one row under the galvo: live reading, a setpoint box, and
+  an Enable button. Those are two separate commands, mirroring the instrument —
+  typing a number only stores the target, and the TEC drives nothing until
+  Enable is on. The reading's colour is the whole status display: grey = idle,
+  amber = driving, green = at setpoint, red = offline or faulted (hover for the
+  fault). The backend node exposes the controller's *entire* driver class over
+  `temperature/call` — PID, IntelliTune, limits, sensor calibration, ramps — of
+  which this panel deliberately uses only reading / setpoint / TEC-output. A
+  dedicated temperature app can use the rest; `scope.temperature.methods()`
+  lists all ~110. (No ramp here: the controller has no ramp command, so walking
+  the setpoint over time is a client policy nobody has needed yet.)
 
 ## Prerequisite: the backend must be running
 

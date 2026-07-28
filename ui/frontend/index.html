@@ -46,6 +46,19 @@ __STYLE__
                 <div class="measure-readout" id="galvoReadout">—</div>
             </section>
 
+            <!-- Sample temperature: Wavelength TC10 LAB. One row on purpose --
+                 the reading's colour carries the state, so it needs no labels. -->
+            <section class="temp-section">
+                <p class="section-title">Temperature</p>
+                <div class="temp-row">
+                    <span class="temp-read off" id="tempRead" title="Measured sample temperature">—<i>°C</i></span>
+                    <input type="number" class="temp-set" id="tempSet" min="-20" max="120" step="0.1"
+                           value="25.0" title="Setpoint — type a value and press Enter">
+                    <button id="tempEnableBtn" class="temp-enable"
+                            title="Switch the TEC output on/off (nothing heats or cools until this is on)">Enable</button>
+                </div>
+            </section>
+
             <!-- Recordings -->
             <section class="rec-library">
                 <p class="section-title">Recordings</p>

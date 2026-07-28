@@ -63,8 +63,8 @@ in `../../viscosity` and `../../viscosity_agent`. Clients that subscribed to
 | `camera/white_balance` | `WhiteBalance` | camera_node | One-shot hardware AWB; returns the gains. |
 | `awg/write` | `AwgWrite` | galvo_node | **Relay a raw SCPI command** to the AWG. |
 | `awg/query` | `AwgQuery` | galvo_node | **Relay a raw SCPI query**, return the reply. |
-| `awg/call` | `InstrumentCall` | galvo_node | **Call any method** of the AWG driver class (`drivers/wavegen.py`). |
-| `temperature/call` | `InstrumentCall` | temperature_node | **Call any method** of the controller driver class (`drivers/tclab.py`). |
+| `awg/call` | `InstrumentCall` | galvo_node | **Call any method** of the AWG driver class (`drivers/dg1022z.py`). |
+| `temperature/call` | `InstrumentCall` | temperature_node | **Call any method** of the controller driver class (`drivers/TC10LAB.py`). |
 | `calibration/set` | `CalibrationSet` | calibration_node | Update µm/px or steps/µm (NaN = leave), persisted. |
 
 ### The instrument-call pattern (`InstrumentCall`)
