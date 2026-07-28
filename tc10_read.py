@@ -14,40 +14,56 @@ Needs read/write on /dev/usbtmc0:
     # then unplug/replug the TC10
 
     python3 tc10_read.py                     # auto-detect
+    python3 tc10_read.py --debug             # show every byte sent/received
     python3 tc10_read.py /dev/usbtmc0        # force this char device
     python3 tc10_read.py TCPIP::<ip>::INSTR  # force this VISA address
 """
 
 import glob
+import os
 import sys
 import threading
 
 PROBE_TIMEOUT_S = 4.0
+READ_SIZE = 256          # keep small: the usbtmc driver reads until count or EOM
 
 args = [a for a in sys.argv[1:] if not a.startswith("-")]
 probe_serial = "--all" in sys.argv
+debug = "--debug" in sys.argv
 
 
 def open_usbtmc(path):
     """SCPI over the kernel usbtmc char device. Returns an ask() callable."""
-    f = open(path, "r+b", buffering=0)
+    fd = os.open(path, os.O_RDWR)
 
     def ask(cmd):
-        f.write(cmd.encode() + b"\n")
-        return f.read(4096).decode(errors="replace").strip() if cmd.endswith("?") else ""
+        os.write(fd, cmd.encode() + b"\n")
+        if not cmd.endswith("?"):
+            if debug:
+                print(f"    >> {cmd!r}  (no reply expected)")
+            return ""
+        raw = os.read(fd, READ_SIZE)
+        if debug:
+            print(f"    >> {cmd!r}  << {raw!r}")
+        return raw.decode(errors="replace").strip()
 
-    ask.close, ask.name = f.close, path
+    ask.close, ask.name = lambda: os.close(fd), path
     return ask
 
 
 def open_visa(res):
     """SCPI over pyvisa. Returns an ask() callable."""
-    import pyvisa
     inst = rm.open_resource(res, open_timeout=int(PROBE_TIMEOUT_S * 1000))
     inst.timeout = int(PROBE_TIMEOUT_S * 1000)
 
     def ask(cmd):
-        return inst.query(cmd).strip() if cmd.endswith("?") else (inst.write(cmd) and "")
+        if not cmd.endswith("?"):
+            inst.write(cmd)
+            return ""
+        reply = inst.query(cmd).strip()
+        if debug:
+            print(f"    >> {cmd!r}  << {reply!r}")
+        return reply
 
     ask.close, ask.name = inst.close, res
     return ask
@@ -133,8 +149,19 @@ if tc is None:
     print("  udevadm info -a -n /dev/usbtmc0 | grep -m1 idVendor   -- 1a45 = TC10")
     raise SystemExit(1)
 
-# --- 3. read the thing -----------------------------------------------------
+# --- 3. resync, then read --------------------------------------------------
 print(f"\nUsing: {tc.name}")
+
+tc("*CLS")                       # clear status + error queue
+try:                             # drain anything still queued from the probe
+    while True:
+        stale = tc("*STB?")
+        if not (int(stale) & 16):   # bit 4 = Message Available
+            break
+        if debug:
+            print("    (draining stale message)")
+except Exception:
+    pass
 
 units = {"0": "C", "1": "K", "2": "F", "3": "raw"}.get(tc("TEC:UNITS?"), "?")
 print(f"Sensor      : {tc('TEC:SENSOR?')}")
