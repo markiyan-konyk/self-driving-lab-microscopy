@@ -1,5 +1,9 @@
 # SCOPIO node parameters. Loaded by microscope.launch.py.
 # Topic/namespace: everything lives under /scopio.
+#
+# The backend does NO image analysis: it senses, streams and effectuates.
+# Bead detection/tracking is a CLIENT concern, done off the Pi on the recorded
+# or streamed footage (see viscosity/ and viscosity_agent/).
 
 /scopio/camera_node:
   ros__parameters:
@@ -42,18 +46,3 @@
     # Persisted spatial calibration (survives restarts). Relative paths are
     # resolved against the process working directory.
     calibration_file: "calibration.json"
-
-/scopio/tracker_node:
-  ros__parameters:
-    active_on_start: false   # tracking is on-demand (service-toggled)
-    # trackpy parameters -- kept in sync with viscosity/track.py DEFAULTS.
-    diameter: 11
-    minmass: 800.0
-    channel: 1               # 0=B 1=G 2=R
-    invert: false
-    percentile: 64.0         # fixed percentile for the live loop (no auto)
-    search_range: 5.0
-    memory: 3
-    roi_size: 31             # px crop per bead in track mode
-    acquire_every_n: 30      # full-frame re-acquisition cadence (frames)
-    clump_size_factor: 1.6   # size > factor*median => flagged as a clump

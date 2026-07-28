@@ -15,7 +15,7 @@ echo "================ nodes ================"
 ros2 node list
 echo
 echo "expected:"
-for n in calibration_node camera_node stage_node galvo_node temperature_node tracker_node; do
+for n in calibration_node camera_node stage_node galvo_node temperature_node; do
   if ros2 node list 2>/dev/null | grep -q "$NS/$n"; then
     echo "  ok       $n"
   else
@@ -29,7 +29,7 @@ ros2 topic list
 
 echo
 echo "==== one message per topic (2s timeout) ===="
-for t in stage/position camera/state awg/status temperature/status calibration beads image/compressed; do
+for t in stage/position camera/state awg/status temperature/status calibration image/compressed; do
   printf "  %-22s " "$NS/$t"
   if timeout 2 ros2 topic echo --once "$NS/$t" >/dev/null 2>&1; then
     echo "publishing"

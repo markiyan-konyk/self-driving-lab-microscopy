@@ -9,7 +9,7 @@ Consumers, both over loopback:
 - **API gateway** (`ros2_ws/src/scopio_gateway/`) — proxies `/stream.mjpg` and
   the camera controls to authenticated external clients.
 - **camera_node** (ROS) — "bridge mode": ingests the stream, republishes it on
-  `/scopio/image/compressed` (feeds the tracker + graph), forwards the camera
+  `/scopio/image/compressed` (so the graph has frames), forwards the camera
   services here, and runs autofocus on the ingested frames.
 
 ## How it runs

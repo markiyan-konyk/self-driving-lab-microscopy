@@ -17,17 +17,20 @@ TWO MODES (picked automatically at startup):
              its own compose service or systemd unit). This node then
                * ingests its MJPEG stream (CAMERA_URL, default
                  http://127.0.0.1:8081) and republishes the JPEG frames on
-                 image/compressed -- no re-encode, so tracker_node and every
-                 other graph subscriber gets live frames;
+                 image/compressed -- no re-encode, so every graph subscriber
+                 gets live frames;
                * forwards the camera services to the server's HTTP API,
                  keeping the exposure-budget math here;
                * runs the Autofocus action on the ingested frames.
              So the frozen /scopio camera interface works identically either
              way, and the graph never knows the difference.
 
-It deliberately does NOT record. Recording is a *client* concern: the UI (or
-any program) takes the video stream and saves to its own local folder, so the
-Pi takes no extra recording/disk load.
+It deliberately does NOT record, and NOTHING in the backend analyses the
+frames. Both are *client* concerns: the UI (or any program) takes the video
+stream, saves to its own local folder and runs its own detection/tracking
+there, so the Pi takes no extra recording, disk or CPU load. The only pixel
+work here is the autofocus sharpness metric, which is a hardware control loop,
+not scene analysis.
 
 Topics / services (under /scopio):
   pub  image/compressed   sensor_msgs/CompressedImage      (JPEG live view)

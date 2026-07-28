@@ -7,7 +7,6 @@ state).
 
 Topics / services / actions (under /scopio):
   pub     stage/position    scopio_interfaces/StagePosition  (steps + micrometres)
-  sub     beads             scopio_interfaces/BeadArray   (latest count, for scans)
   sub     calibration       scopio_interfaces/Calibration (latched; steps_per_um)
   srv     stage/jog         scopio_interfaces/StageJog    (relative jog, low latency)
   srv     stage/move_abs    scopio_interfaces/MoveAbs     (single absolute move)
@@ -28,7 +27,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy
 
-from scopio_interfaces.msg import BeadArray, Calibration, StagePosition
+from scopio_interfaces.msg import Calibration, StagePosition
 from scopio_interfaces.srv import MoveAbs, StageJog
 from scopio_interfaces.action import MoveStagePath, ScanRegion
 
@@ -44,13 +43,11 @@ class StageNode(Node):
         self._lock = threading.Lock()
         self.sb = None
         self.position = {"x": 0, "y": 0, "z": 0}   # open-loop, origin at startup
-        self._latest_beads = 0
         self.steps_per_um = {"x": 1.0, "y": 1.0, "z": 1.0}  # from calibration topic
 
         self._open_board()
 
         self.pos_pub = self.create_publisher(StagePosition, "stage/position", 5)
-        self.create_subscription(BeadArray, "beads", self._on_beads, 5)
         # Latched calibration: match the publisher's transient-local durability.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              history=HistoryPolicy.KEEP_LAST)
@@ -84,9 +81,6 @@ class StageNode(Node):
         except Exception as e:
             self.get_logger().warning(f"Sangaboard unavailable ({e}); idling.")
             self.sb = None
-
-    def _on_beads(self, msg):
-        self._latest_beads = msg.count
 
     def _on_calibration(self, msg):
         self.steps_per_um = {"x": msg.steps_per_um_x or 1.0,
@@ -216,7 +210,6 @@ class StageNode(Node):
                 fb.frames_visited = visited
                 fb.x = self.position["x"]
                 fb.y = self.position["y"]
-                fb.beads_in_frame = self._latest_beads
                 goal_handle.publish_feedback(fb)
         goal_handle.succeed()
         result.success = True

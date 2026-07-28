@@ -23,7 +23,6 @@ services:
     ports:
       - "8000:8000"          # published FOR the gateway (it shares this netns)
     environment:
-      - SCOPIO_REPO=/workspace
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
       - CAMERA_URL=
 

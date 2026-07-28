@@ -77,7 +77,7 @@ scope.stage.jog(dz=100)
 | Method + path | Auth | Meaning |
 |---|---|---|
 | `GET /api/v1/health` | no | `{ok, ros_ok, camera_ok, auth_configured, uptime_s}` |
-| `GET /api/v1/status` | yes | one-call snapshot: latest `stage/position`, `camera/state`, `awg/status`, `temperature/status`, `beads`, `calibration` + camera reachability |
+| `GET /api/v1/status` | yes | one-call snapshot: latest `stage/position`, `camera/state`, `awg/status`, `temperature/status`, `calibration` + camera reachability |
 | `GET /api/v1/interfaces` | yes | discovery: every service/topic/action with per-field schemas |
 | `POST /api/v1/service/{name}` | yes | **generic service call** (section 4) |
 | `GET /api/v1/stream.mjpg` | yes | live MJPEG video |
@@ -229,10 +229,6 @@ Rules of the road:
   is done by walking the setpoint client-side (`ui/run_ui.py` does this at
   °/min) — exactly like galvo geometry lives in client code.
 
-#### `tracker/set_active` — toggle bead tracking (std_srvs/SetBool)
-Request `{data: true|false}` → `{success, message}`. While active, bead
-detections stream on the `beads` topic.
-
 ## 5. WebSocket: topics + actions
 
 Connect to `ws://<pi>:8000/api/v1/ws?api_key=<key>`. Every frame both ways is
@@ -262,7 +258,6 @@ about that request echo it.
 | `camera/state` | CameraState | all camera settings + measured fps |
 | `awg/status` | AwgStatus | AWG `connected`, resource string |
 | `temperature/status` | TemperatureStatus | temperature, setpoint, TEC current/voltage, `output_enabled`, `in_tolerance`, `sensor_fault` |
-| `beads` | BeadArray | tracked bead positions (when tracker active) |
 | `calibration` | Calibration | µm/px + steps/µm (latched) |
 | `image/compressed` | CompressedImage | *refused over WS — use the MJPEG stream* |
 
@@ -297,7 +292,7 @@ cancel a running goal (ROS semantics) — cancel explicitly if you need to.
 |---|---|---|---|
 | `camera/autofocus` | `{z_range, steps, settle_s}` | `{index, z, score}` | `{success, best_z, best_score, message}` |
 | `stage/move_path` | `{points: [{x,y,z},...], settle_s}` | `{current_index, x, y, z}` | `{success, points_reached}` |
-| `scan_region` | `{x_min, x_max, y_min, y_max, step, settle_s}` | `{frames_visited, x, y, beads_in_frame}` | `{success, frames_visited}` |
+| `scan_region` | `{x_min, x_max, y_min, y_max, step, settle_s}` | `{frames_visited, x, y}` | `{success, frames_visited}` |
 
 SDK equivalent:
 ```python

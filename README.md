@@ -16,8 +16,7 @@ auth**. Client programs need no ROS, no Docker, no DDS — just a URL and a key.
                  │        │ MJPEG/HTTP       │                    │
                  │  ROS 2 graph /scopio ◄──► API gateway (:8000)  │
                  │  camera·stage·galvo·      HTTP + WS + API key  │
-                 │  temperature·calibration· │                    │
-                 │  tracker                  │                    │
+                 │  temperature·calibration  │                    │
                  └───────────────────────────┼────────────────────┘
                                              │  any network
               ┌───────────────┬──────────────┼────────────────┐
@@ -37,7 +36,7 @@ auth**. Client programs need no ROS, no Docker, no DDS — just a URL and a key.
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture rationale (why a dumb galvo passthrough, why backend/UI split, etc.) |
 | [`ui/`](ui/) | reference web UI (Flask), a pure API client, records video locally |
 | [`galvo_draw/`](galvo_draw/) | draw shapes with the laser (arbitrary-waveform vector display) |
-| `viscosity/` | offline bead-tracking/analysis pipeline; `tracker_node` borrows its trackpy parameters |
+| `viscosity/` | offline bead-tracking/analysis pipeline — where **all** image analysis lives; the Pi backend does none |
 | `galvo_tests/` | standalone hardware bench scripts for calibrating the galvo (independent of everything above) |
 | `temperature.py`, `galvo.py` | the instrument driver classes (TC LAB controller, Rigol AWG). The backend runs **copies** of these in `ros2_ws/…/scopio_microscope/drivers/` and exposes every method of them over the API |
 | `temperature_test.py` | prove the temperature controller works with nothing but pyvisa — run this before blaming the stack |

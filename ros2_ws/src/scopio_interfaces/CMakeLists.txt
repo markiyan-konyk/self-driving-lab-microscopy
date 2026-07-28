@@ -10,9 +10,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  # ---- Messages (SCOPIO interface contract v1.0 -- treat as frozen) ----
-  "msg/Bead.msg"
-  "msg/BeadArray.msg"
+  # ---- Messages (SCOPIO interface contract v2.0 -- treat as frozen) ----
   "msg/StagePosition.msg"
   "msg/StagePoint.msg"
   "msg/CameraState.msg"

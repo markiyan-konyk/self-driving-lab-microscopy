@@ -5,7 +5,7 @@
 #
 # Three services:
 #   scopio   -- the ROS 2 sensor/effectuator graph (camera, stage, galvo,
-#               tracker, calibration) under /scopio. Headless, "sacred".
+#               calibration) under /scopio. Headless, "sacred".
 #   camera   -- picamera2 MJPEG server (camera_server/), loopback-only :8081.
 #               Debian bookworm + Raspberry Pi apt archive, because
 #               picamera2/libcamera cannot run in the Ubuntu ROS container.
@@ -38,10 +38,9 @@ services:
     ipc: host
     restart: unless-stopped
     volumes:
-      - ..:/workspace                # repo root: microscope/, viscosity/, recordings/
+      - ..:/workspace                # repo root: working dir, calibration.json
       - /run/udev:/run/udev:ro
     environment:
-      - SCOPIO_REPO=/workspace
       # Instrument addresses come from .env in this folder (see .env.example).
       # Empty => the node auto-discovers the first USB instrument, which is only
       # safe with ONE instrument on the bus. An Ethernet TC LAB must always be

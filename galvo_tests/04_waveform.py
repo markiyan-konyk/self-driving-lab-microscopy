@@ -17,7 +17,7 @@ import time
 
 from _common import resolve_resource
 
-from galvo import Galvo  # noqa: E402
+from DG1022Z import Galvo  # noqa: E402
 
 
 def main():

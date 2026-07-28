@@ -36,15 +36,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # republishes frames on image/compressed, and forwards the camera services to
 # the camera server's HTTP API. See camera_server/README.md.
 
-# Python deps for tracking + hardware drivers. --break-system-packages because
-# Noble's Python is PEP-668 "externally managed"; fine inside a container.
+# Python deps for the hardware drivers. --break-system-packages because Noble's
+# Python is PEP-668 "externally managed"; fine inside a container.
 # NOTE: no Flask here -- this image is the headless BACKEND. The web UI is a
 # separate app (../ui) that talks to the gateway over plain HTTP.
-# trackpy/pandas/scipy (the bead-TRACKER deps) are intentionally omitted: on the
-# Pi they pull a newer numpy that pip can't swap in over the apt-managed numpy
-# (it fails to uninstall the debian numpy). tracker_node degrades gracefully
-# without them. Re-add them later with a proper numpy strategy (e.g. a venv, or
-# a pinned numpy) when you actually wire up tracking.
+# NO image-analysis stack either (no trackpy/pandas/scipy): the backend senses,
+# streams and effectuates -- it never analyses frames. Bead detection/tracking
+# runs on the CLIENT side, off the Pi (viscosity/, viscosity_agent/). Keeping it
+# out also keeps the image off the apt-numpy-vs-pip-numpy collision entirely.
 RUN pip3 install --no-cache-dir --break-system-packages \
         simplejpeg \
         pyvisa \
@@ -69,9 +68,9 @@ WORKDIR /ros2_ws
 COPY . /ros2_ws/
 RUN source /opt/ros/jazzy/setup.bash && colcon build --symlink-install
 
-# The reused driver code (microscope/, viscosity/) and recordings live in the
-# repo, mounted at runtime; SCOPIO_REPO tells the nodes where to find it.
-ENV SCOPIO_REPO=/workspace
+# The nodes import nothing from outside this workspace. The repo is still
+# mounted at /workspace at runtime and used as the working directory, so
+# relative paths (calibration.json) land on the Pi's real disk.
 ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 COPY entrypoint.sh /entrypoint.sh

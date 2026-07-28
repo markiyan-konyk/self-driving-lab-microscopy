@@ -77,8 +77,8 @@ docker compose exec scopio bash -lc \
   "source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && bash /workspace/ros2_ws/scripts/smoke_test.sh"
 ```
 
-- [ ] All six driver nodes present: `calibration_node camera_node stage_node
-      galvo_node temperature_node tracker_node` (+ the `gateway` node).
+- [ ] All driver nodes present: `calibration_node camera_node stage_node
+      galvo_node temperature_node` (+ the `gateway` node).
 - [ ] Topics listed under `/scopio/...`; `stage/position`, `camera/state`,
       `awg/status`, `temperature/status`, `calibration` are *publishing* (even
       with no hardware).
@@ -162,13 +162,7 @@ work. Then, on the Pi:
       camera frames + stage Z sweep).
 - [ ] `galvo_draw/app.py`: **Test link** draws the sine circle.
 
-## 9. Tracker (the real-time question) 💻
-
-- [ ] `curl ... -d '{"data": true}' .../api/v1/service/tracker/set_active`
-- [ ] Subscribe to `beads` (SDK: `scope.subscribe("beads", print)`) — note the
-      achievable Hz; tune `params.yaml` if low.
-
-## 10. Reboot test 🖥️
+## 9. Reboot test 🖥️
 
 - [ ] `sudo reboot`, wait, then from the laptop:
       `curl http://<pi-ip>:8000/api/v1/health` — everything returns with zero
@@ -192,4 +186,3 @@ work. Then, on the Pi:
 | Edited `.env`, nothing changed | `docker compose up -d` again — env vars are baked in at container creation |
 | `list_resources()` doesn't show an instrument | Run `python3 instrument_scan.py` (host **and** `docker compose exec scopio python3 /workspace/instrument_scan.py`). A device whose USB interface class is CDC/vendor is a **virtual COM port**: it can only ever be an `ASRL/dev/tty…::INSTR` resource, never `USB…::INSTR`, and USB auto-discovery skips it by design. Missing pyserial hides serial instruments entirely. |
 | Temperature reads but never moves | TEC output off (`output`, `[true]`), or the rear Remote-Enable input is gating it |
-| Tracker Hz too low | tune params / raw-image optimisation |

@@ -59,8 +59,8 @@ across multiple computers, and keep working if one of them dies.
 
 The core picture is **the graph**: a set of **nodes** (processes) connected by
 named **topics**, **services**, and **actions**. Nodes don't know each other's
-addresses. They announce "I publish on `/scopio/beads`" or "I offer a service
-`/scopio/tweezers/zero`", and the middleware (**DDS**, the layer under ROS 2)
+addresses. They announce "I publish on `/scopio/stage/position`" or "I offer a
+service `/scopio/awg/call`", and the middleware (**DDS**, the layer under ROS 2)
 automatically connects whoever's interested. This is **discovery**: start a node
 anywhere on the network and it just wires itself in.
 
@@ -88,8 +88,9 @@ this repo each node is a Python class subclassing `rclpy.node.Node`:
 - `camera_node` — owns the camera.
 - `stage_node` — owns the stage.
 - `galvo_node` — owns the laser.
-- `tracker_node` — runs trackpy.
-- `ui_gateway` — the web UI (a pure client; owns no hardware).
+- `calibration_node` — owns the µm/px + steps/µm calibration (no hardware).
+- `gateway` — the HTTP/WebSocket API (a pure client of the graph; owns no
+  hardware).
 
 `rclpy` is the **ROS Client Library for Python** — the API you call to make a
 node, publish, subscribe, etc. (C++ has `rclcpp`; same concepts.)
@@ -99,9 +100,10 @@ A **topic** is a named, typed channel. Any node can **publish** messages to it;
 any node can **subscribe**. Publishers and subscribers don't know about each
 other. Use topics for continuous data where "the latest value" is what matters.
 
-In SCOPIO: `camera_node` publishes frames on `image/compressed`; `tracker_node`
-and `ui_gateway` subscribe. `stage_node` publishes `stage/position` at 5 Hz;
-anyone who cares subscribes. Fire-and-forget, one-to-many.
+In SCOPIO: `camera_node` publishes frames on `image/compressed`; the `gateway`
+subscribes (and so could any future node). `stage_node` publishes
+`stage/position` at 5 Hz; anyone who cares subscribes. Fire-and-forget,
+one-to-many.
 
 ```python
 # publisher (stage_node.py)
@@ -178,17 +180,17 @@ def _execute_move_path(self, goal_handle):
 code. We set them from `config/params.yaml`.
 
 ```python
-# tracker_node.py
-self.declare_parameter("diameter", 11)         # declare with a default
-self.diameter = int(self.get_parameter("diameter").value)   # read it
+# camera_node.py
+self.declare_parameter("jpeg_quality", 70)     # declare with a default
+self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)   # read it
 ```
 
 ```yaml
 # config/params.yaml
-/scopio/tracker_node:
+/scopio/camera_node:
   ros__parameters:
-    diameter: 11
-    minmass: 800.0
+    jpeg_quality: 70
+    publish_fps: 15.0
 ```
 
 ### Namespaces (one more, small but important)
@@ -264,33 +266,46 @@ Here's every node and how they're wired. `pub`/`sub` are topics; `srv`
 services; `act` actions. Everything is under `/scopio`.
 
 ```
-                       image/compressed (topic)
-   camera_node ───────────────────────────────────► tracker_node
-       │  pub recording/status                           │ pub beads
-       │  srv recording/set                              ▼
-       │                                          (BeadArray: count, positions, clumps)
-       ▼                                                 │
-   ui_gateway ◄──────── stage/position ──── stage_node ◄─┘ (reads bead count for scans)
-   (web UI)    ◄──────── laser/state ─────── galvo_node      act stage/move_path
-       │  serves http://<pi>:8080                  │          act scan_region
-       │  (subscribes to all topics,               │  srv tweezers/zero
-       │   calls all services/actions)             │  srv laser/set
-       │                                           │  act galvo/run_waveform
-       ▼                                           ▼
-   browser                                      DG1022Z (galvo)
+   camera_server (picamera2, loopback :8081)
+       │  MJPEG
+       ▼
+   camera_node ──── pub image/compressed ──────────────┐
+       │  pub camera/state                             │
+       │  srv camera/set_controls, set_framerate,      │
+       │      white_balance                            │
+       │  act camera/autofocus ──┐                     │
+       │                         │ srv stage/jog       │
+       ▼                         ▼                     ▼
+   Sangaboard ◄──────────── stage_node            gateway (:8000)
+                                │  pub stage/position   │  HTTP + WebSocket
+                                │  srv stage/move_abs   │  + API key
+                                │  act stage/move_path  │
+                                │  act scan_region      │
+   DG1022Z (galvo) ◄──── galvo_node                     │
+                                │  pub awg/status       │
+                                │  srv awg/call,        │
+                                │      awg/write, query │
+   calibration.json ◄─── calibration_node               │
+                                │  pub calibration ─────┘  (latched)
+                                │  srv calibration/set
+                                ▼
+                          stage_node (reads steps_per_um)
 
-           ⇡  the SAME graph is visible to an external decision computer
-              on the LAN — it subscribes to beads/positions and sends
-              action goals, exactly like ui_gateway does.
+           ⇡  everything outside the Pi — the UI, galvo_draw, agents —
+              talks ONLY to the gateway over HTTP/WS. No client joins
+              the DDS graph.
 ```
 
 Two things to notice:
 
-1. **The tracker never grabs the camera.** It subscribes to the image topic that
-   `camera_node` publishes. One owner (camera_node), many consumers. This is the
-   ROS way and it's why there's no resource conflict.
-2. **`ui_gateway` and "the external brain" are the same kind of thing** — ROS
-   clients that subscribe to state and send commands. The UI is not special.
+1. **Nobody else grabs the camera.** `camera_node` is the single owner and
+   publishes frames; anything that wants pixels subscribes (or, off-Pi, pulls
+   the MJPEG stream through the gateway). One owner, many consumers — this is
+   the ROS way and it's why there's no resource conflict.
+2. **The backend senses and effectuates; it does not decide.** There is no
+   analysis node in this graph on purpose. Detection, tracking and experiment
+   logic live in client programs, which are all the same kind of thing: API
+   clients of the gateway. The UI is not special.
 
 ---
 
@@ -310,7 +325,7 @@ int32 y
 int32 z
 ```
 Each line is `type name`. Types are primitives (`bool`, `int32`, `float32`,
-`string`), arrays (`Bead[] beads`), or other messages (`std_msgs/Header`). After
+`string`), arrays (`StagePoint[] points`), or other messages (`std_msgs/Header`). After
 building, this becomes a Python class you use as `msg.x`, `msg.connected`, etc.
 
 ### A service (`.srv`)
@@ -469,10 +484,10 @@ Launch files can **include** other launch files — that's how
 [params.yaml](../src/scopio_microscope/config/params.yaml) is keyed by the
 node's full name:
 ```yaml
-/scopio/tracker_node:
+/scopio/galvo_node:
   ros__parameters:
-    diameter: 11
-    acquire_every_n: 30
+    auto_discover: true
+    timeout_ms: 15000
 ```
 The launch file passes this file to each node; each node picks out its own
 section by name. Change behaviour without touching code.
@@ -483,14 +498,14 @@ constantly:
 ```bash
 ros2 node list                       # who's running
 ros2 topic list                      # what channels exist
-ros2 topic echo /scopio/beads        # print messages as they arrive
+ros2 topic echo /scopio/stage/position     # print messages as they arrive
 ros2 topic hz   /scopio/image/compressed   # measure publish rate
 ros2 topic info /scopio/stage/position -v  # types, publishers, QoS
 ros2 service list
-ros2 service call /scopio/tweezers/zero scopio_interfaces/srv/ZeroTweezers "{}"
+ros2 service call /scopio/awg/query scopio_interfaces/srv/AwgQuery "{command: '*IDN?'}"
 ros2 action list
 ros2 action send_goal -f /scopio/stage/move_path scopio_interfaces/action/MoveStagePath "{points: [...]}"
-ros2 param list /scopio/tracker_node
+ros2 param list /scopio/galvo_node
 ```
 
 ---
@@ -502,8 +517,8 @@ shorthand for "make a single-threaded executor and run it." The executor watches
 all your callbacks (timers, subscriptions, services) and runs them **one at a
 time** when work is ready.
 
-**Single-threaded is fine** for simple nodes (camera_node, tracker_node): one
-callback runs to completion before the next starts. Simple and safe.
+**Single-threaded is fine** for simple nodes (calibration_node): one callback
+runs to completion before the next starts. Simple and safe.
 
 **But it breaks for long callbacks.** An action's `execute_callback` can run for
 *seconds* (moving a stage path). With a single-threaded executor, while that runs
@@ -566,11 +581,13 @@ and the camera stack. `ros-jazzy-sensor-msgs` is the apt package that provides
 `sensor_msgs` — ROS packages are just apt packages.
 
 ```dockerfile
-RUN pip3 install --break-system-packages trackpy pandas scipy pyvisa ... flask
+RUN pip3 install --break-system-packages pyvisa pyvisa-py pyusb pyserial \
+        sangaboard fastapi "uvicorn[standard]" httpx
 ```
-Python deps for tracking + hardware + the gateway. `--break-system-packages`
+Python deps for the hardware drivers + the gateway. `--break-system-packages`
 sidesteps Ubuntu's "don't pip into the system Python" guard — fine inside a
-throwaway container.
+throwaway container. Note what is *absent*: no trackpy/pandas/scipy, because
+the backend never analyses images (see DECISIONS §8).
 
 ```dockerfile
 WORKDIR /ros2_ws
@@ -581,13 +598,13 @@ Copy the workspace in and build it *into the image*, so the container starts
 ready to run.
 
 ```dockerfile
-ENV SCOPIO_REPO=/workspace
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["ros2", "launch", "scopio_ui", "scopio.launch.py"]
+CMD ["ros2", "launch", "scopio_microscope", "microscope.launch.py"]
 ```
-`SCOPIO_REPO` tells the nodes where the reused `microscope/`+`viscosity/` code is
-(mounted at runtime). The **entrypoint** sources ROS + the workspace, then runs
-the **command** — the full bring-up launch.
+The **entrypoint** sources ROS + the workspace, then runs the **command** — the
+full bring-up launch. The nodes import nothing from outside the workspace; the
+repo is still mounted at `/workspace` so relative paths (`calibration.json`)
+land on the Pi's real disk.
 
 ### The [docker-compose.yml](../docker-compose.yml)
 Compose records *how to run* the container so you don't type a giant
@@ -626,16 +643,15 @@ where every `ros2 ...` CLI command works.
 Putting it together, and answering "what about the UI?"
 
 **The split.** Hardware ownership lives in the driver nodes (`camera_node`,
-`stage_node`, `galvo_node`). They reuse your validated code —
-`microscope/galvo.py`, `microscope/tweezer.py`, `viscosity/track.py` — found via
-`SCOPIO_REPO`, and re-implement only the Flask-coupled bits (camera config, stage
-moves) cleanly. They publish state and accept commands. **That's the
-"effectuator + sensor."**
+`stage_node`, `galvo_node`). They vendor the instrument driver classes inside
+the workspace (`scopio_microscope/drivers/`) rather than importing repo code, so
+the image is self-contained. They publish state and accept commands. **That's
+the "effectuator + sensor."**
 
-**The brain is elsewhere.** All decision logic (which bead goes where, Hungarian
-assignment, clump analysis, viscosity decisions) lives off the Pi, on a computer
-that joins the graph as a node and uses the same topics/services/actions. The Pi
-stays a clean, reusable robot.
+**The brain is elsewhere.** All decision logic — *and all image analysis*: bead
+detection, clump analysis, which bead goes where, viscosity decisions — lives
+off the Pi, in programs that talk to the gateway over HTTP/WebSocket. The Pi
+stays a clean, reusable robot that never looks at the picture.
 
 **The UI is a client, not an owner.** This is the resolution of "Flask vs ROS":
 - *Old:* Flask owned the camera/stage/galvo **and** served the browser — one
@@ -662,30 +678,31 @@ programs grabbing the same camera. `ui_gateway` removes it.
 
 ## 11. Write your own node from scratch
 
-The best way to cement this. Let's add a trivial node that subscribes to the bead
-count and prints a warning when there are too many (a "crowding monitor").
+The best way to cement this. Let's add a trivial node that watches the stage and
+warns when it wanders outside a safe box (a "travel-limit monitor").
 
-**1. Create the file** `src/scopio_microscope/scopio_microscope/crowd_node.py`:
+**1. Create the file** `src/scopio_microscope/scopio_microscope/limit_node.py`:
 ```python
 import rclpy
 from rclpy.node import Node
-from scopio_interfaces.msg import BeadArray
+from scopio_interfaces.msg import StagePosition
 
-class CrowdNode(Node):
+class LimitNode(Node):
     def __init__(self):
-        super().__init__("crowd_node")
-        self.declare_parameter("max_beads", 50)
-        self.max = int(self.get_parameter("max_beads").value)
-        self.create_subscription(BeadArray, "beads", self._on_beads, 5)
-        self.get_logger().info(f"crowd_node up, max_beads={self.max}")
+        super().__init__("limit_node")
+        self.declare_parameter("max_steps", 20000)
+        self.max = int(self.get_parameter("max_steps").value)
+        self.create_subscription(StagePosition, "stage/position", self._on_pos, 5)
+        self.get_logger().info(f"limit_node up, max_steps={self.max}")
 
-    def _on_beads(self, msg):
-        if msg.count > self.max:
-            self.get_logger().warning(f"crowded: {msg.count} beads")
+    def _on_pos(self, msg):
+        for axis, value in (("x", msg.x), ("y", msg.y), ("z", msg.z)):
+            if abs(value) > self.max:
+                self.get_logger().warning(f"{axis} out of range: {value} steps")
 
 def main(args=None):
     rclpy.init(args=args)
-    node = CrowdNode()
+    node = LimitNode()
     try:
         rclpy.spin(node)
     finally:
@@ -695,7 +712,7 @@ def main(args=None):
 
 **2. Register it** in `src/scopio_microscope/setup.py`:
 ```python
-"crowd_node = scopio_microscope.crowd_node:main",
+"limit_node = scopio_microscope.limit_node:main",
 ```
 
 **3. (Optional) add it to the launch file** and a `params.yaml` section.
@@ -703,9 +720,9 @@ def main(args=None):
 **4. Build, source, run:**
 ```bash
 cd ros2_ws && colcon build --symlink-install && source install/setup.bash
-ros2 run scopio_microscope crowd_node --ros-args -r __ns:=/scopio
-# in another shell, turn tracking on and watch:
-ros2 service call /scopio/tracker/set_active std_srvs/srv/SetBool "{data: true}"
+ros2 run scopio_microscope limit_node --ros-args -r __ns:=/scopio
+# in another shell, drive the stage past the limit and watch:
+ros2 service call /scopio/stage/jog scopio_interfaces/srv/StageJog "{dx: 30000}"
 ```
 
 You just wrote a node, declared a parameter, subscribed to a typed topic, and ran
@@ -713,11 +730,15 @@ it on the live graph. That's the whole loop. Everything else is more of the same
 plus services/actions.
 
 **Exercises to level up:**
-1. Make `crowd_node` *publish* a `std_msgs/Bool` "crowded" topic instead of just
-   logging. (Add a publisher; publish in the callback.)
-2. Give `galvo_node` a `SetBool` service to switch the laser output on/off using
-   `Galvo.off()` / `point_mode()`.
+1. Make `limit_node` *publish* a `std_msgs/Bool` "out_of_range" topic instead of
+   just logging. (Add a publisher; publish in the callback.)
+2. Give `galvo_node` a `SetBool` service that switches the laser output on/off
+   through the driver's `output(on, channel)` method.
 3. Add a `home` action to `stage_node` that returns the stage to (0,0,0).
+
+> Note the shape of this example: it reasons about **state the backend already
+> owns** (stage position), not about pixels. A node that decoded frames and
+> measured the sample would belong on a client instead — see DECISIONS §8.
 
 ---
 
@@ -727,15 +748,15 @@ plus services/actions.
 ```bash
 # discovery / introspection
 ros2 node list                         ros2 node info /scopio/galvo_node
-ros2 topic list                        ros2 topic echo /scopio/beads
+ros2 topic list                        ros2 topic echo /scopio/stage/position
 ros2 topic hz /scopio/image/compressed ros2 topic info -v /scopio/stage/position
-ros2 service list                      ros2 service type /scopio/tweezers/zero
+ros2 service list                      ros2 service type /scopio/awg/call
 ros2 action list                       ros2 interface show scopio_interfaces/action/MoveStagePath
-ros2 param list /scopio/tracker_node   ros2 param get /scopio/tracker_node diameter
+ros2 param list /scopio/galvo_node     ros2 param get /scopio/galvo_node timeout_ms
 
 # acting
-ros2 service call /scopio/tracker/set_active std_srvs/srv/SetBool "{data: true}"
-ros2 action send_goal -f /scopio/galvo/run_waveform scopio_interfaces/action/RunGalvoWaveform "{shape: 'circle', duration_s: 5.0}"
+ros2 service call /scopio/awg/call scopio_interfaces/srv/InstrumentCall "{method: 'list_methods'}"
+ros2 action send_goal -f /scopio/camera/autofocus scopio_interfaces/action/Autofocus "{z_range: 2000, steps: 15, settle_s: 0.2}"
 
 # build / run
 colcon build --symlink-install         source install/setup.bash

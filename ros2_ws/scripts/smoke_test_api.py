@@ -94,8 +94,7 @@ def main():
     actions = ifs.get("actions", {})
     for s in ("/scopio/stage/jog", "/scopio/awg/write", "/scopio/awg/query",
               "/scopio/awg/call", "/scopio/temperature/call",
-              "/scopio/camera/set_controls", "/scopio/calibration/set",
-              "/scopio/tracker/set_active"):
+              "/scopio/camera/set_controls", "/scopio/calibration/set"):
         check(f"interfaces lists {s}", s in services)
     for a in ("/scopio/camera/autofocus", "/scopio/stage/move_path",
               "/scopio/scan_region"):

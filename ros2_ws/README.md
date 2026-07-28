@@ -39,7 +39,7 @@ is now covered by this stack plus `../ui` and `../galvo_draw`; see
 | Package | Type | What it is |
 |---|---|---|
 | `scopio_interfaces` | ament_cmake | The contract: msgs / srvs / **actions** (frozen v1.0) |
-| `scopio_microscope` | ament_python | The driver nodes (camera, stage, galvo, temperature, calibration, tracker) + the vendored instrument drivers in `scopio_microscope/drivers/` |
+| `scopio_microscope` | ament_python | The driver nodes (camera, stage, galvo, temperature, calibration) + the vendored instrument drivers in `scopio_microscope/drivers/` |
 | `scopio_gateway` | ament_python | The HTTP/WS API gateway (FastAPI + rclpy) |
 
 ### Nodes (all under the `/scopio` namespace)
@@ -55,10 +55,10 @@ is now covered by this stack plus `../ui` and `../galvo_draw`; see
 | `galvo_node` | `awg/status` | `awg/call` (any driver method), `awg/write`, `awg/query` (raw SCPI) | — |
 | `temperature_node` | `temperature/status` | `temperature/call` (any driver method) | — |
 | `calibration_node` | `calibration` (latched) | `calibration/set` | — |
-| `tracker_node` | `beads` | `tracker/set_active` | — |
 
-> **Recording is not a node** — the camera only streams; clients record
-> locally. **The instrument nodes expose a whole driver CLASS** (`awg/call`,
+> **Recording is not a node, and neither is image analysis** — the camera only
+> streams; clients record locally and do their own detection/tracking off the
+> Pi. **The instrument nodes expose a whole driver CLASS** (`awg/call`,
 > `temperature/call`): every method the class has is callable by any app, so
 > the ROS layer never decides which instrument features are "supported" and
 > meaning (volts→pixels→µm, temperature ramps) stays in client code. See
@@ -74,8 +74,9 @@ Design notes:
   still starts and reports `connected=false`, so the graph comes up on a
   partial rig (or a hardware-less dev box) and you bring things online piece
   by piece.
-- Tracking is **on-demand** (`tracker/set_active`) — the Pi only does the
-  heavy trackpy work when asked.
+- **The backend never analyses the image.** It streams frames and moves
+  hardware; bead detection, tracking and every decision that depends on them
+  run on the client side, off the Pi (`../viscosity`, `../viscosity_agent`).
 - **Actions** carry long-horizon goals (a whole stage path, a region scan,
   an autofocus sweep) so execution doesn't depend on per-step latency.
 - The gateway maps the graph to JSON **generically** (introspected from the

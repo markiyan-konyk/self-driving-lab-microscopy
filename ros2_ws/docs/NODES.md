@@ -56,7 +56,7 @@ ros2 service call /scopio/camera/set_controls scopio_interfaces/srv/SetCameraCon
 Tracks open-loop absolute position (accumulated from relative moves) and reports
 it in steps and micrometres.
 
-- **Publishes:** `stage/position`. **Subscribes:** `beads`, `calibration`.
+- **Publishes:** `stage/position`. **Subscribes:** `calibration`.
 - **Services:** `stage/jog` (relative), `stage/move_abs`.
 - **Actions:** `stage/move_path`, `scan_region`.
 
@@ -151,11 +151,13 @@ ros2 service call /scopio/calibration/set scopio_interfaces/srv/CalibrationSet \
   "{um_per_px: 0.42, steps_per_um_x: .nan, steps_per_um_y: .nan, steps_per_um_z: .nan}"
 ```
 
-## tracker_node — bead detection (on-demand)
-Subscribes to `image/compressed`, runs trackpy, publishes `beads`. Off by
-default. (Kept in the contract; the standalone tracking *application* is a
-later project. trackpy/pandas/scipy are still not installed in the image — see
-the Dockerfile note — so this node currently idles even when toggled on.)
+## No image-analysis node — by design
+There is deliberately **no tracker/detector node**. The backend senses, streams
+and effectuates; it never looks at the picture. Bead detection, tracking and
+every decision derived from them run on the client side, off the Pi
+(`../../viscosity`, `../../viscosity_agent`), on the MJPEG stream or on
+locally-recorded clips. That keeps the Pi's CPU for the camera and the stage,
+and keeps trackpy/pandas/scipy out of the image entirely.
 
 ## gateway — the API gateway (scopio_gateway, in this workspace)
 FastAPI + rclpy node that maps the whole graph to authenticated HTTP/WebSocket

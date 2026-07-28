@@ -90,9 +90,9 @@ client can join. **ROS owns the hardware; the UI becomes one more ROS client.**
   which stays Pi-internal now anyway. See `ros2_ws/docs/CONNECTIVITY.md`.
 - ~~The monolith (`microscope/`) is kept, untouched, as the debugging tool.~~
   **No longer true:** `microscope/` was deleted once `ui/` and `galvo_draw/`
-  fully replaced it (see §6). The standalone tracking *application* is still
-  deferred; `viscosity/` (the offline analysis pipeline `tracker_node` borrows
-  parameters from) remains.
+  fully replaced it (see §6). `viscosity/` remains — and, since §8 deleted
+  `tracker_node`, it (with `viscosity_agent/`) is now the *only* place bead
+  detection happens.
 
 ## 5. Known placeholders (numbers-only fixes later)
 - Galvo geometry constants (`PIXELS_PER_VOLT`, `VOLTS_TO_ANGLE`,
@@ -196,3 +196,32 @@ result out). `temperature/call` and `awg/call` are the whole API.
   instrument's own limits, drive to two setpoints, always leave the output off.
   When something doesn't work you learn *immediately* whether it's the
   instrument or the integration.
+
+## 8. No image analysis on the Pi — `tracker_node` deleted (v2.0)
+
+`tracker_node` ran trackpy on the live stream and published a `beads` topic
+(count, positions, clump flag). It is **gone**, along with `tracker/set_active`,
+`msg/Bead`, `msg/BeadArray` and `ScanRegion`'s `beads_in_frame` feedback field.
+
+- **It was solving the problem in the wrong place.** Counting and locating SiO₂
+  beads is *analysis*, and analysis wants the whole clip, tunable parameters and
+  a machine that can afford to think. The Pi is neither: it is the sensor and
+  the effectuator. Every CPU cycle it spent on trackpy came out of the camera
+  and the stage.
+- **The client already does it better.** `viscosity/` (offline, validated) and
+  `viscosity_agent/` (live, single-frame scene assessment over the API) both
+  detect beads on the client side, with the same trackpy parameters, on hardware
+  that isn't also driving a microscope. The node was a worse duplicate of code
+  that already existed — and in practice it never even ran: the backend image
+  deliberately omits trackpy/pandas/scipy because pip cannot swap numpy under
+  the apt-managed one, so the node idled from the day it was written.
+- **It kept a heavy dependency tree pointed at the backend.** Deleting the node
+  lets the image stay small and the numpy question stay closed. The Dockerfile
+  no longer has to explain an omission.
+- **The rule this sets:** *recording and analysis are both client concerns.*
+  The backend streams frames and moves hardware. The one place the backend
+  touches pixels is the autofocus sharpness metric — that is a hardware control
+  loop closing on the stage, not scene understanding, and it stays.
+- **Contract impact:** removals are breaking, so `scopio_interfaces` goes to
+  **v2.0** (see `ros2_ws/docs/INTERFACES.md`). Any client subscribing to `beads`
+  must drop it; nothing else in the contract changed.

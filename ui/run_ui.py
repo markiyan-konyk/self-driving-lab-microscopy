@@ -5,7 +5,7 @@ This program owns NO hardware and speaks NO ROS. It is the reference UI for
 the SCOPIO microscope and talks to the Pi's API gateway over plain HTTP/
 WebSocket through the scopio_client SDK:
 
-  subscribes (WS):  camera/state, stage/position, beads, calibration
+  subscribes (WS):  camera/state, stage/position, calibration
   video (MJPEG):    /api/v1/stream.mjpg  -> live view + client-side recording
   services (HTTP):  stage/jog, calibration/set, camera controls
   action (WS):      camera/autofocus (runs on the backend)
@@ -111,7 +111,6 @@ class State:
         self.camera = None          # camera/state message dict
         self.stage = None           # stage/position message dict
         self.awg = None             # awg/status message dict (galvo wavegen)
-        self.beads = None           # beads message dict
         self.calibration = None     # calibration message dict (latched)
         self.connected = False      # gateway subscriptions established
 
@@ -149,7 +148,6 @@ def _subscribe_loop():
             scope.subscribe("camera/state", store("camera"), rate_hz=4)
             scope.subscribe("stage/position", store("stage"), rate_hz=10)
             scope.subscribe("awg/status", store("awg"), rate_hz=2)
-            scope.subscribe("beads", store("beads"), rate_hz=5)
             scope.subscribe("calibration", store("calibration"))
             state.connected = True
             log.info("subscribed to microscope telemetry")

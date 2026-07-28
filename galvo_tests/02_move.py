@@ -17,7 +17,7 @@ import time
 
 from _common import resolve_resource
 
-from galvo import Galvo, V_MAX  # noqa: E402  (path set up in _common)
+from DG1022Z import Galvo, V_MAX  # noqa: E402  (path set up in _common)
 
 
 def main():

@@ -1,10 +1,14 @@
-# SCOPIO ROS 2 Interface Control Document — `scopio_interfaces` v1.0
+# SCOPIO ROS 2 Interface Control Document — `scopio_interfaces` v2.0
 
-**This is the contract. Treat it as frozen.** Any program — a UI, a bead
-tracker, a galvo art app, an autonomous controller — drives the microscope by
-speaking exactly these topics, services, and actions. Changing a field is an
-ABI break: bump the version and update this document deliberately; do not edit
-in place.
+**This is the contract. Treat it as frozen.** Any program — a UI, an offline
+bead-tracking pipeline, a galvo art app, an autonomous controller — drives the
+microscope by speaking exactly these topics, services, and actions. Changing a
+field is an ABI break: bump the version and update this document deliberately;
+do not edit in place.
+
+**Scope of the backend:** it senses, streams and effectuates. It does **no**
+image analysis, so nothing in this contract carries detections or derived
+scene content — clients compute that themselves from the video.
 
 - **Namespace:** everything is under `/scopio` (e.g. `/scopio/image/compressed`).
 - **Units:** stage = Sangaboard *steps* (and *micrometres* where noted); image =
@@ -24,15 +28,23 @@ in place.
 | `image/compressed` | `sensor_msgs/CompressedImage` | camera_node | JPEG live view. Publish rate is a node param (≤ capture fps). |
 | `camera/state` | `scopio_interfaces/CameraState` | camera_node | Current settings + **real measured fps**. |
 | `stage/position` | `scopio_interfaces/StagePosition` | stage_node | Open-loop position in **steps and micrometres**. |
-| `beads` | `scopio_interfaces/BeadArray` | tracker_node | Detected beads (on-demand; tracker off by default). |
 | `awg/status` | `scopio_interfaces/AwgStatus` | galvo_node | AWG liveness + last relayed command. |
 | `temperature/status` | `scopio_interfaces/TemperatureStatus` | temperature_node | Sample temperature, setpoint, TEC current/voltage, fault flags. |
 | `calibration` | `scopio_interfaces/Calibration` | calibration_node | **Latched.** µm/px + steps/µm. |
 
 ### v1.1 — additive only
 `TemperatureStatus` and `InstrumentCall` were **added**; no existing field
-changed, so every v1.0 client keeps working untouched. That is the only kind of
-change this contract accepts.
+changed, so every v1.0 client keeps working untouched.
+
+### v2.0 — breaking: on-Pi image analysis removed
+`tracker_node` and everything it fed are **gone**: the `beads` topic, the
+`tracker/set_active` service, `msg/Bead`, `msg/BeadArray`, and the
+`beads_in_frame` field of `ScanRegion` feedback. Running bead detection on the
+Pi was a design error — it spends the microscope's CPU on work a client can do
+better on the stream or on recorded clips, and it dragged trackpy/pandas/scipy
+into the backend image. The Pi now senses and effectuates only; detection lives
+in `../../viscosity` and `../../viscosity_agent`. Clients that subscribed to
+`beads` must drop that subscription (the gateway answers `unknown_topic`).
 
 > The earlier plan was `sensors/temperature` + `sensor_msgs/Temperature`. It was
 > dropped: a bare temperature reading can't carry the setpoint, TEC current or
@@ -81,7 +93,7 @@ itself and work even while the hardware is offline.
 | Action | Type | Server | Purpose |
 |--------|------|--------|---------|
 | `stage/move_path` | `MoveStagePath` | stage_node | Visit a list of absolute targets, report progress. |
-| `scan_region` | `ScanRegion` | stage_node | Boustrophedon grid scan, report bead count per stop. |
+| `scan_region` | `ScanRegion` | stage_node | Boustrophedon grid scan, report position per stop (the client reads the frames). |
 | `camera/autofocus` | `Autofocus` | camera_node | Sweep Z (via `stage/jog`), measure sharpness on the node's own frames, park at the sharpest Z. |
 
 > **Autofocus is a backend action** (`camera/autofocus`), so every client — the
@@ -114,7 +126,8 @@ itself and work even while the hardware is offline.
 `header`, `bool has_um_per_px`, `float64 um_per_px`,
 `float64 steps_per_um_x/y/z`.
 
-### msg/Bead, msg/BeadArray, msg/StagePoint — unchanged from the scaffold.
+### msg/StagePoint
+`int32 x`, `int32 y`, `int32 z` — one absolute stage target, in steps.
 
 ### srv/StageJog → `int32 dx,dy,dz` ⇒ `bool success, string message, int32 x,y,z`
 ### srv/MoveAbs → `int32 x,y,z` ⇒ `bool success, string message, int32 x,y,z`
@@ -137,3 +150,7 @@ itself and work even while the hardware is offline.
 - Retired in the move to v1.0 (do not resurrect under the same names): the
   node-side recording (`recording/set`, `recording/status`) and the typed galvo
   API (`SetLaser`, `ZeroTweezers`, `RunGalvoWaveform`, geometry in `LaserState`).
+- Retired in the move to v2.0 (do not resurrect): on-Pi image analysis —
+  `beads`, `tracker/set_active`, `Bead`, `BeadArray`, and
+  `ScanRegion.Feedback.beads_in_frame`. Recording and analysis are both client
+  concerns; the backend stays a sensor + effectuator.
