@@ -129,7 +129,7 @@ class DG1022Z:
         self.device.write(f":SOURce2:APPLy:DC 1,1,{self.yoffset:.3f}")
         self.device.write(":OUTP1 ON;:OUTP2 ON")
 
-    def update(self, ch:int, val:float):
+    def dcupdate(self, ch:int, val:float):
         if ch == 1:
             self.xpos = val
             val = self.xpos + self.xoffset
