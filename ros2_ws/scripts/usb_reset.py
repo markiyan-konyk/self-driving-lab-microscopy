@@ -55,7 +55,13 @@ def interfaces(name):
     for iface in sorted(glob.glob(f"/sys/bus/usb/devices/{name}:*")):
         link = os.path.join(iface, "driver")
         drv = os.path.basename(os.path.realpath(link)) if os.path.islink(link) else "-"
-        out.append((os.path.basename(iface), drv))
+        # class fe / subclass 03 IS the USBTMC signature -- it is what the
+        # kernel's usbtmc driver matches on. Anything else and the instrument
+        # is not offering a USBTMC interface at all, which no amount of
+        # rebinding, resetting or reconfiguring on this side can change.
+        cls = read(f"{iface}/bInterfaceClass")
+        sub = read(f"{iface}/bInterfaceSubClass")
+        out.append((os.path.basename(iface), drv, cls, sub))
     return out
 
 
@@ -66,9 +72,13 @@ def bind_usbtmc(name):
     except Exception:
         pass
     done = []
-    for iface, drv in interfaces(name):
+    for iface, drv, cls, sub in interfaces(name):
         if drv != "-":
             done.append(f"{iface} already bound to {drv}")
+            continue
+        if (cls, sub) != ("fe", "03"):
+            done.append(f"{iface} is class {cls}/{sub}, not USBTMC (fe/03) -- "
+                        "the instrument is not offering a USBTMC interface")
             continue
         try:
             with open("/sys/bus/usb/drivers/usbtmc/bind", "w") as f:
@@ -130,10 +140,15 @@ def main():
     for vid, pid, bus, dev, name, product in found:
         tag = KNOWN.get(vid, product or "")
         print(f"  bus {bus:03d} dev {dev:03d}  {vid:04x}:{pid:04x}  {name:<10} {tag}")
-        for iface, drv in interfaces(name):
-            note = "  <-- UNOWNED: a libusb client detached the kernel driver" \
-                   if drv == "-" else ""
-            print(f"      {iface}  driver={drv}{note}")
+        for iface, drv, cls, sub in interfaces(name):
+            if (cls, sub) != ("fe", "03") and vid in KNOWN:
+                note = "  <-- NOT a USBTMC interface (expected fe/03): the " \
+                       "instrument's USB stack is wedged; power-cycle it"
+            elif drv == "-":
+                note = "  <-- UNOWNED: a libusb client detached the kernel driver"
+            else:
+                note = ""
+            print(f"      {iface}  class={cls}/{sub} driver={drv}{note}")
     print(f"\n/dev/usbtmc*: {sorted(glob.glob('/dev/usbtmc*')) or '(none)'}")
 
     running = holders()
