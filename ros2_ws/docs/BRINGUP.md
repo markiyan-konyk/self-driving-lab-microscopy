@@ -195,7 +195,8 @@ Then, on the Pi:
 | `401` from gateway | key not in `secrets/api_keys.json` (regenerate; hot-reloaded) |
 | `504` on service calls | node up but hardware not answering (cables, `GALVO_RESOURCE`) |
 | `awg/status connected: false` | `GALVO_RESOURCE` unset/wrong in `.env`, or USB perms |
-| `temperature/status connected: false` | `TCLAB_RESOURCE` unset/wrong in `.env`, or the wrong USB device was auto-picked (name both resources) |
+| `temperature/status connected: false` | `TCLAB_RESOURCE` unset/wrong in `.env` (both nodes require an address; they no longer guess) |
+| `VI_ERROR_TMO` then `[Errno 32] Pipe error` | The instrument's USBTMC endpoint is **stalled** — it still enumerates but answers nothing. A session aborted mid-transfer does this. Clear it with `docker compose down && sudo python3 scripts/usb_reset.py --vid 1a45` (a port reset = a replug you can do over ssh). If that fails, only a power cycle at the bench will. |
 | Edited `.env`, nothing changed | `docker compose up -d` again — env vars are baked in at container creation |
 | `list_resources()` doesn't show an instrument | Run `python3 instrument_scan.py` (host **and** `docker compose exec scopio python3 /workspace/instrument_scan.py`). A device whose USB interface class is CDC/vendor is a **virtual COM port**: it can only ever be an `ASRL/dev/tty…::INSTR` resource, never `USB…::INSTR`, and USB auto-discovery skips it by design. Missing pyserial hides serial instruments entirely. |
 | Temperature reads but never moves | TEC output off (`output`, `[true]`), or the rear Remote-Enable input is gating it |

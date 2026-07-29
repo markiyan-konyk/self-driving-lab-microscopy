@@ -19,10 +19,10 @@ import glob
 import os
 import sys
 
-# Instruments this rig knows about, by USB vendor id.
+# Instruments this rig knows about: vendor id -> (label, .env var, IDN markers).
 KNOWN = {
-    0x1AB1: ("Rigol DG1022Z (galvo mirrors)", "GALVO_RESOURCE"),
-    0x1A45: ("Wavelength TC10 LAB (temperature)", "TCLAB_RESOURCE"),
+    0x1AB1: ("Rigol DG1022Z (galvo mirrors)", "GALVO_RESOURCE", ("RIGOL", "DG1")),
+    0x1A45: ("Wavelength TC10 LAB (temperature)", "TCLAB_RESOURCE", ("WAVELENGTH", "TC10")),
 }
 
 
@@ -54,11 +54,20 @@ def ask_usbtmc(path):
 def main():
     found = {}      # env var -> resource string
     rows = []       # (resource, idn)
+    claimed = set()  # vendor ids already answering on a char device
 
-    # 1. kernel usbtmc char devices (present only while pyvisa/libusb has NOT
-    #    claimed the instrument -- opening it via VISA detaches this driver).
+    # 1. Kernel usbtmc char devices FIRST, and if one answers we do NOT go on to
+    #    probe that same instrument over VISA -- opening it with pyvisa/libusb
+    #    DETACHES the kernel driver, and the /dev/usbtmc* node you were about to
+    #    paste into .env disappears from under you.
     for path in sorted(glob.glob("/dev/usbtmc*")):
-        rows.append((path, ask_usbtmc(path)))
+        idn = ask_usbtmc(path)
+        rows.append((path, idn))
+        up = idn.upper()
+        for vid, (_label, var, markers) in KNOWN.items():
+            if any(m in up for m in markers):
+                found.setdefault(var, path)
+                claimed.add(vid)
 
     # 2. VISA. Only KNOWN vendor ids are opened: reading a stranger's *IDN?
     #    disturbs whoever owns it, which is how instruments start dropping out.
@@ -69,6 +78,10 @@ def main():
             vid = usb_vid(res)
             if vid is None:
                 rows.append((res, "<not USB -- not probed>"))
+                continue
+            if vid in claimed:
+                rows.append((res, "<same instrument as the /dev/usbtmc* above; "
+                                  "not probed -- that would detach the kernel driver>"))
                 continue
             if vid not in KNOWN:
                 rows.append((res, f"<unknown vendor {vid:#06x} -- not probed>"))
@@ -105,7 +118,7 @@ def main():
 
     print("\n" + "-" * 70)
     print("Paste into ros2_ws/.env (then: docker compose up -d):\n")
-    for vid, (label, var) in KNOWN.items():
+    for vid, (label, var, _markers) in KNOWN.items():
         res = found.get(var)
         if res:
             print(f"  # {label}")
