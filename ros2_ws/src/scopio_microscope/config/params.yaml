@@ -24,43 +24,27 @@
 
 /scopio/galvo_node:
   ros__parameters:
-    # VISA resource of the AWG (the DG1022Z). SET THIS IN ros2_ws/.env as
-    # GALVO_RESOURCE, which wins over this -- that file is the one place the rig
-    # is described. Find the string with scripts/list_instruments.py.
-    # Unset => the node runs and reports connected=false with a log line saying
-    # so. It does NOT guess: picking "the first USB instrument" is how the AWG
-    # ended up opening the temperature controller and dropping its readings.
+    # VISA resource of the AWG. Empty => auto-discover the first RIGOL-vendor USB
+    # device (it never opens another vendor's instrument). Set GALVO_RESOURCE in
+    # ros2_ws/.env to name it explicitly; that wins over this.
     resource: ""
-    auto_discover: false     # true => fall back to the first RIGOL-vendor USB device
-    init_on_connect: true    # on connect, put both channels in DC mode + outputs ON (dcinit),
-                             # so a client's update(ch,val) moves the galvo right away. false => leave as-is.
+    auto_discover: true
+    init_on_connect: true    # on connect, DC mode + outputs ON, so update(ch,val) moves the galvo
     publish_rate: 5.0        # Hz, AwgStatus
-    reconnect_period: 15.0   # s between reconnect attempts while offline
-    # VISA read/write timeout. Bumped from 5000: a large arbitrary-waveform
-    # ":DATA VOLATILE" upload can take a few seconds for the DG1022Z to ingest
-    # over USB-TMC, and 5 s was too tight (clients saw "[Errno 110] timed out").
-    # Clients must also request a matching gateway timeout for the big uploads
-    # (galvo_draw does). Takes effect on container restart.
+    reconnect_period: 15.0
+    # 15 s, not 5: a large arbitrary-waveform upload takes the DG1022Z a few
+    # seconds to ingest over USB-TMC.
     timeout_ms: 15000
 
 /scopio/temperature_node:
   ros__parameters:
-    # Address of the TC10 LAB. SET THIS IN ros2_ws/.env as TCLAB_RESOURCE, which
-    # wins over this. Find the string with scripts/list_instruments.py.
-    # Unset => the node runs, reports connected=false and says so loudly. It
-    # does NOT guess which USB device is the controller.
-    # Two forms work: a VISA string ("USB0::6725::12545::<serial>::0::INSTR",
-    # or "TCPIP::<ip>::INSTR" for an Ethernet unit -- which can never be
-    # discovered, pyvisa-py does not scan the LAN), or the kernel usbtmc char
-    # device ("/dev/usbtmc0"). Whichever gets there first wins on this Pi:
-    # opening it over VISA detaches the kernel driver and the char device
-    # disappears, so do not expect both to be available at once.
+    # Address of the TC10 LAB. Empty => auto-discover the first WAVELENGTH-vendor
+    # USB device. An Ethernet unit must be named (pyvisa-py cannot scan the LAN);
+    # TCLAB_RESOURCE in ros2_ws/.env wins over this.
     resource: ""
-    auto_discover: false     # true => look for a WAVELENGTH-vendor device / /dev/usbtmc*
-    units: "C"               # forced on connect, so published degrees are unambiguous
-                             # ("" => leave the instrument's current units alone)
-    publish_rate: 1.0        # Hz, TemperatureStatus (this node POLLS, unlike galvo_node)
-    reconnect_period: 10.0   # s between reconnect attempts while offline
+    units: "C"               # forced on connect; "" leaves the instrument alone
+    publish_rate: 1.0        # Hz, TemperatureStatus (this node polls)
+    reconnect_period: 15.0
     timeout_ms: 5000
 
 /scopio/calibration_node:

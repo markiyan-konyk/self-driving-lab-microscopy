@@ -26,27 +26,14 @@ Legend: 🖥️ = on the Pi, 💻 = on another machine on the same network.
       lsusb                                    # sanity: the boxes are seen at all
       ```
 
-      One command prints every instrument it can see, identified, plus the exact
-      lines to paste. Run it with the backend **stopped** — a running node holds
-      its instrument open and the script will just report "Resource busy":
+      Both instrument lines are **optional**: each node auto-discovers by USB
+      vendor id and only ever opens its own instrument. Set one to pin it, or
+      when the instrument is on Ethernet (those can never be discovered):
 
       ```bash
       docker compose down
       python3 scripts/list_instruments.py
       ```
-
-      ```ini
-      GALVO_RESOURCE=USB0::6833::1602::DG1ZA000000000::0::INSTR
-      TCLAB_RESOURCE=/dev/usbtmc0          # or USB0::6725::… or TCPIP::<ip>::INSTR
-      ```
-
-      **Both nodes require their address.** They do not guess: a node with no
-      address comes up, reports `connected: false` and logs why. That is
-      deliberate — auto-picking "the first USB instrument" is how the galvo node
-      ended up opening the *temperature controller*, failing with `EBUSY`, and
-      knocking its readings out on every 15 s retry. (`auto_discover: true` in
-      `config/params.yaml` re-enables a vendor-id-matched fallback if you really
-      want it.)
 - [ ] Generate at least one API key:
       `python3 scripts/generate_api_key.py laptop` (note the printed key).
 
@@ -145,23 +132,11 @@ python3 ros2_ws/scripts/smoke_test_api.py --url http://<pi-ip>:8000 --key $KEY
 
 ## 7b. Temperature controller 💻
 
-Prove the box FIRST, outside Docker: `python3 tc10_read.py` (repo root) scans
-`/dev/usbtmc*` and VISA, picks the TC10 LAB and prints its temperature. If that
-fails, nothing below can work — `--debug` shows every byte exchanged.
-
-> On USB the Pi's **kernel usbtmc driver** owns this instrument (`/dev/usbtmc0`)
-> and pyvisa/libusb then *hangs* on it. That is expected, not a fault; the
-> driver talks to the char device. You need
-> `KERNEL=="usbtmc[0-9]*", MODE="0666"` from `ros2_ws/udev/` for a non-root
-> process (and the container) to open it.
-
-Then, on the Pi:
-
-- [ ] `temperature/status` shows `connected: true` in `/api/v1/status`.
-      If it's false with the controller plugged in, read the container log —
-      `docker compose logs scopio | grep -A6 "TC10 LAB NOT CONNECTED"` — the
-      node prints an ERROR banner saying what it tried. Then check
-      `TCLAB_RESOURCE` in `ros2_ws/.env` (step 0) and `docker compose up -d`.
+- [ ] `temperature/status` shows `connected: true` in `/api/v1/status`. If it's
+      false with the controller plugged in, `docker compose logs scopio | grep
+      "TC10 LAB"` says what it tried. Check USB permissions
+      (`ros2_ws/udev/99-scopio-instruments.rules`) and, for an Ethernet unit,
+      `TCLAB_RESOURCE` in `ros2_ws/.env`.
 - [ ] Read it: `curl ... -d '{"method": "temperature"}' .../api/v1/service/temperature/call`
 - [ ] Drive it: `-d '{"method": "set_setpoint", "args": "[25.0]"}'`, then
       `-d '{"method": "output", "args": "[true]"}'` and watch `temperature`
@@ -195,8 +170,8 @@ Then, on the Pi:
 | `401` from gateway | key not in `secrets/api_keys.json` (regenerate; hot-reloaded) |
 | `504` on service calls | node up but hardware not answering (cables, `GALVO_RESOURCE`) |
 | `awg/status connected: false` | `GALVO_RESOURCE` unset/wrong in `.env`, or USB perms |
-| `temperature/status connected: false` | `TCLAB_RESOURCE` unset/wrong in `.env` (both nodes require an address; they no longer guess) |
-| `VI_ERROR_TMO` then `[Errno 32] Pipe error` | The instrument's USBTMC endpoint is **stalled** — it still enumerates but answers nothing. A session aborted mid-transfer does this. Clear it with `docker compose down && sudo python3 scripts/usb_reset.py --vid 1a45` (a port reset = a replug you can do over ssh). If that fails, only a power cycle at the bench will. |
+| `temperature/status connected: false` | Controller off/unplugged, USB perms, or an Ethernet unit with no `TCLAB_RESOURCE` |
+| Every SCPI call times out but `lsusb` shows the instrument | Its USBTMC session is stalled. Power-cycle the instrument itself — a USB replug does not reset a self-powered box, and neither does a port reset. |
 | Edited `.env`, nothing changed | `docker compose up -d` again — env vars are baked in at container creation |
 | `list_resources()` doesn't show an instrument | Run `python3 instrument_scan.py` (host **and** `docker compose exec scopio python3 /workspace/instrument_scan.py`). A device whose USB interface class is CDC/vendor is a **virtual COM port**: it can only ever be an `ASRL/dev/tty…::INSTR` resource, never `USB…::INSTR`, and USB auto-discovery skips it by design. Missing pyserial hides serial instruments entirely. |
 | Temperature reads but never moves | TEC output off (`output`, `[true]`), or the rear Remote-Enable input is gating it |

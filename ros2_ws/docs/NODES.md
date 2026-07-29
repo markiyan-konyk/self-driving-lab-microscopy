@@ -82,10 +82,9 @@ Either way the node takes no view of what commands *mean*: no volts, no pixels,
 no waveform semantics. Laser *geometry* stays in client code.
 
 - **Publishes:** `awg/status`. **Services:** `awg/call`, `awg/write`, `awg/query`.
-- **Params:** `resource` (**required** — set `GALVO_RESOURCE` in `ros2_ws/.env`;
-  find it with `scripts/list_instruments.py`), `auto_discover` (default false —
-  the node does not guess which USB device is the AWG), `timeout_ms`,
-  `publish_rate`, `reconnect_period`.
+- **Params:** `resource` (or `GALVO_RESOURCE`; empty ⇒ auto-discover the first
+  Rigol-vendor USB device), `auto_discover`, `timeout_ms`, `publish_rate`,
+  `reconnect_period`.
 
 ```bash
 # what can this instrument do? (name, signature, docstring for each method)
@@ -121,10 +120,9 @@ temperature loop is a sensor, clients want the trend, and the controller is idle
 between commands anyway.
 
 - **Publishes:** `temperature/status`. **Service:** `temperature/call`.
-- **Params:** `resource` (**required** — set `TCLAB_RESOURCE` in `ros2_ws/.env`;
-  find it with `scripts/list_instruments.py`), `auto_discover` (default false),
-  `publish_rate`, `timeout_ms`, `reconnect_period`, `units` (forced on connect
-  so the published degrees are unambiguous; `""` leaves the instrument alone).
+- **Params:** `resource` (or `TCLAB_RESOURCE`; empty ⇒ auto-discover the first
+  Wavelength-vendor USB device), `publish_rate`, `timeout_ms`,
+  `reconnect_period`, `units` (forced on connect; `""` leaves it alone).
 
 ```bash
 ros2 topic echo /scopio/temperature/status
@@ -135,28 +133,12 @@ ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall 
 ros2 service call /scopio/temperature/call scopio_interfaces/srv/InstrumentCall \
   "{method: 'output', args: '[true]'}"      # nothing heats/cools until this is on
 ```
-> **Transport:** on USB this instrument speaks USBTMC, and there are two
-> mutually exclusive ways to reach it. The Pi's **kernel usbtmc driver** may
-> claim it and expose `/dev/usbtmc0` — while it holds the device, libusb (and so
-> pyvisa-py) cannot open it and *hangs* rather than failing. Conversely, opening
-> it over VISA **detaches** the kernel driver and `/dev/usbtmc0` disappears.
-> Whichever gets there first wins; both work. The driver handles both — a
-> `TCLAB_RESOURCE` starting with `/dev/` is spoken to as a char device,
-> anything else goes through pyvisa. Set whichever
-> `scripts/list_instruments.py` reports. The container sees the char device
-> because of `privileged: true` (already set) plus the
-> `KERNEL=="usbtmc[0-9]*", MODE="0666"` udev rule in `ros2_ws/udev/`.
->
-> **Two USB instruments, one bus:** name `GALVO_RESOURCE` *and*
-> `TCLAB_RESOURCE` in `ros2_ws/.env` — neither node will guess. Auto-picking
-> the first USB device is how the galvo node opened *this* instrument, failed
-> with `EBUSY`, and dropped its readings on every retry. An Ethernet TC10 LAB
-> must always be named (`TCPIP::<ip>::INSTR`); pyvisa-py cannot scan the LAN.
->
-> **It complains loudly.** No controller at startup ⇒ an ERROR banner in the
-> container log on every retry, not a quiet `connected=false`. The node still
-> comes up (the rest of the graph must not die with it) and reconnects by
-> itself once you replug.
+> **Two instruments, one USB bus:** each node auto-discovers by **vendor id**
+> and will only ever open its own instrument — the galvo node a Rigol, this one
+> a Wavelength. That matters: taking "the first USB device" made the galvo node
+> open *this* controller, fail with `EBUSY`, and drop its readings on every
+> retry. An Ethernet unit must still be named in `.env` (`TCPIP::<ip>::INSTR`);
+> pyvisa-py cannot scan the LAN.
 >
 > **Ramping is a client concern.** The controller has no ramp command, so an app
 > that wants one walks the setpoint itself — same node/app split as the galvo

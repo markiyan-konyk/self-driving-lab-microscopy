@@ -50,14 +50,12 @@ from scopio_interfaces.srv import AwgQuery, AwgWrite, InstrumentCall
 from .drivers import dispatch
 from .drivers.dg1022z import DG1022Z
 
-RIGOL_VID = 0x1AB1      # Rigol Technologies (DG1000Z series product id 0x0642)
+RIGOL_VID = 0x1AB1
 
 
 def usb_vid(resource):
-    """USB vendor id out of a VISA resource string, WITHOUT opening anything.
-    pyvisa-py writes it in decimal (USB0::6833::1602::...), NI-VISA in hex
-    (USB0::0x1AB1::0x0642::...); int(x, 0) reads both. Returns None for
-    non-USB resources."""
+    """Vendor id from a VISA resource string; pyvisa-py writes it in decimal,
+    NI-VISA in hex. None for non-USB resources."""
     parts = resource.split("::")
     if len(parts) < 2 or not parts[0].upper().startswith("USB"):
         return None
@@ -84,7 +82,7 @@ class GalvoNode(Node):
         self.declare_parameter("publish_rate", 5.0)
         self.declare_parameter("timeout_ms", 15000)
         self.declare_parameter("reconnect_period", 15.0)
-        self.declare_parameter("auto_discover", False)
+        self.declare_parameter("auto_discover", True)
         self.declare_parameter("init_on_connect", True)
 
         self._lock = threading.Lock()   # guards _gen swaps; VISA I/O is locked inside DG1022Z
@@ -110,16 +108,12 @@ class GalvoNode(Node):
     #  Connection
     # ------------------------------------------------------------------ #
     def _resolve_resource(self):
-        """GALVO_RESOURCE env > `resource` param. Nothing else, by default.
+        """GALVO_RESOURCE env > `resource` param > the first RIGOL on USB.
 
-        The rig is described ONCE, in ros2_ws/.env -- guessing which USB device
-        is the AWG is exactly what went wrong before (it picked the temperature
-        controller, opened it, and knocked its readings out on every retry).
-
-        Setting `auto_discover: true` re-enables a fallback, and that fallback
-        now matches the Rigol VENDOR ID and nothing else -- read out of the
-        resource STRING, so a foreign instrument is never opened at all.
-        Ethernet units can never be discovered (pyvisa-py doesn't scan the LAN).
+        Auto-discovery matches the Rigol vendor id, read out of the resource
+        STRING, so another vendor's instrument is never opened. It used to take
+        the first USB device it saw, which meant it opened the temperature
+        controller and knocked its readings out on every retry.
         """
         resource = os.environ.get("GALVO_RESOURCE") or self.get_parameter("resource").value
         if resource or not self.get_parameter("auto_discover").value:
@@ -132,33 +126,20 @@ class GalvoNode(Node):
             return ""
         rigol = [r for r in found if usb_vid(r) == RIGOL_VID]
         if not rigol:
-            foreign = [r for r in found if r.upper().startswith("USB")]
-            if foreign:
-                self.get_logger().warning(
-                    f"No Rigol AWG on USB. Leaving {foreign} alone -- those belong "
-                    "to other instruments. Set GALVO_RESOURCE if your AWG is not "
-                    "a Rigol.")
             return ""
-        if len(rigol) > 1:
-            self.get_logger().warning(
-                f"{len(rigol)} Rigol instruments present {rigol}; set "
-                "GALVO_RESOURCE to pick one deliberately.")
         self.get_logger().info(f"Auto-selected AWG resource: {rigol[0]}")
         return rigol[0]
 
     def _connect(self):
         resource = self._resolve_resource()
         if not resource:
-            # Refuse to open an unnamed instrument. DG1022Z._open() falls back
-            # to list_resources()[0] on an empty string, which on a two-
-            # instrument rig grabs whatever enumerated first -- that is how the
-            # AWG ended up opening the temperature controller and knocking its
-            # readings out every retry. Name it in .env instead.
-            self.last_error = "GALVO_RESOURCE is not set"
-            self.get_logger().error(
-                "AWG address not configured. Set GALVO_RESOURCE in ros2_ws/.env "
-                "(find it with: python3 scripts/list_instruments.py), then "
-                "`docker compose up -d`. Node runs, reports connected=false.")
+            # DG1022Z._open() falls back to list_resources()[0] on an empty
+            # string, which would grab the temperature controller. Never call it
+            # without a resolved Rigol.
+            self.last_error = "no Rigol AWG found"
+            self.get_logger().warning(
+                "No Rigol AWG found; set GALVO_RESOURCE in ros2_ws/.env if it is "
+                "on Ethernet. Node runs, reports connected=false.")
             return False
         try:
             # DG1022Z() does NOT open on construction -- the node opens it.

@@ -1,48 +1,20 @@
 """Wavelength Electronics TC10 LAB temperature controller.
 
-Same shape as dg1022z.DG1022Z: the object does NOT open on construction, the
-node calls `_open()`. Everything public is reachable over `temperature/call`.
+Same shape as dg1022z.DG1022Z: does not open on construction, the node calls
+_open(). Every public method is reachable over the temperature/call service.
 
-TWO TRANSPORTS, because on the Pi the kernel's usbtmc driver claims this
-instrument and exposes it as /dev/usbtmc0. Once it has, libusb (and therefore
-pyvisa-py) cannot open the device -- it HANGS, it does not error. So:
+command() and query() are the only two methods the rest of the class uses.
 
-    resource = "/dev/usbtmc0"          -> kernel char device (plain SCPI on a fd)
-    resource = "USB0::0x1A45::..."     -> pyvisa
-    resource = "TCPIP::192.168.1.50::INSTR" -> pyvisa (Ethernet unit)
-    resource = ""                      -> auto: char devices first, then USB VISA
-
-`command()` and `query()` are the only two methods the rest of the class uses;
-every other method is a one-line SCPI wrapper over them, so adding a command is
-one line and clients can always fall back to raw SCPI through the same service.
-
-Command reference: "COMMAND SET, LAB Series Instruments" (COMMAND-00400 rev H).
-Units for set_temperature/temperature/limits follow set_units() -- C by default.
+Command reference: COMMAND SET, LAB Series Instruments (COMMAND-00400 rev H).
+Temperatures follow set_units() -- Celsius by default.
 """
 
-import glob
-import os
 import threading
 
 import pyvisa
 
-READ_SIZE = 256      # keep small: the usbtmc driver reads until count or EOM
-WAVELENGTH_VID = 0x1A45   # Wavelength Electronics (TC10 LAB product id 0x3101)
+WAVELENGTH_VID = 0x1A45
 
-
-def usb_vid(resource):
-    """USB vendor id out of a VISA resource string, WITHOUT opening anything.
-    pyvisa-py writes it in decimal (USB0::6725::12545::...), NI-VISA in hex
-    (USB0::0x1A45::0x3101::...); int(x, 0) reads both. None for non-USB."""
-    parts = resource.split("::")
-    if len(parts) < 2 or not parts[0].upper().startswith("USB"):
-        return None
-    try:
-        return int(parts[1], 0)
-    except ValueError:
-        return None
-
-# TEC:COND? / TEC:EVEnt? bits, TC LAB column (manual p.79/81).
 CONDITION_BITS = {
     0: "current_limit",
     2: "sensor_limit",
@@ -56,114 +28,60 @@ CONDITION_BITS = {
     11: "laser_shutdown_triggered",
     15: "front_panel_power_on",
 }
-# Bits that mean something is WRONG (in_tolerance/output_on/power_on are normal).
 FAULT_BITS = (0, 2, 3, 4, 5, 6, 7, 11)
 
 UNITS = {0: "C", 1: "K", 2: "F", 3: "raw"}
+
+
+def usb_vid(resource):
+    """Vendor id from a VISA resource string; pyvisa-py writes it in decimal,
+    NI-VISA in hex. None for non-USB resources."""
+    parts = resource.split("::")
+    if len(parts) < 2 or not parts[0].upper().startswith("USB"):
+        return None
+    try:
+        return int(parts[1], 0)
+    except ValueError:
+        return None
 
 
 class TC10LAB:
     def __init__(self, resource="", timeout_ms=5000):
         self.resource = resource
         self.timeout_ms = timeout_ms
-        self._lock = threading.RLock()   # sessions are NOT thread-safe
+        self._lock = threading.RLock()
         self.rm = None
-        self.device = None      # pyvisa resource, when using VISA
-        self.fd = None          # file descriptor, when using /dev/usbtmc*
+        self.device = None
 
-    # ======================================================================
-    # Connection (private: not reachable over the API)
-    # ======================================================================
     def _open(self):
-        env = os.environ.get("TCLAB_RESOURCE")
-        if env:
-            self.resource = env
+        self.rm = pyvisa.ResourceManager("@py")
         if not self.resource:
-            self.resource = self._discover()
-        if not self.resource:
-            raise RuntimeError(
-                "No TC10 LAB found. Checked /dev/usbtmc* and USB VISA resources. "
-                "Is it powered on and plugged in? Set TCLAB_RESOURCE to name it "
-                "explicitly (an Ethernet unit MUST be named: pyvisa-py cannot "
-                "scan the LAN).")
-
-        if self.resource.startswith("/dev/"):
-            self.fd = os.open(self.resource, os.O_RDWR)
-        else:
-            self.rm = pyvisa.ResourceManager("@py")
-            self.device = self.rm.open_resource(self.resource)
-            self.device.read_termination = "\n"
-            self.device.write_termination = "\n"
-            self.device.timeout = self.timeout_ms
-
-    def _discover(self):
-        """First thing that answers *IDN? like a TC LAB. Char devices first --
-        if the kernel owns the instrument, VISA will hang on it, not fail."""
-        for path in sorted(glob.glob("/dev/usbtmc*")):
-            fd = None
-            try:
-                fd = os.open(path, os.O_RDWR)
-                os.write(fd, b"*IDN?\n")
-                idn = os.read(fd, READ_SIZE).decode(errors="replace")
-            except Exception:
-                continue
-            finally:
-                if fd is not None:
-                    os.close(fd)
-            if "TC10" in idn.upper() or "WAVELENGTH" in idn.upper():
-                return path
-        try:
-            rm = pyvisa.ResourceManager("@py")
-            # Filter on the vendor id in the resource STRING: opening someone
-            # else's instrument just to read its *IDN? is what makes two nodes
-            # fight over one USB bus (EBUSY here, dropped readings there).
-            for res in rm.list_resources("USB?*INSTR"):
-                if usb_vid(res) != WAVELENGTH_VID:
-                    continue
-                dev = None
-                try:
-                    dev = rm.open_resource(res, open_timeout=self.timeout_ms)
-                    dev.timeout = self.timeout_ms
-                    idn = dev.query("*IDN?")
-                except Exception:
-                    continue
-                finally:
-                    if dev is not None:
-                        dev.close()
-                if "TC10" in idn.upper() or "WAVELENGTH" in idn.upper():
-                    return res
-        except Exception:
-            pass
-        return ""
+            # Match the vendor id in the resource string so we never open
+            # another instrument just to ask what it is.
+            usb = [r for r in self.rm.list_resources("USB?*INSTR")
+                   if usb_vid(r) == WAVELENGTH_VID]
+            if not usb:
+                raise RuntimeError("no TC10 LAB on USB; set TCLAB_RESOURCE for an "
+                                   "Ethernet unit (pyvisa-py cannot scan the LAN)")
+            self.resource = usb[0]
+        self.device = self.rm.open_resource(self.resource)
+        self.device.read_termination = "\n"
+        self.device.write_termination = "\n"
+        self.device.timeout = self.timeout_ms
 
     def _close(self):
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
         if self.device is not None:
             self.device.close()
-            self.device = None
         if self.rm is not None:
             self.rm.close()
-            self.rm = None
+        self.device = self.rm = None
 
-    # ======================================================================
-    # Raw escape hatches -- every method below is built on these two
-    # ======================================================================
     def command(self, cmd):
-        """Send one SCPI command, no response. e.g. command('TEC:SET 25')"""
         with self._lock:
-            if self.fd is not None:
-                os.write(self.fd, cmd.encode() + b"\n")
-            else:
-                self.device.write(cmd)
+            self.device.write(cmd)
 
     def query(self, cmd):
-        """Send one SCPI query, return the stripped reply. e.g. query('TEC:ACT?')"""
         with self._lock:
-            if self.fd is not None:
-                os.write(self.fd, cmd.encode() + b"\n")
-                return os.read(self.fd, READ_SIZE).decode(errors="replace").strip()
             return self.device.query(cmd).strip()
 
     def query_float(self, cmd):
