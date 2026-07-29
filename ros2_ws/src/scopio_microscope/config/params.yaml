@@ -24,12 +24,14 @@
 
 /scopio/galvo_node:
   ros__parameters:
-    # VISA resource of the AWG (e.g. the DG1022Z). Empty => auto-discover the
-    # first USB instrument; nothing found => node still runs, reports
-    # connected=false. NORMALLY SET IN ros2_ws/.env (GALVO_RESOURCE), which
-    # wins over this -- that file is the one place the rig is described.
+    # VISA resource of the AWG (the DG1022Z). SET THIS IN ros2_ws/.env as
+    # GALVO_RESOURCE, which wins over this -- that file is the one place the rig
+    # is described. Find the string with scripts/list_instruments.py.
+    # Unset => the node runs and reports connected=false with a log line saying
+    # so. It does NOT guess: picking "the first USB instrument" is how the AWG
+    # ended up opening the temperature controller and dropping its readings.
     resource: ""
-    auto_discover: true      # set false (+ resource) when several USB instruments share the bus
+    auto_discover: false     # true => fall back to the first RIGOL-vendor USB device
     init_on_connect: true    # on connect, put both channels in DC mode + outputs ON (dcinit),
                              # so a client's update(ch,val) moves the galvo right away. false => leave as-is.
     publish_rate: 5.0        # Hz, AwgStatus
@@ -43,13 +45,18 @@
 
 /scopio/temperature_node:
   ros__parameters:
-    # Address of the TC10 LAB. NORMALLY SET IN ros2_ws/.env (TCLAB_RESOURCE),
-    # which wins over this. Empty => auto-discover: /dev/usbtmc* first, then USB
-    # VISA. On the Pi the kernel's usbtmc driver claims this instrument, so the
-    # char device IS the normal path -- pyvisa/libusb cannot open it once the
-    # kernel has it (it hangs rather than failing). An Ethernet unit must be
-    # named explicitly ("TCPIP::<ip>::INSTR"); pyvisa-py cannot scan the LAN.
+    # Address of the TC10 LAB. SET THIS IN ros2_ws/.env as TCLAB_RESOURCE, which
+    # wins over this. Find the string with scripts/list_instruments.py.
+    # Unset => the node runs, reports connected=false and says so loudly. It
+    # does NOT guess which USB device is the controller.
+    # Two forms work: a VISA string ("USB0::6725::12545::<serial>::0::INSTR",
+    # or "TCPIP::<ip>::INSTR" for an Ethernet unit -- which can never be
+    # discovered, pyvisa-py does not scan the LAN), or the kernel usbtmc char
+    # device ("/dev/usbtmc0"). Whichever gets there first wins on this Pi:
+    # opening it over VISA detaches the kernel driver and the char device
+    # disappears, so do not expect both to be available at once.
     resource: ""
+    auto_discover: false     # true => look for a WAVELENGTH-vendor device / /dev/usbtmc*
     units: "C"               # forced on connect, so published degrees are unambiguous
                              # ("" => leave the instrument's current units alone)
     publish_rate: 1.0        # Hz, TemperatureStatus (this node POLLS, unlike galvo_node)

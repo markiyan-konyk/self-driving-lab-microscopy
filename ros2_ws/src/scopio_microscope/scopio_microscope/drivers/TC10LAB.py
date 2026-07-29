@@ -27,6 +27,20 @@ import threading
 import pyvisa
 
 READ_SIZE = 256      # keep small: the usbtmc driver reads until count or EOM
+WAVELENGTH_VID = 0x1A45   # Wavelength Electronics (TC10 LAB product id 0x3101)
+
+
+def usb_vid(resource):
+    """USB vendor id out of a VISA resource string, WITHOUT opening anything.
+    pyvisa-py writes it in decimal (USB0::6725::12545::...), NI-VISA in hex
+    (USB0::0x1A45::0x3101::...); int(x, 0) reads both. None for non-USB."""
+    parts = resource.split("::")
+    if len(parts) < 2 or not parts[0].upper().startswith("USB"):
+        return None
+    try:
+        return int(parts[1], 0)
+    except ValueError:
+        return None
 
 # TEC:COND? / TEC:EVEnt? bits, TC LAB column (manual p.79/81).
 CONDITION_BITS = {
@@ -100,7 +114,12 @@ class TC10LAB:
                 return path
         try:
             rm = pyvisa.ResourceManager("@py")
+            # Filter on the vendor id in the resource STRING: opening someone
+            # else's instrument just to read its *IDN? is what makes two nodes
+            # fight over one USB bus (EBUSY here, dropped readings there).
             for res in rm.list_resources("USB?*INSTR"):
+                if usb_vid(res) != WAVELENGTH_VID:
+                    continue
                 dev = None
                 try:
                     dev = rm.open_resource(res, open_timeout=self.timeout_ms)

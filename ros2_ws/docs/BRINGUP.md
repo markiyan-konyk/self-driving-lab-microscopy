@@ -26,24 +26,27 @@ Legend: 🖥️ = on the Pi, 💻 = on another machine on the same network.
       lsusb                                    # sanity: the boxes are seen at all
       ```
 
-      To get the exact VISA strings you need pyvisa. Either on any machine with
-      the instrument attached (`python temperature_test.py --list`), or from the
-      container once the stack is up (step 2) — the `.env` can be filled in then
-      and applied with another `docker compose up -d`:
+      One command prints every instrument it can see, identified, plus the exact
+      lines to paste. Run it with the backend **stopped** — a running node holds
+      its instrument open and the script will just report "Resource busy":
 
       ```bash
-      docker compose exec scopio python3 -c \
-        "import pyvisa; print(pyvisa.ResourceManager('@py').list_resources())"
+      docker compose down
+      python3 scripts/list_instruments.py
       ```
 
       ```ini
-      GALVO_RESOURCE=USB0::0x1AB1::0x0642::DG1ZA000000000::INSTR
-      TCLAB_RESOURCE=TCPIP::192.168.1.50::INSTR
+      GALVO_RESOURCE=USB0::6833::1602::DG1ZA000000000::0::INSTR
+      TCLAB_RESOURCE=/dev/usbtmc0          # or USB0::6725::… or TCPIP::<ip>::INSTR
       ```
 
-      Leave a line out and that node auto-discovers the first USB instrument —
-      fine with one instrument on the bus, a coin flip with two. An Ethernet
-      TC LAB must always be named (pyvisa-py cannot scan the LAN).
+      **Both nodes require their address.** They do not guess: a node with no
+      address comes up, reports `connected: false` and logs why. That is
+      deliberate — auto-picking "the first USB instrument" is how the galvo node
+      ended up opening the *temperature controller*, failing with `EBUSY`, and
+      knocking its readings out on every 15 s retry. (`auto_discover: true` in
+      `config/params.yaml` re-enables a vendor-id-matched fallback if you really
+      want it.)
 - [ ] Generate at least one API key:
       `python3 scripts/generate_api_key.py laptop` (note the printed key).
 

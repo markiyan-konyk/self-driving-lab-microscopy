@@ -43,6 +43,10 @@ from scopio_interfaces.srv import InstrumentCall
 from .drivers import dispatch
 from .drivers.TC10LAB import TC10LAB
 
+# Consecutive failed polls before the session is declared dead. >1 so a single
+# USB hiccup (another process enumerating the bus) cannot flap the reading.
+POLL_FAILURES_BEFORE_DROP = 3
+
 META_METHODS = (
     {"name": "list_methods", "signature": "()",
      "doc": "List every method callable through this node."},
@@ -57,12 +61,15 @@ class TemperatureNode(Node):
     def __init__(self):
         super().__init__("temperature_node")
         self.declare_parameter("resource", "")
+        self.declare_parameter("auto_discover", False)
         self.declare_parameter("publish_rate", 1.0)
         self.declare_parameter("timeout_ms", 5000)
         self.declare_parameter("reconnect_period", 10.0)
         self.declare_parameter("units", "C")
 
         self._lock = threading.Lock()   # guards tc swaps; I/O is locked inside TC10LAB
+        self._poll_lock = threading.Lock()   # one poll in flight at a time
+        self._poll_fails = 0
         self.tc = None
         self.idn = ""
         self.last_error = ""
@@ -84,10 +91,17 @@ class TemperatureNode(Node):
     #  Connection
     # ------------------------------------------------------------------ #
     def _connect(self):
-        # TCLAB_RESOURCE wins over the param -- .env is the one place the rig is
-        # described. The driver honours it too; resolving here just lets us log
-        # what was chosen. Empty => the driver auto-discovers (char device first).
+        # The rig is described ONCE, in ros2_ws/.env. We do NOT guess which USB
+        # device is the controller: the driver's own _discover() stays for bench
+        # use (`python3 TC10LAB.py`), and is only reachable here by opting in
+        # with auto_discover:true.
         resource = os.environ.get("TCLAB_RESOURCE") or self.get_parameter("resource").value
+        if not resource and not self.get_parameter("auto_discover").value:
+            self.last_error = "TCLAB_RESOURCE is not set"
+            self._scream("TCLAB_RESOURCE is not set in ros2_ws/.env. Find the address "
+                         "with `python3 scripts/list_instruments.py`, put it there, "
+                         "then `docker compose up -d`.")
+            return False
         tc = TC10LAB(resource, timeout_ms=int(self.get_parameter("timeout_ms").value))
         try:
             tc._open()                       # TC10LAB() does NOT open on construction
@@ -102,6 +116,7 @@ class TemperatureNode(Node):
                 self.tc = tc
                 self.idn = idn
                 self.last_error = ""
+                self._poll_fails = 0
             self.get_logger().info(f"TC10 LAB connected on {tc.resource}: {idn}")
             return True
         except Exception as exc:
@@ -115,16 +130,17 @@ class TemperatureNode(Node):
             self._scream(exc)
             return False
 
-    def _scream(self, exc):
+    def _scream(self, why):
         """A missing temperature controller is not a footnote."""
         log = self.get_logger()
         log.error("=" * 68)
         log.error("TC10 LAB NOT CONNECTED -- nothing is temperature controlled.")
-        log.error(f"  {exc}")
-        log.error("  Check: instrument powered on and USB plugged in;")
-        log.error("         ls -l /dev/usbtmc*  (needs crw-rw-rw-, see ros2_ws/udev/);")
-        log.error("         TCLAB_RESOURCE in ros2_ws/.env if two USB instruments share the bus.")
-        log.error("  Replug the instrument -- this node retries by itself.")
+        log.error(f"  {why}")
+        log.error("  Find the address:  docker compose down && "
+                  "python3 scripts/list_instruments.py")
+        log.error("  Put it in ros2_ws/.env as TCLAB_RESOURCE, then: docker compose up -d")
+        log.error("  USB permissions:   ros2_ws/udev/99-scopio-instruments.rules")
+        log.error("  This node retries by itself once the instrument is back.")
         log.error("=" * 68)
 
     def _retry_connect(self):
@@ -161,15 +177,36 @@ class TemperatureNode(Node):
     # ------------------------------------------------------------------ #
     def _publish_status(self):
         tc = self.tc
-        if tc is not None:
+        # Skip if the previous poll is still in flight: the timer must never
+        # stack callbacks on a slow instrument (they'd queue on the driver lock).
+        if tc is not None and self._poll_lock.acquire(blocking=False):
             try:
                 self.state = tc.status()
                 self.last_error = ""
+                self._poll_fails = 0
             except Exception as exc:
-                self.state = {}
                 self.last_error = str(exc)
-                if dispatch.is_link_error(exc) and self._release():
-                    self.get_logger().error(f"TC10 LAB link lost ({exc}); will reconnect.")
+                self._poll_fails += 1
+                # ONE bad poll is a hiccup, not a dead link -- another process
+                # enumerating the USB bus is enough to cause it. Dropping the
+                # session on the first failure made the reading flap between a
+                # value and "--" on every retry cycle. Keep the last good state
+                # meanwhile; last_error says something went wrong.
+                if self._poll_fails < POLL_FAILURES_BEFORE_DROP:
+                    self.get_logger().warning(
+                        f"temperature poll failed ({exc}); "
+                        f"{POLL_FAILURES_BEFORE_DROP - self._poll_fails} more before "
+                        "giving up the session")
+                elif dispatch.is_link_error(exc):
+                    self.state = {}
+                    if self._release():
+                        self.get_logger().error(
+                            f"TC10 LAB link lost after {self._poll_fails} failed "
+                            f"polls ({exc}); will reconnect.")
+                else:
+                    self.state = {}
+            finally:
+                self._poll_lock.release()
 
         s = self.state
         msg = TemperatureStatus()
