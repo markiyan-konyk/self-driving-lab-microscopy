@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "scopio": {
+      "command": "python",
+      "args": ["scopio_mcp/server.py"]
+    }
+  }
+}

@@ -48,3 +48,25 @@ Identical HTTP surface either way; nothing downstream changes.
 | `GET /focus` | cheap focus metric (JPEG size) |
 
 Env: `CAM_HOST` (127.0.0.1), `CAM_PORT` (8081), `CAM_W`/`CAM_H` (640x480).
+
+## When there is no camera
+
+The server **serves anyway** and retries opening the sensor in the background
+(2 s, backing off to 30 s) — it does not exit, so it cannot crash-loop the
+container and hide the reason. Every endpoint answers **503** with the cause:
+
+```json
+{"error": "IndexError: list index out of range", "cameras": []}
+```
+
+`"cameras": []` is the diagnostic: picamera2 imported and libcamera loaded, but
+**no sensor is visible to this process**. In order of likelihood — the camera is
+not visible on the *host* either (`rpicam-hello --list-cameras`: ribbon in the
+DSI/display port rather than CSI, contacts facing the wrong way, or a sensor
+`config.txt` does not auto-detect); or the host is fine and the container's
+libcamera does not match the host kernel's camera stack, which is what the
+systemd fallback above exists for.
+
+A camera that appears later (replug, or the systemd unit releasing it) is picked
+up by the retry loop with no restart. The gateway still reports
+`camera_ok: false` throughout — 503 is deliberately not 200.

@@ -34,6 +34,7 @@ import os
 import json
 import time
 import socketserver
+import threading
 from http import server
 from threading import Condition
 
@@ -48,6 +49,12 @@ PORT = int(os.environ.get("CAM_PORT", 8081))
 SIZE = (int(os.environ.get("CAM_W", 640)), int(os.environ.get("CAM_H", 480)))
 
 picam2 = None
+# Why the sensor is not open, and what libcamera could actually see when it was
+# last tried. Both are reported in the 503 body -- an empty camera list is THE
+# diagnostic (picamera2 imported fine, libcamera loaded, the sensor just is not
+# visible to this process).
+camera_error = "camera not opened yet"
+camera_list = []
 
 # Last-commanded settings, echoed back by GET /controls (merged with live metadata).
 state = {
@@ -108,8 +115,6 @@ def apply_controls(d):
 def do_white_balance():
     """One-shot AWB: enable auto, let it settle, read the measured colour gains,
     then lock them in as manual gains (so they don't drift). Returns the gains."""
-    if picam2 is None:
-        return {"error": "no camera"}
     picam2.set_controls({"AwbEnable": True})
     time.sleep(1.2)
     md = picam2.capture_metadata()
@@ -137,6 +142,14 @@ def get_controls():
     except Exception:
         pass
     return out
+
+
+def unavailable():
+    """503 body for every endpoint while the sensor is not open. Keeping this a
+    non-200 is what preserves the gateway's `camera_ok: false` (camera_proxy
+    only checks the status of GET /controls) now that the server itself stays
+    up instead of crash-looping."""
+    return {"error": camera_error, "cameras": camera_list}
 
 
 class StreamingOutput(io.BufferedIOBase):
@@ -167,17 +180,26 @@ class Handler(server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/stream.mjpg"):
-            self._stream()
+        if self.path not in ("/", "/stream.mjpg", "/controls", "/focus"):
+            self.send_error(404)
+            self.end_headers()
+        elif picam2 is None:
+            self._json(unavailable(), 503)
         elif self.path == "/controls":
             self._json(get_controls())
         elif self.path == "/focus":
             self._json({"metric": len(output.frame or b"")})
         else:
-            self.send_error(404)
-            self.end_headers()
+            self._stream()
 
     def do_POST(self):
+        if self.path not in ("/controls", "/white_balance"):
+            self.send_error(404)
+            self.end_headers()
+            return
+        if picam2 is None:
+            self._json(unavailable(), 503)
+            return
         n = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(n) if n else b"{}"
         try:
@@ -186,11 +208,8 @@ class Handler(server.BaseHTTPRequestHandler):
             d = {}
         if self.path == "/controls":
             self._json(apply_controls(d))
-        elif self.path == "/white_balance":
-            self._json(do_white_balance())
         else:
-            self.send_error(404)
-            self.end_headers()
+            self._json(do_white_balance())
 
     def _stream(self):
         self.send_response(200)
@@ -219,19 +238,62 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
     daemon_threads = True
 
 
+def enumerate_cameras():
+    """What libcamera can see right now. [] means the sensor is not visible to
+    this process -- the cable/CSI port, the host's config.txt, or (in the
+    container) a libcamera that does not match the host kernel's camera stack."""
+    try:
+        return Picamera2.global_camera_info()
+    except Exception as exc:                       # libcamera itself failed to load
+        return [{"error": f"{type(exc).__name__}: {exc}"}]
+
+
+def open_camera_forever():
+    """Open the sensor and start MJPEG recording, retrying until it works.
+
+    The sensor is NOT a precondition for serving. Raising out of here used to
+    kill the process, which under `restart: unless-stopped` crash-loops the
+    container: the HTTP surface never comes up, so /controls cannot say what
+    went wrong and the gateway reports a bare `camera_ok: false`. Retrying in
+    the background instead matches how every ROS node in this backend degrades,
+    and a camera that appears late (replug, or the systemd unit releasing it)
+    heals with no restart.
+    """
+    global picam2, camera_error, camera_list
+    delay = 2.0
+    while True:
+        try:
+            cam = Picamera2()
+            cam.configure(cam.create_video_configuration(main={"size": SIZE}))
+            cam.start_recording(MJPEGEncoder(), FileOutput(output))
+            picam2 = cam
+            camera_error, camera_list = None, []
+            print(f"Camera open {SIZE[0]}x{SIZE[1]}", flush=True)
+            return
+        except Exception as exc:
+            camera_error = f"{type(exc).__name__}: {exc}"
+            camera_list = enumerate_cameras()
+            print(f"Camera unavailable ({camera_error}); libcamera sees "
+                  f"{camera_list}; retrying in {delay:.0f}s", flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+
+
 def main():
-    global picam2
-    picam2 = Picamera2()
-    picam2.configure(picam2.create_video_configuration(main={"size": SIZE}))
-    picam2.start_recording(MJPEGEncoder(), FileOutput(output))
+    # Serve FIRST, open the sensor second: a camera fault must be reportable
+    # over HTTP, not a reason nothing answers at all.
+    threading.Thread(target=open_camera_forever, daemon=True,
+                     name="camera-open").start()
     print(f"SCOPIO Pi camera server on http://{HOST}:{PORT} "
-          f"(stream /stream.mjpg, controls /controls) {SIZE[0]}x{SIZE[1]}")
+          f"(stream /stream.mjpg, controls /controls) {SIZE[0]}x{SIZE[1]}",
+          flush=True)
     try:
         StreamingServer((HOST, PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        picam2.stop_recording()
+        if picam2 is not None:
+            picam2.stop_recording()
 
 
 if __name__ == "__main__":

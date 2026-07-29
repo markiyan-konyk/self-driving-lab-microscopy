@@ -166,6 +166,7 @@ python3 ros2_ws/scripts/smoke_test_api.py --url http://<pi-ip>:8000 --key $KEY
 | Node MISSING in smoke test | import/crash — `docker compose logs scopio` |
 | Topic exists but no messages | hardware absent/failed (node degraded gracefully) |
 | `camera_ok: false` | camera service down — step 3 (container vs systemd) |
+| `curl 127.0.0.1:8081/controls` → 503 `{"cameras": []}` | picamera2/libcamera are fine; **no sensor visible**. Check the host first (`rpicam-hello --list-cameras`); if the host sees it, the container's libcamera does not match the host kernel — take the systemd fallback in step 3. |
 | Black video but `camera_ok: true` | stream proxy vs camera: `curl 127.0.0.1:8081/stream.mjpg | head -c 100` on the Pi |
 | `401` from gateway | key not in `secrets/api_keys.json` (regenerate; hot-reloaded) |
 | `504` on service calls | node up but hardware not answering (cables, `GALVO_RESOURCE`) |
