@@ -125,13 +125,13 @@ def check_environment():
             say(f"      | {line}")
     else:
         say("    rpicam-hello  unavailable (not fatal; picamera2 is what we use)")
-    return Picamera2
+    return Picamera2, model
 
 
 # ---------------------------------------------------------------------- #
 #  2  Wiring / enumeration
 # ---------------------------------------------------------------------- #
-def check_enumeration(Picamera2, want_index):
+def check_enumeration(Picamera2, want_index, model="unknown"):
     stage(2, "Camera enumeration (is the ribbon seated and detected?)")
     try:
         cams = Picamera2.global_camera_info()
@@ -139,17 +139,12 @@ def check_enumeration(Picamera2, want_index):
         die("libcamera enumeration", str(e))
 
     if not cams:
-        check_boot_config()                 # print the boot clues before dying
-        die("camera detected", "libcamera sees ZERO cameras",
-            "Power OFF the Pi before touching the ribbon (CSI is not hot-plug).\n"
-            "22-pin FFC: contacts face the board -- blue tab faces the USB/"
-            "ethernet side on the Pi, and the silver contacts face the PCB on\n"
-            "the camera end. A cable in backwards or half-latched enumerates as "
-            "nothing at all.\n"
-            "On a Pi 5 use either CAM/DISP port (cam0 or cam1); on a Pi 4 the "
-            "single 15-pin port needs a 22-to-15-pin adapter cable.\n"
-            "Check /boot/firmware/config.txt has camera_auto_detect=1 (or "
-            "dtoverlay=imx296), then reboot.")
+        # Zero cameras is exactly when the deep probe earns its keep: it says
+        # WHICH link in the chain broke instead of listing everything it could be.
+        record("camera detected", False, "libcamera sees ZERO cameras")
+        verdict(deep_diagnose(model), model)
+        summary()
+        sys.exit(1)
 
     for i, c in enumerate(cams):
         mark = "->" if i == (want_index or 0) else "  "
@@ -220,6 +215,250 @@ def check_boot_config():
             say(f"      | {line}")
     else:
         say("    dmesg  no imx296/CSI lines (run with sudo to read the ring buffer)")
+
+
+# ---------------------------------------------------------------------- #
+#  Deep probe: run when libcamera enumerates NOTHING (or via --diagnose)
+# ---------------------------------------------------------------------- #
+def deep_diagnose(model="unknown"):
+    """Walk the whole chain -- config.txt -> device tree -> kernel driver ->
+    /dev/video -> libcamera -- and collect facts. Printing them is half the
+    point; verdict() then names the broken link."""
+    say()
+    say("=" * 62)
+    say("DEEP PROBE (camera not enumerated -- finding which link broke)")
+    say("=" * 62)
+    f = {"model": model}
+
+    # --- config.txt: which file, what's in it, and was it edited since boot? --
+    say()
+    say("  a) config.txt")
+    present = [p for p in CONFIG_PATHS if os.path.exists(p)]
+    f["config_path"] = present[0] if present else None
+    f["config_lines"] = []
+    f["stale_config"] = len(present) > 1
+    for p in present:
+        note = "  <-- THE ONE THAT COUNTS on Bookworm" if p.endswith("firmware/config.txt") else \
+               "  <-- IGNORED by Bookworm (stale legacy path)"
+        say(f"     {p}{note if len(present) > 1 else ''}")
+        try:
+            with open(p) as fh:
+                lines = [l.strip() for l in fh if l.strip() and not l.strip().startswith("#")]
+        except OSError as e:
+            say(f"       (unreadable: {e})")
+            continue
+        cam_lines = [l for l in lines
+                     if any(k in l for k in ("camera_auto_detect", "dtoverlay=imx",
+                                             "dtoverlay=arducam", "dtoverlay=vc4",
+                                             "start_x", "cam0", "cam1", "dtparam=i2c"))]
+        for l in cam_lines or ["(no camera lines)"]:
+            say(f"       | {l}")
+        if p == f["config_path"]:
+            f["config_lines"] = cam_lines
+
+    # Editing config.txt does nothing until the next boot -- catch that outright.
+    f["edited_since_boot"] = False
+    if f["config_path"]:
+        try:
+            with open("/proc/uptime") as fh:
+                boot_at = time.time() - float(fh.read().split()[0])
+            mtime = os.path.getmtime(f["config_path"])
+            f["edited_since_boot"] = mtime > boot_at
+            say(f"     edited {time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime))}, "
+                f"booted {time.strftime('%Y-%m-%d %H:%M', time.localtime(boot_at))}"
+                f"{'   <-- EDITED AFTER BOOT: NOT APPLIED YET' if f['edited_since_boot'] else ''}")
+        except (OSError, ValueError):
+            pass
+
+    # --- device tree: did an overlay actually apply at boot? -----------------
+    say()
+    say("  b) device tree (did the overlay apply?)")
+    nodes = []
+    for root, dirs, _files in os.walk("/proc/device-tree"):
+        for d in dirs:
+            if "imx" in d.lower() or "arducam" in d.lower():
+                nodes.append(os.path.join(root, d).replace("/proc/device-tree", ""))
+    f["dt_nodes"] = nodes
+    for n in nodes[:10] or ["(no imx* node -- no camera overlay is live)"]:
+        say(f"     | {n}")
+    for n in nodes:
+        rc, st = run(f"cat /proc/device-tree{n}/status 2>/dev/null | tr -d '\\0'")
+        if st.strip():
+            say(f"       status of {os.path.basename(n)}: {st.strip()}")
+    rc, out = run("dtoverlay -l 2>&1 | head -n 15")
+    say("     dtoverlay -l:")
+    for l in (out.strip() or "(none)").splitlines():
+        say(f"       | {l}")
+
+    # --- kernel driver probe -------------------------------------------------
+    say()
+    say("  c) kernel driver probe (dmesg)")
+    rc, out = run("dmesg 2>/dev/null | grep -i -e imx296 -e imx -e unicam -e rp1-cfe "
+                  "-e csi -e cfe | tail -n 20")
+    f["dmesg"] = out
+    if not out.strip():
+        rc, out2 = run("sudo -n dmesg 2>/dev/null | grep -i -e imx296 -e unicam "
+                       "-e rp1-cfe | tail -n 20")
+        f["dmesg"] = out = out2
+    for l in (out.strip() or "(nothing -- driver never probed, or dmesg needs sudo)").splitlines():
+        say(f"     | {l}")
+
+    # --- /dev nodes + V4L2 ---------------------------------------------------
+    say()
+    say("  d) /dev nodes and V4L2")
+    rc, out = run("ls -l /dev/video* /dev/media* 2>&1 | head -n 20")
+    f["dev_nodes"] = out
+    for l in out.strip().splitlines():
+        say(f"     | {l}")
+    rc, out = run("v4l2-ctl --list-devices 2>&1 | head -n 25")
+    say("     v4l2-ctl --list-devices:")
+    for l in (out.strip() or "(v4l2-ctl not installed: sudo apt install v4l-utils)").splitlines():
+        say(f"       | {l}")
+
+    # --- i2c: does the sensor answer at all? --------------------------------
+    say()
+    say("  e) i2c probe (IMX296 lives at 0x1a)")
+    rc, buses = run("ls /dev/i2c-* 2>/dev/null")
+    f["i2c_hit"] = False
+    if not buses.strip():
+        say("     no /dev/i2c-* buses exposed")
+    for bus in sorted(buses.split()):
+        n = bus.rsplit("-", 1)[-1]
+        rc, out = run(f"i2cdetect -y -r {n} 2>&1", timeout=20)
+        if "command not found" in out or "not found" in out:
+            say("     i2cdetect missing: sudo apt install -y i2c-tools")
+            break
+        addrs = [tok for line in out.splitlines()[1:] for tok in line.split()[1:]
+                 if tok not in ("--", "")]
+        if addrs:
+            hit = "1a" in addrs
+            f["i2c_hit"] = f["i2c_hit"] or hit
+            say(f"     bus {n}: {' '.join(addrs)}{'   <-- 0x1a = IMX296 ANSWERS' if hit else ''}")
+    say("     NOTE on Pi 5 the CAM port rails power up only when a driver binds,")
+    say("     so a silent bus here does NOT by itself prove a bad cable.")
+
+    # --- libcamera's own view ----------------------------------------------
+    say()
+    say("  f) libcamera enumeration (verbose)")
+    rc, out = run("LIBCAMERA_LOG_LEVELS=*:INFO rpicam-hello --list-cameras 2>&1 | tail -n 25")
+    f["libcamera_out"] = out
+    for l in (out.strip() or "(rpicam-hello not installed)").splitlines():
+        say(f"     | {l}")
+
+    # --- versions + who else might hold the sensor --------------------------
+    say()
+    say("  g) versions / contention")
+    for label, cmd in (("kernel", "uname -a"),
+                       ("os", "cat /etc/os-release | grep PRETTY_NAME"),
+                       ("firmware", "vcgencmd version 2>&1 | tail -n 2"),
+                       ("holders", "pgrep -a -f 'rpicam|libcamera|pi_camera_server|camera_node' "
+                                   "| grep -v camtest")):
+        rc, out = run(cmd)
+        for l in (out.strip() or "(none)").splitlines():
+            say(f"     {label:9} {l}")
+    return f
+
+
+def verdict(f, model):
+    """Rank the causes the collected facts actually support."""
+    cfg = " ".join(f.get("config_lines", []))
+    has_overlay = "dtoverlay=imx" in cfg or "dtoverlay=arducam" in cfg
+    auto = "camera_auto_detect=1" in cfg
+    pi5 = "Raspberry Pi 5" in model
+    cm = "Compute Module" in model
+    causes = []
+
+    if f.get("edited_since_boot"):
+        causes.append(("REBOOT REQUIRED",
+                       f"{f['config_path']} was modified after the current boot, so "
+                       "the overlay is not loaded yet.",
+                       "sudo reboot"))
+
+    if f.get("config_path") and not f["config_path"].endswith("firmware/config.txt"):
+        causes.append(("WRONG config.txt",
+                       "Bookworm reads /boot/firmware/config.txt; only the legacy "
+                       "/boot/config.txt exists here.",
+                       "sudo nano /boot/firmware/config.txt"))
+    elif f.get("stale_config"):
+        causes.append(("TWO config.txt FILES",
+                       "/boot/config.txt is a leftover and is IGNORED -- make sure you "
+                       "edited /boot/firmware/config.txt.",
+                       "grep -n -e camera_auto_detect -e imx296 /boot/firmware/config.txt"))
+
+    if not f.get("dt_nodes"):
+        causes.append(("OVERLAY NOT LIVE",
+                       "No imx* node exists in /proc/device-tree, so no camera overlay "
+                       "is loaded -- the config.txt line is absent, misspelled, in the "
+                       "wrong file, or below a [section] filter that does not match "
+                       "this board.",
+                       "Put this at the END of /boot/firmware/config.txt (outside any "
+                       "[all]/[pi4] section confusion) and reboot:\n"
+                       "camera_auto_detect=0\n"
+                       f"dtoverlay=imx296{',cam0' if pi5 or cm else ''}"))
+
+    if pi5 and has_overlay and ("cam0" not in cfg and "cam1" not in cfg):
+        causes.append(("PORT MISMATCH (Pi 5)",
+                       "On a Pi 5 a bare 'dtoverlay=imx296' binds to CAM1 only. If the "
+                       "ribbon is in CAM/DISP 0 the sensor is never probed.",
+                       "dtoverlay=imx296,cam0     # or move the ribbon to CAM1"))
+
+    if has_overlay and auto:
+        causes.append(("AUTO-DETECT FIGHTING THE OVERLAY",
+                       "camera_auto_detect=1 alongside an explicit dtoverlay is "
+                       "unsupported; auto-detect only recognises official cameras by "
+                       "their EEPROM and finds nothing on many 22-pin third-party "
+                       "IMX296 boards.",
+                       "camera_auto_detect=0   (keep the explicit dtoverlay line)"))
+
+    dm = (f.get("dmesg") or "").lower()
+    if f.get("dt_nodes") and ("failed to read chip id" in dm or "probe.*failed" in dm
+                              or "no such device" in dm):
+        causes.append(("SENSOR NOT ANSWERING",
+                       "The driver loaded and tried to talk to the sensor but got "
+                       "nothing -- that is wiring or power, not software.",
+                       "Power the Pi OFF (CSI is not hot-plug), reseat BOTH ends of the "
+                       "22-pin FFC, contacts toward the board, latch fully closed.\n"
+                       "Swap to the other CAM port (update ,cam0/,cam1 to match).\n"
+                       "Try a known-good cable -- creased or over-flexed FFCs fail "
+                       "exactly this way."))
+
+    if f.get("dt_nodes") and not dm.strip():
+        causes.append(("DRIVER NEVER PROBED",
+                       "A device-tree node exists but the kernel logged nothing about "
+                       "imx296 -- typically a kernel/firmware mismatch from a partial "
+                       "upgrade.",
+                       "sudo apt update && sudo apt full-upgrade -y && sudo reboot"))
+
+    if cm:
+        causes.append(("CSI vs DSI PORT (Compute Module)",
+                       "The CM4/CM5 IO board's 22-pin CSI and DSI connectors are "
+                       "identical and adjacent. A camera in the DISPLAY port "
+                       "enumerates as exactly zero cameras.",
+                       "Use the connector labelled CAM1 (not DISP1)."))
+    elif pi5:
+        causes.append(("CHECK THE PORT LABEL",
+                       "Pi 5 CAM/DISP ports are dual-purpose but the overlay must name "
+                       "the one you used.",
+                       "Confirm which physical port the ribbon is in, then match "
+                       ",cam0 / ,cam1."))
+
+    if not causes:
+        causes.append(("CABLE / PORT",
+                       "Software looks configured, so suspect the physical link.",
+                       "Power off, reseat both FFC ends (contacts toward the board), "
+                       "try the other CAM port and a different cable."))
+
+    say()
+    say("=" * 62)
+    say("MOST LIKELY CAUSE" + (" (in order)" if len(causes) > 1 else ""))
+    say("=" * 62)
+    for i, (title, why, fix) in enumerate(causes, 1):
+        say(f"  {i}. {title}")
+        say(f"     {why}")
+        for line in fix.splitlines():
+            say(f"       $ {line}" if not line.startswith("#") else f"       {line}")
+        say()
+    say("  Re-run after each change:  python3 camtest.py --list")
 
 
 # ---------------------------------------------------------------------- #
@@ -524,6 +763,9 @@ def main():
     ap.add_argument("--frames", type=int, default=10, help="frames to capture")
     ap.add_argument("--out", default="camtest.jpg", help="where to save the test frame")
     ap.add_argument("--list", action="store_true", help="only enumerate cameras, then exit")
+    ap.add_argument("--diagnose", action="store_true",
+                    help="always run the deep hardware probe (it runs automatically "
+                         "when no camera is found)")
     ap.add_argument("--preview", type=float, nargs="?", const=10.0, default=None,
                     metavar="SECONDS", help="show an on-screen preview (needs a desktop)")
     ap.add_argument("--web", action="store_true", help="serve live MJPEG after the checks")
@@ -534,9 +776,11 @@ def main():
     say("camtest.py -- IMX296 / 22-pin CSI camera check")
     say("=" * 62)
 
-    Picamera2 = check_environment()
-    index = check_enumeration(Picamera2, args.camera)
+    Picamera2, model = check_environment()
+    index = check_enumeration(Picamera2, args.camera, model)
     check_boot_config()
+    if args.diagnose:
+        deep_diagnose(model)
     if args.list:
         summary()
         return 0
