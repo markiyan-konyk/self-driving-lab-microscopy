@@ -130,6 +130,7 @@ class CameraNode(Node):
         if self.picam2 is None:
             self._start_bridge()
         self._pushed_controls = False   # see _sync_bridge_controls
+        self._push_retry_at = 0.0
 
         publish_fps = max(1.0, float(self.get_parameter("publish_fps").value))
         self.create_timer(1.0 / publish_fps, self._publish_frame, callback_group=cb)
@@ -361,17 +362,20 @@ class CameraNode(Node):
         if not self.connected:
             self._pushed_controls = False
             return
-        if self._pushed_controls:
+        if self._pushed_controls or time.monotonic() < self._push_retry_at:
             return
-        self._pushed_controls = True      # set first: never retry in a tight loop
+        # Gate the RETRY, not just the log line. This runs on a 2 Hz timer and
+        # each attempt is a blocking HTTP call with a 12 s timeout, so an
+        # ungated retry hammers the camera server and stacks timer threads.
+        self._push_retry_at = time.monotonic() + 10.0
         try:
             self._apply_framerate(self.cam["framerate"])
             self._apply_controls()
+            self._pushed_controls = True
             self.get_logger().info("Pushed camera settings to the camera server.")
         except Exception as exc:
-            self._pushed_controls = False
             self.get_logger().warning(f"could not push camera settings ({exc}); "
-                                      "will retry", throttle_duration_sec=30.0)
+                                      "retrying in 10 s", throttle_duration_sec=30.0)
 
     def _publish_state(self):
         self._sync_bridge_controls()

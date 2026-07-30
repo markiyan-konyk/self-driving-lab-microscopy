@@ -64,8 +64,16 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # you end up debugging an instrument that "VISA can't see" for an afternoon.
 
 # Build the workspace (interfaces + nodes) into the image.
+#
+# THE NODES RUN FROM THIS IMAGE, not from the repo mounted at /workspace. The
+# mount only supplies the working directory (calibration.json). So editing a
+# node on the Pi and running `docker compose up -d` changes NOTHING -- you need
+# `--build`. That failure is silent and looks exactly like a broken fix, so the
+# build is stamped and the stamp is printed at launch. Docker caches this layer
+# with the COPY above it: same source, same stamp; changed source, new stamp.
 WORKDIR /ros2_ws
 COPY . /ros2_ws/
+RUN date -u +'%Y-%m-%dT%H:%M:%SZ' > /ros2_ws/BUILD_STAMP
 RUN source /opt/ros/jazzy/setup.bash && colcon build --symlink-install
 
 # The nodes import nothing from outside this workspace. The repo is still

@@ -108,6 +108,18 @@ path at startup — it survives `docker compose down`, rebuilds and reboots.
 
 ## When something doesn't work
 
+**Step zero: confirm you are running the code you think you are.** The nodes run
+from the built image, *not* from the repo mounted at `/workspace` — so after any
+edit or `git pull` on the Pi you need `--build`, and without it nothing changes
+and the log looks exactly like a fix that didn't work. Every launch prints the
+image's build time as its first line:
+
+```
+[INFO] [launch]: SCOPIO image built 2026-07-30T04:12:07Z -- older than your last edit? ...
+```
+
+If that predates your change: `docker compose up -d --build`.
+
 Everything below assumes the software is right, which is the point: each node
 reports its own state, so start with what the graph says.
 

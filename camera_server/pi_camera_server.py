@@ -64,6 +64,9 @@ state = {
 }
 
 
+_warned_unsupported = set()
+
+
 def _num(v):
     """Return float(v) if v is a real number, else None (skips NaN / None / bad)."""
     try:
@@ -71,6 +74,25 @@ def _num(v):
         return f if f == f else None      # f != f is True only for NaN
     except (TypeError, ValueError):
         return None
+
+
+def supported(controls):
+    """Keep only the controls THIS sensor advertises.
+
+    Not every camera has every control: a monochrome sensor has no AwbEnable or
+    ColourGains (no Bayer filter, so there is nothing to white-balance), and some
+    sensors lack Saturation or Sharpness. picamera2 raises on the FIRST unknown
+    key, so one unsupported control used to reject the whole request -- and the
+    caller then retried it forever. Dropping is right: the request is still
+    meaningful, that one knob simply does not exist on this hardware.
+    """
+    known = set(picam2.camera_controls) if picam2 is not None else set()
+    dropped = set(controls) - known
+    for name in sorted(dropped - _warned_unsupported):
+        _warned_unsupported.add(name)
+        print(f"Camera does not advertise {name!r}; ignoring it from now on "
+              f"(monochrome sensor?)", flush=True)
+    return {k: v for k, v in controls.items() if k in known}
 
 
 def apply_controls(d):
@@ -110,13 +132,16 @@ def apply_controls(d):
             c[ctrl] = val
             state[key] = val
     if c and picam2 is not None:
-        picam2.set_controls(c)
+        picam2.set_controls(supported(c))
     return get_controls()
 
 
 def do_white_balance():
     """One-shot AWB: enable auto, let it settle, read the measured colour gains,
     then lock them in as manual gains (so they don't drift). Returns the gains."""
+    if "AwbEnable" not in picam2.camera_controls:
+        return {"error": "this sensor has no auto white balance "
+                         "(monochrome — there are no colour gains to measure)"}
     picam2.set_controls({"AwbEnable": True})
     time.sleep(1.2)
     md = picam2.capture_metadata()
@@ -182,6 +207,19 @@ class Handler(server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _guard(self, fn):
+        """Answer with a 500 instead of dying. A handler that raises leaves the
+        socket hung up, so the client sees "connection reset" and never learns
+        which control the camera rejected -- and the stack trace lands in the
+        container log instead of in the reply."""
+        try:
+            fn()
+        except Exception as exc:
+            try:
+                self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+            except Exception:
+                pass
+
     def do_GET(self):
         if self.path not in ("/", "/stream.mjpg", "/controls", "/focus"):
             self.send_error(404)
@@ -189,7 +227,7 @@ class Handler(server.BaseHTTPRequestHandler):
         elif picam2 is None:
             self._json(unavailable(), 503)
         elif self.path == "/controls":
-            self._json(get_controls())
+            self._guard(lambda: self._json(get_controls()))
         elif self.path == "/focus":
             self._json({"metric": len(output.frame or b"")})
         else:
@@ -210,9 +248,9 @@ class Handler(server.BaseHTTPRequestHandler):
         except ValueError:
             d = {}
         if self.path == "/controls":
-            self._json(apply_controls(d))
+            self._guard(lambda: self._json(apply_controls(d)))
         else:
-            self._json(do_white_balance())
+            self._guard(lambda: self._json(do_white_balance()))
 
     def _stream(self):
         self.send_response(200)
@@ -293,7 +331,14 @@ def open_camera_forever():
             cam.start_recording(MJPEGEncoder(), FileOutput(output))
             picam2 = cam
             camera_error, camera_list = None, []
-            print(f"Camera open {SIZE[0]}x{SIZE[1]}", flush=True)
+            # Print what this sensor actually offers: it is the fastest answer to
+            # "why did that control not take" and it says mono vs colour outright.
+            print(f"Camera open {SIZE[0]}x{SIZE[1]}; controls advertised: "
+                  f"{sorted(cam.camera_controls)}", flush=True)
+            if "AwbEnable" not in cam.camera_controls:
+                print("  NOTE: no AwbEnable/ColourGains -- monochrome sensor. "
+                      "Colour gains and /white_balance do nothing on this camera.",
+                      flush=True)
             return
         except Exception as exc:
             seen = enumerate_cameras()

@@ -49,6 +49,18 @@ Identical HTTP surface either way; nothing downstream changes.
 
 Env: `CAM_HOST` (127.0.0.1), `CAM_PORT` (8081), `CAM_W`/`CAM_H` (640x480).
 
+**Not every sensor has every control.** A monochrome sensor has no Bayer filter,
+so libcamera advertises no `AwbEnable` and no `ColourGains` — the colour gains
+and `POST /white_balance` are meaningless on it (white balance answers with an
+`error` explaining why, rather than failing). Controls the sensor does not
+advertise are dropped from a request and logged once; the rest still apply. The
+log line at startup lists exactly what your camera offers:
+
+```
+Camera open 640x480; controls advertised: ['AeEnable', 'AnalogueGain', ...]
+  NOTE: no AwbEnable/ColourGains -- monochrome sensor.
+```
+
 ## When there is no camera
 
 The server **serves anyway** and retries opening the sensor in the background

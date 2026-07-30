@@ -299,6 +299,67 @@ def test_a_partial_service_body_leaves_other_floats_alone():
     assert conversion.build_msg(FakeControls, {"contrast": 1.2}).red_gain == 0.0
 
 
+# ------------------------------------------------------- camera server
+def _camera_server():
+    """Import the camera server with picamera2 stubbed out."""
+    if "pi_camera_server" in sys.modules:
+        return sys.modules["pi_camera_server"]
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    sys.path.insert(0, os.path.join(root, "camera_server"))
+    for name, attrs in [("picamera2", {"Picamera2": object}),
+                        ("picamera2.encoders", {"MJPEGEncoder": object}),
+                        ("picamera2.outputs", {"FileOutput": object})]:
+        mod = types.ModuleType(name)
+        for k, v in attrs.items():
+            setattr(mod, k, v)
+        sys.modules[name] = mod
+    import pi_camera_server
+    return pi_camera_server
+
+
+class MonoCamera:
+    """A monochrome sensor: no AwbEnable, no ColourGains, no Saturation."""
+
+    camera_controls = {"AeEnable": None, "ExposureTime": None, "AnalogueGain": None,
+                       "FrameDurationLimits": None, "Brightness": None,
+                       "Contrast": None, "Sharpness": None}
+
+    def __init__(self):
+        self.applied = None
+
+    def set_controls(self, c):
+        for name in c:
+            if name not in self.camera_controls:
+                raise RuntimeError(f"Control {name} is not advertised by libcamera")
+        self.applied = c
+
+    def capture_metadata(self):
+        return {}
+
+
+def test_mono_sensor_does_not_reject_the_whole_request():
+    """The bug: one unsupported control (AwbEnable on a mono sensor) raised out
+    of the handler, so NOTHING was applied, the socket hung up, and the caller
+    retried forever."""
+    cs = _camera_server()
+    cam = MonoCamera()
+    cs.picam2 = cam
+    try:
+        cs.apply_controls({"exposure": 12000, "analogue_gain": 2.0, "contrast": 1.5,
+                           "red_gain": 2.4, "blue_gain": 2.5, "framerate": 30})
+        assert cam.applied is not None, "nothing was applied"
+        assert "AwbEnable" not in cam.applied and "ColourGains" not in cam.applied
+        # ...and everything the sensor DOES have still went through.
+        assert cam.applied["ExposureTime"] == 12000
+        assert cam.applied["AnalogueGain"] == 2.0
+        assert cam.applied["Contrast"] == 1.5
+        assert "FrameDurationLimits" in cam.applied
+        # White balance answers instead of raising.
+        assert "error" in cs.do_white_balance()
+    finally:
+        cs.picam2 = None
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:
