@@ -204,6 +204,71 @@ def test_dev_path_uses_the_kernel_usbtmc_transport():
     assert tc.rm is None, "pyvisa must not be involved for a /dev path"
 
 
+def test_usbtmc_picks_the_tc10_not_the_other_usbtmc_box():
+    """/dev/usbtmc0 is not reliably the TC10 -- the Rigol AWG is USB-TMC too and
+    the kernel numbers them in enumeration order. Opening the wrong one puts two
+    nodes on one instrument, which reads as a flapping link."""
+    from scopio_microscope.drivers import TC10LAB as mod
+
+    class FakeTmc:
+        opened, closed = [], []
+
+        def __init__(self, path):
+            self.path, self.sent = path, []
+            FakeTmc.opened.append(path)
+
+        def write(self, cmd):
+            self.sent.append(cmd)
+
+        def query(self, cmd):
+            self.sent.append(cmd)
+            if cmd == "*IDN?":
+                return {"/dev/usbtmc0": "Rigol Technologies,DG1022Z,DG1ZA,00.02",
+                        "/dev/usbtmc1": "Wavelength Electronics,TC10 LAB,123,1.0"}[self.path]
+            return "0"          # *STB?: no Message Available
+
+        def close(self):
+            FakeTmc.closed.append(self.path)
+
+    real_glob, real_dev = mod.glob.glob, mod.UsbtmcDevice
+    mod.glob.glob = lambda p: ["/dev/usbtmc0", "/dev/usbtmc1"] if "usbtmc" in p else []
+    mod.UsbtmcDevice = FakeTmc
+    try:
+        tc = TC10LAB("/dev/usbtmc*")
+        tc._open()
+        assert tc.resource == "/dev/usbtmc1", f"picked {tc.resource}"
+        assert FakeTmc.opened == ["/dev/usbtmc0", "/dev/usbtmc1"]
+        assert FakeTmc.closed == ["/dev/usbtmc0"], "the wrong device must be released"
+        assert "*CLS" in tc.device.sent, "the session must be cleared on connect"
+        assert "*STB?" in tc.device.sent, "queued stale replies must be drained"
+    finally:
+        mod.glob.glob, mod.UsbtmcDevice = real_glob, real_dev
+
+
+def test_usbtmc_read_refuses_to_desync():
+    """A reply longer than READ_SIZE leaves the tail queued, and every later
+    query then returns the previous answer. Fail loudly rather than silently."""
+    from scopio_microscope.drivers.TC10LAB import UsbtmcDevice
+
+    dev = UsbtmcDevice.__new__(UsbtmcDevice)
+    dev._fd = -1
+    reads = [b"x" * UsbtmcDevice.READ_SIZE, b"short\n"]
+    dev.write = lambda cmd: None
+    import os as _os
+    real_read = _os.read
+    _os.read = lambda fd, n: reads.pop(0)
+    try:
+        try:
+            dev.query("TEC:SENSORLIST?")
+        except IOError:
+            pass
+        else:
+            raise AssertionError("a full-buffer read must raise, not desync")
+        assert dev.query("TEC:ACT?") == "short\n"
+    finally:
+        _os.read = real_read
+
+
 # ---------------------------------------------------------------- dispatch
 def test_dispatch_arguments():
     gen = awg()

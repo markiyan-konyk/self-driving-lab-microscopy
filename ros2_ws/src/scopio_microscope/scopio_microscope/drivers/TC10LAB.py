@@ -60,10 +60,20 @@ def usb_vid(resource):
         return None
 
 
+def is_tc10(idn):
+    return "TC10" in (idn or "").upper() or "WAVELENGTH" in (idn or "").upper()
+
+
 class UsbtmcDevice:
     """The kernel's usbtmc character device, with the slice of the pyvisa
     resource API this driver uses. The kernel driver applies its own read
     timeout, so a silent instrument surfaces as OSError(ETIMEDOUT)."""
+
+    # The usbtmc driver reads until it has READ_SIZE bytes OR the device flags
+    # end-of-message, so an over-large count makes every read wait on a device
+    # that has already finished talking. 256 is the value tc10_read.py settled
+    # on against this instrument.
+    READ_SIZE = 256
 
     def __init__(self, path):
         self.path = path
@@ -74,7 +84,16 @@ class UsbtmcDevice:
 
     def query(self, cmd):
         self.write(cmd)
-        return os.read(self._fd, 4096).decode(errors="replace")
+        raw = os.read(self._fd, self.READ_SIZE)
+        if len(raw) == self.READ_SIZE:
+            # ponytail: single read. A reply longer than READ_SIZE leaves the
+            # tail queued, and every later query then returns the PREVIOUS
+            # answer -- a silent, permanent desync. Fail loudly instead; if a
+            # long query (TEC:SENSORLIST?) is ever needed, loop until the reply
+            # ends in a newline rather than raising the constant.
+            raise IOError(f"reply to {cmd!r} exceeded {self.READ_SIZE} bytes; "
+                          "session would desync")
+        return raw.decode(errors="replace")
 
     def close(self):
         os.close(self._fd)
@@ -91,20 +110,7 @@ class TC10LAB:
 
     def _open(self):
         if self.resource.startswith("/dev/"):
-            if not os.path.exists(self.resource):
-                # A bare ENOENT here is ambiguous between three different
-                # problems, and only one of them is the instrument.
-                raise FileNotFoundError(
-                    f"{self.resource} is not present in THIS process's /dev "
-                    f"(saw: {sorted(glob.glob('/dev/usbtmc*')) or 'no /dev/usbtmc* at all'}). "
-                    "In a container, compare with the host: if the host has the "
-                    "node and the container does not, the container's /dev was "
-                    "populated when it was created and the instrument appeared "
-                    "later -- recreate it, or bind-mount /dev (see "
-                    "docker-compose.yml). If the HOST has no /dev/usbtmc* "
-                    "either, the kernel usbtmc driver is not bound to the "
-                    "instrument: unset TCLAB_RESOURCE to use VISA instead.")
-            self.device = UsbtmcDevice(self.resource)
+            self._open_usbtmc()
             return
         self.rm = pyvisa.ResourceManager("@py")
         if not self.resource:
@@ -122,6 +128,65 @@ class TC10LAB:
         self.device.read_termination = "\n"
         self.device.write_termination = "\n"
         self.device.timeout = self.timeout_ms
+
+    def _open_usbtmc(self):
+        """Open a kernel usbtmc char device, VERIFYING it is this instrument.
+
+        /dev/usbtmc0 is not reliably the TC10: the Rigol AWG is a USB-TMC device
+        too and the kernel numbers them in enumeration order, so a hard-coded
+        node can silently point the temperature node at the function generator --
+        two nodes then fight over one instrument, which looks exactly like a
+        flapping link. `resource` is treated as a GLOB, every match is asked
+        *IDN?, and only a Wavelength box is accepted.
+        """
+        candidates = sorted(glob.glob(self.resource))
+        if not candidates:
+            seen = sorted(glob.glob("/dev/usbtmc*"))
+            raise FileNotFoundError(
+                f"no usbtmc device matches {self.resource!r} in THIS process's "
+                f"/dev (saw: {seen or 'no /dev/usbtmc* at all'}). In a container, "
+                "compare with the host: if the host has the node and the "
+                "container does not, recreate the container (its /dev is "
+                "populated at creation) and check the /dev:/dev mount. If the "
+                "HOST has none either, the kernel usbtmc driver is not bound: "
+                "unset TCLAB_RESOURCE to use VISA instead.")
+        rejected = []
+        for path in candidates:
+            try:
+                dev = UsbtmcDevice(path)
+            except OSError as exc:
+                rejected.append(f"{path}: {exc}")
+                continue
+            try:
+                dev.write("*CLS")           # clear status + error queue
+                idn = dev.query("*IDN?").strip()
+                if is_tc10(idn):
+                    self.device = dev
+                    self.resource = path
+                    self._resync()
+                    return
+                rejected.append(f"{path}: not a TC10 ({idn!r})")
+            except Exception as exc:
+                rejected.append(f"{path}: {type(exc).__name__}: {exc}")
+            dev.close()
+        raise RuntimeError("no Wavelength TC10 answered on " + ", ".join(rejected))
+
+    def _resync(self):
+        """Drop any reply still queued in the instrument from a previous session.
+
+        USB-TMC has no framing between sessions: a reply the last owner never
+        read stays queued, so the FIRST query returns it and every query after
+        that is one answer behind. The readings look plausible, the float()
+        parses fail at random, and it reads as a flaky link. Bit 4 of *STB? is
+        Message Available; reading it consumes one stale reply at a time.
+        (Lifted from tc10_read.py, which is what makes that script reliable.)
+        """
+        try:
+            for _ in range(8):
+                if not int(self.query("*STB?")) & 0b1_0000:
+                    return
+        except (ValueError, OSError):
+            pass      # a stale reply that will not parse IS the thing we drain
 
     def _close(self):
         """Drop the session. Safe to call twice, and on an already-dead link."""

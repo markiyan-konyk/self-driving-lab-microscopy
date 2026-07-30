@@ -183,11 +183,21 @@ detach-and-use-libusb dance is losing. Check the char device directly:
 echo '*IDN?' > /dev/usbtmc0 && head -c 200 /dev/usbtmc0
 ```
 
-If that answers, put `TCLAB_RESOURCE=/dev/usbtmc0` in `.env` — the driver talks
-to the char device instead and skips the fight entirely. Note that a *single*
+If that answers, put **`TCLAB_RESOURCE=/dev/usbtmc*`** in `.env` — note the
+glob. `/dev/usbtmc0` is not reliably this instrument: the Rigol AWG is USB-TMC
+too and the kernel numbers the nodes in enumeration order, so a hard-coded path
+can point the temperature node at the function generator. The driver probes
+every match, asks `*IDN?`, and keeps the one that answers as a Wavelength.
+
+Two other things that make this instrument look flaky when it isn't. A *single*
 timeout no longer drops the session (it takes three in a row), so brief stalls
-show up as `last_error` on `temperature/status` rather than a connect/disconnect
-cycle.
+appear as `last_error` on `temperature/status` instead of a connect/disconnect
+cycle. And the session is cleared and drained on connect — USB-TMC keeps no
+framing between sessions, so a reply the previous owner never read stays queued
+and puts every subsequent query one answer behind.
+
+Do not run `tc10_read.py` against the instrument while the stack is up: both
+would be reading one queue, and each would get the other's replies.
 
 **Stage (Sangaboard).** `ls /dev/ttyACM*`, then `docker compose logs scopio |
 grep -i sanga`.
