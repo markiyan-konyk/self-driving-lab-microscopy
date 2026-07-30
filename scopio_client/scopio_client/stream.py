@@ -3,6 +3,10 @@ bytes. Frames are found by scanning for the JPEG SOI/EOI markers -- the same
 proven approach the old UI used -- so we never depend on multipart framing
 details."""
 
+import requests
+
+from .errors import ScopioError
+
 SOI = b"\xff\xd8"   # start of image
 EOI = b"\xff\xd9"   # end of image
 
@@ -12,10 +16,16 @@ def iter_jpegs(response, chunk_size=16384, max_buffer=8 * 1024 * 1024):
 
     Closes the response when you stop iterating (break, .close(), or GC), so a
     caller that only wants one frame does not leave the Pi holding an open
-    MJPEG connection."""
+    MJPEG connection.
+
+    A stream that dies mid-flight raises ScopioError like every other failure in
+    this SDK. It must NOT surface as a raw requests exception: callers catch
+    ScopioError to reconnect, so anything else kills the ingest thread outright
+    and the video freezes for good instead of recovering.
+    """
     buf = b""
     try:
-        for chunk in response.iter_content(chunk_size=chunk_size):
+        for chunk in _chunks(response, chunk_size):
             if not chunk:
                 continue
             buf += chunk
@@ -35,3 +45,10 @@ def iter_jpegs(response, chunk_size=16384, max_buffer=8 * 1024 * 1024):
                 buf = b""
     finally:
         response.close()
+
+
+def _chunks(response, chunk_size):
+    try:
+        yield from response.iter_content(chunk_size=chunk_size)
+    except requests.RequestException as exc:
+        raise ScopioError(f"camera stream stopped: {exc}") from exc

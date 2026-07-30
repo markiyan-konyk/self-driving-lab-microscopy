@@ -111,11 +111,21 @@ class Scopio:
         entry = self.status()["telemetry"].get(topic)
         return entry["msg"] if entry else None
 
-    def stream_frames(self, chunk_size=16384):
-        """Generator of raw JPEG frames from the live camera stream."""
+    def stream_frames(self, chunk_size=16384, stall_timeout=15.0):
+        """Generator of raw JPEG frames from the live camera stream.
+
+        stall_timeout is a READ timeout, and it is the point: with no read
+        timeout a stream that stops mid-flight (network drop, a proxy that
+        stops forwarding, a camera that stops encoding) blocks this generator
+        forever. The caller's reconnect loop never runs, and whatever last
+        showed the frame keeps showing it -- video that looks frozen rather
+        than disconnected. Generous by default: a long exposure legitimately
+        means seconds between frames.
+        """
         url = f"{self.base_url}/api/v1/stream.mjpg"
         try:
-            r = self._http.get(url, stream=True, timeout=(self.timeout, None))
+            r = self._http.get(url, stream=True,
+                               timeout=(self.timeout, stall_timeout))
         except requests.RequestException as exc:
             raise ScopioError(f"cannot open camera stream: {exc}")
         if r.status_code >= 400:

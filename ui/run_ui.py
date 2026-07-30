@@ -107,7 +107,9 @@ class State:
     def __init__(self):
         self.lock = threading.Lock()
         self.jpeg = None            # newest JPEG frame (live view + recording)
+        self.jpeg_seq = 0           # bumped per frame; /video_feed waits on it
         self.stream_fps = 0.0       # measured fps of the ingested stream
+        self.last_error = ""        # why the microscope is unreachable, for the UI
         self.camera = None          # camera/state message dict
         self.stage = None           # stage/position message dict
         self.awg = None             # awg/status message dict (galvo wavegen)
@@ -144,24 +146,33 @@ def _subscribe_loop():
                 setattr(state, attr, msg)
         return cb
 
+    subscribed = False
     while True:
         try:
-            scope.subscribe("camera/state", store("camera"), rate_hz=4)
-            scope.subscribe("stage/position", store("stage"), rate_hz=10)
-            scope.subscribe("awg/status", store("awg"), rate_hz=2)
-            scope.subscribe("calibration", store("calibration"))
-            # Separate try: an older backend without temperature_node must not
-            # stop the UI from getting camera/stage/galvo telemetry.
-            try:
-                scope.subscribe("temperature/status", store("temp"), rate_hz=2)
-            except ScopioError as e:
-                log.warning(f"no temperature telemetry ({e}); controls stay offline")
-            state.connected = True
-            log.info("subscribed to microscope telemetry")
-            return
+            if not subscribed:
+                scope.subscribe("camera/state", store("camera"), rate_hz=4)
+                scope.subscribe("stage/position", store("stage"), rate_hz=10)
+                scope.subscribe("awg/status", store("awg"), rate_hz=2)
+                scope.subscribe("calibration", store("calibration"))
+                # Separate try: an older backend without temperature_node must
+                # not stop the UI from getting camera/stage/galvo telemetry.
+                try:
+                    scope.subscribe("temperature/status", store("temp"), rate_hz=2)
+                except ScopioError as e:
+                    log.warning(f"no temperature telemetry ({e}); controls stay offline")
+                subscribed = True
+                log.info("subscribed to microscope telemetry")
+            # Heartbeat. This loop used to return the moment it subscribed, so
+            # `connected` was a latch: once true it stayed true through every
+            # later outage, and the reason a connection failed only ever
+            # reached this log -- never the browser. /api/v1/health needs no
+            # auth, so it separates "cannot reach the Pi" from "bad API key".
+            scope.health()
+            state.connected, state.last_error = True, ""
         except ScopioError as e:
-            log.warning(f"cannot subscribe yet ({e}); retrying in 3 s")
-            time.sleep(3)
+            state.connected, state.last_error = False, str(e)
+            log.warning(f"microscope unreachable ({e}); retrying in 3 s")
+        time.sleep(3)
 
 
 def _frame_ingest_loop():
@@ -173,6 +184,7 @@ def _frame_ingest_loop():
             for frame in scope.stream_frames():
                 with state.lock:
                     state.jpeg = frame
+                    state.jpeg_seq += 1
                 now = time.time()
                 dt = now - last_t
                 last_t = now
@@ -252,15 +264,21 @@ def _cam_dict():
 @login_required
 def video_feed():
     def gen():
+        # Send each frame ONCE. Re-sending state.jpeg on a timer meant a dead
+        # ingest was indistinguishable from a live camera: the browser kept
+        # receiving the same image at 15 fps and the picture just stopped
+        # moving. Waiting on the sequence number means a stalled stream shows
+        # as a stalled stream, and /telemetry says why.
+        sent = -1
         while True:
             with state.lock:
-                jpeg = state.jpeg
-            if jpeg is None:
-                time.sleep(0.05)
+                jpeg, seq = state.jpeg, state.jpeg_seq
+            if jpeg is None or seq == sent:
+                time.sleep(0.02)
                 continue
+            sent = seq
             yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                    + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n")
-            time.sleep(1 / 15)
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
@@ -285,6 +303,13 @@ def telemetry():
         "fps": fps,
         "target_fps": cs["target_fps"] if cs else 0.0,
         "controller_connected": bool(st and st["connected"]),
+        # Whether the UI can reach the MICROSCOPE at all, and why not. Distinct
+        # from controller_connected, which is about the stage: on a network that
+        # cannot route to the Pi everything reads "not connected" with no cause,
+        # and this is the cause. `curl localhost:8080/telemetry` answers it.
+        "scope_url": SCOPIO_URL,
+        "scope_reachable": state.connected,
+        "scope_error": state.last_error,
     })
 
 
