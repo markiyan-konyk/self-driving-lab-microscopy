@@ -114,11 +114,21 @@ class TC10LAB:
         self.device = None
         self.units = ""       # cached by set_units()/get_units(); see status()
         self.probe_note = ""  # set when _open_usbtmc had to work around the config
+        self._desynced = False  # a query failed; drain before trusting the next
 
     def _open(self):
         if self.resource.startswith("/dev/"):
             self._open_usbtmc()
+            self._resync()
             return
+        self._open_visa()
+        # BOTH transports resync. This used to run on the usbtmc path only, and
+        # the VISA path is if anything more exposed: a connect attempt that
+        # times out (VI_ERROR_TMO) has already sent a query whose reply nobody
+        # read, so the very next session starts one answer behind.
+        self._resync()
+
+    def _open_visa(self):
         self.rm = pyvisa.ResourceManager("@py")
         if not self.resource:
             # Match the vendor id in the resource string so we never open
@@ -177,7 +187,6 @@ class TC10LAB:
                 if is_tc10(idn):
                     self.device = dev
                     self.resource = path
-                    self._resync()
                     return
                 rejected.append(f"{path}: not a TC10 ({idn!r})")
             except Exception as exc:
@@ -186,20 +195,25 @@ class TC10LAB:
         raise RuntimeError("no Wavelength TC10 answered on " + ", ".join(rejected))
 
     def _resync(self):
-        """Drop any reply still queued in the instrument from a previous session.
+        """Drop any reply still queued in the instrument.
 
-        USB-TMC has no framing between sessions: a reply the last owner never
-        read stays queued, so the FIRST query returns it and every query after
-        that is one answer behind. The readings look plausible, the float()
-        parses fail at random, and it reads as a flaky link. Bit 4 of *STB? is
-        Message Available; reading it consumes one stale reply at a time.
-        (Lifted from tc10_read.py, which is what makes that script reliable.)
+        Neither transport frames replies to requests: a reply nobody read stays
+        queued, so the next query returns IT and everything after is one answer
+        behind. Bit 4 of *STB? is Message Available; reading it consumes one
+        stale reply at a time. (Lifted from tc10_read.py, which is what makes
+        that script reliable.)
+
+        Called on connect and after any failed query -- best effort throughout:
+        if the link is genuinely dead, the caller's own query reports that, and
+        an exception raised from draining would only hide it.
         """
+        self._desynced = False          # first -- this method uses query() itself
         try:
+            self.command("*CLS")        # clear status + error queue
             for _ in range(8):
                 if not int(self.query("*STB?")) & 0b1_0000:
                     return
-        except (ValueError, OSError):
+        except Exception:
             pass      # a stale reply that will not parse IS the thing we drain
 
     def _close(self):
@@ -225,7 +239,20 @@ class TC10LAB:
         with self._lock:
             if self.device is None:
                 raise ConnectionError("TC10 LAB session is closed")
-            return self.device.query(cmd).strip()
+            if self._desynced:
+                self._resync()
+            try:
+                return self.device.query(cmd).strip()
+            except Exception:
+                # THE reason to care: a query that times out has still been SENT,
+                # so its reply arrives later and sits in the instrument's output
+                # queue. Every query after it returns the PREVIOUS answer --
+                # numbers that parse cleanly, publish happily, and are wrong.
+                # Nothing raises, so the failure counter never trips and the
+                # node reports a healthy instrument reading its setpoint as its
+                # temperature. Drain before the next query instead.
+                self._desynced = True
+                raise
 
     def query_float(self, cmd):
         """float() of a reply, tolerating a decoration the firmware may add.

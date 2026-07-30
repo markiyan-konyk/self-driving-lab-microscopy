@@ -214,6 +214,53 @@ def test_query_float_tolerates_a_decorated_reply():
         raise AssertionError("a reply with no number at all must still raise")
 
 
+def test_a_timed_out_query_does_not_leave_the_session_one_answer_behind():
+    """The silent-corruption case: a query that times out has still been SENT,
+    so its reply queues up and every later query returns the PREVIOUS answer.
+    Those parse fine and publish happily -- the setpoint shows up as the
+    temperature and nothing ever raises."""
+    tc = TC10LAB("USB0::0x1A45::0x3101::X::INSTR")
+
+    class FlakyVisa:
+        def __init__(self):
+            self.sent, self.fail_next = [], False
+
+        def write(self, cmd):
+            self.sent.append(cmd)
+
+        def query(self, cmd):
+            self.sent.append(cmd)
+            if self.fail_next:
+                self.fail_next = False
+                raise TimeoutError("VI_ERROR_TMO")
+            return "0"
+
+        def close(self):
+            pass
+
+    tc.device = FlakyVisa()
+    tc.device.fail_next = True
+    try:
+        tc.query("TEC:ACT?")
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("the timeout must still reach the caller")
+    assert tc._desynced, "a failed query must mark the session suspect"
+
+    tc.device.sent.clear()
+    tc.query("TEC:SET?")
+    assert tc.device.sent[0] == "*CLS", tc.device.sent
+    assert "*STB?" in tc.device.sent, tc.device.sent
+    assert tc.device.sent[-1] == "TEC:SET?", tc.device.sent
+    assert not tc._desynced
+
+    # And a healthy query must not pay for the drain every time.
+    tc.device.sent.clear()
+    tc.query("TEC:ACT?")
+    assert tc.device.sent == ["TEC:ACT?"], tc.device.sent
+
+
 def test_status_costs_five_round_trips():
     """Every extra query is another chance per second for the instrument to be
     mid-reply when the next one arrives."""
