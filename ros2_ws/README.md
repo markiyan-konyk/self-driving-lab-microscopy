@@ -120,6 +120,24 @@ docker compose logs -f scopio camera gateway
 `/api/v1/status` carries `connected` and `last_error` for every instrument.
 That error string is the real diagnosis — read it before changing anything.
 
+**First, rule out the container.** A device the host can see but the container
+cannot is not a hardware fault, and it is the single most common way this stack
+lies to you. `privileged: true` populates the container's `/dev` at *creation*
+time, so anything plugged in afterwards is invisible without the `/dev:/dev`
+bind mount (see the note in `docker-compose.yml`). Compare the two sides:
+
+```bash
+lsusb                                                  # host: is the box on the bus?
+ls -l /dev/usbtmc* /dev/ttyACM* 2>&1                   # host
+docker compose exec scopio ls -l /dev/usbtmc* /dev/ttyACM* 2>&1   # container
+docker compose exec scopio python3 -c \
+  "import pyvisa; print(pyvisa.ResourceManager('@py').list_resources())"
+```
+
+If the host lists it and the container doesn't → `docker compose up -d
+--force-recreate`, and check the `/dev:/dev` mount is present. If **neither**
+lists it → hardware, cable, or power.
+
 **Camera.** `camera_ok: false` → ask the camera server directly, it answers 503
 with the reason and a diagnosis: `curl -s http://127.0.0.1:8081/controls`.
 `"cameras": []` means libcamera loaded but sees no sensor — check the **host**
@@ -132,9 +150,17 @@ sees the camera and the container doesn't, the container's libcamera doesn't
 match the host kernel; use the systemd fallback
 (`../camera_server/install_systemd.sh`, then `docker compose stop camera`).
 
-**Galvo (Rigol DG1022Z).** `docker compose down && python3
-scripts/list_instruments.py` — if it isn't listed, it's udev/libusb or the
-cable, not the node. If it is, paste `GALVO_RESOURCE=` into `.env`. Then
+**Galvo (Rigol DG1022Z).** The node logs the resource string it tried — read
+the VISA error, the two look alike and mean opposite things:
+
+| Error | Meaning |
+|---|---|
+| `VI_ERROR_INV_RSRC_NAME` / "Parsing error" | The **string** is malformed. Not hardware. Almost always `GALVO_RESOURCE` in `.env`: a trailing `\r` from a Windows editor, quotes, or a `# comment` on the same line (compose keeps it as part of the value). The node strips whitespace; it cannot fix the rest. |
+| `VI_ERROR_RSRC_NFOUND` | The name parsed, the instrument is not there. |
+| `no Rigol AWG on USB` | Nothing with the Rigol vendor id enumerated at all — udev/libusb or the cable. |
+
+Then `docker compose down && python3 scripts/list_instruments.py` for a
+paste-ready address, and verify with
 `POST /api/v1/service/awg/query {"command": "*IDN?"}`.
 
 **Temperature (TC10 LAB).** If `list_instruments.py` finds it but every query

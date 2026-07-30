@@ -8,6 +8,7 @@ promise -- the failure mode this catches is an SDK change (or an mcp SDK
 version bump) quietly breaking a tool nobody exercised.
 """
 
+import asyncio
 import io
 import os
 import sys
@@ -42,7 +43,7 @@ def test_tools():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import server  # noqa: E402  (after the env is set -- that is the contract)
 
-    registered = {t.name for t in server.mcp._tool_manager.list_tools()}
+    registered = {t.name for t in asyncio.run(server.mcp.list_tools())}
     assert registered == EXPECTED_TOOLS, f"tool set drifted: {registered}"
 
     # -- discovery. The mock's galvo is "offline", so describe_instrument must

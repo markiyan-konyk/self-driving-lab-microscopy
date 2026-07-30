@@ -22,6 +22,7 @@ Command reference: COMMAND SET, LAB Series Instruments (COMMAND-00400 rev H).
 Temperatures follow set_units() -- Celsius by default.
 """
 
+import glob
 import os
 import threading
 
@@ -90,6 +91,19 @@ class TC10LAB:
 
     def _open(self):
         if self.resource.startswith("/dev/"):
+            if not os.path.exists(self.resource):
+                # A bare ENOENT here is ambiguous between three different
+                # problems, and only one of them is the instrument.
+                raise FileNotFoundError(
+                    f"{self.resource} is not present in THIS process's /dev "
+                    f"(saw: {sorted(glob.glob('/dev/usbtmc*')) or 'no /dev/usbtmc* at all'}). "
+                    "In a container, compare with the host: if the host has the "
+                    "node and the container does not, the container's /dev was "
+                    "populated when it was created and the instrument appeared "
+                    "later -- recreate it, or bind-mount /dev (see "
+                    "docker-compose.yml). If the HOST has no /dev/usbtmc* "
+                    "either, the kernel usbtmc driver is not bound to the "
+                    "instrument: unset TCLAB_RESOURCE to use VISA instead.")
             self.device = UsbtmcDevice(self.resource)
             return
         self.rm = pyvisa.ResourceManager("@py")

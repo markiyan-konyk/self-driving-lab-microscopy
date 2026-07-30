@@ -104,7 +104,12 @@ class GalvoNode(Node):
     def _connect(self):
         """Open a session. GALVO_RESOURCE env > `resource` param > the driver's
         own Rigol-vendor-id discovery (which never opens another vendor's box)."""
-        resource = os.environ.get("GALVO_RESOURCE") or self.get_parameter("resource").value
+        # .strip(): a value pasted into .env from a Windows editor arrives with a
+        # trailing \r, and a VISA resource name with a stray byte on the end fails
+        # to PARSE (VI_ERROR_INV_RSRC_NAME) -- which reads nothing like "your
+        # instrument has whitespace in it".
+        resource = (os.environ.get("GALVO_RESOURCE")
+                    or self.get_parameter("resource").value or "").strip()
         timeout_ms = int(self.get_parameter("timeout_ms").value)
         with self._lock:
             if self.gen is not None:
@@ -127,9 +132,17 @@ class GalvoNode(Node):
                 self._failures = 0
             except Exception as exc:
                 self.last_error = str(exc)
+                # ECHO THE RESOURCE. Without it "Parsing error" is unreadable:
+                # a name that fails to parse is a config bug, a name that is not
+                # found is a cable, and the message must tell them apart.
+                asked = repr(resource) if resource else "<auto-discover Rigol on USB>"
                 self.get_logger().warning(
-                    f"AWG unavailable ({exc}); node runs, reports connected=false. "
-                    "Set GALVO_RESOURCE in ros2_ws/.env to name it explicitly.")
+                    f"AWG unavailable; node runs, reports connected=false.\n"
+                    f"  tried:  {asked}\n"
+                    f"  error:  {type(exc).__name__}: {exc}\n"
+                    f"  INV_RSRC_NAME/parsing => the STRING is wrong (check "
+                    f"GALVO_RESOURCE in ros2_ws/.env); RSRC_NFOUND/no Rigol => "
+                    f"the instrument is not on the bus.")
                 return False
         self.get_logger().info(f"AWG connected on {gen.resource}: {idn}")
         return True

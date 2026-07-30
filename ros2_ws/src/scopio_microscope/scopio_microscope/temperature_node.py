@@ -76,7 +76,11 @@ class TemperatureNode(Node):
         self.create_timer(period, self._retry_connect)
 
     def _connect(self):
-        resource = os.environ.get("TCLAB_RESOURCE") or self.get_parameter("resource").value
+        # .strip(): a value pasted into .env from a Windows editor carries a
+        # trailing \r, and "/dev/usbtmc0\r" is a different path than the one on
+        # disk -- ENOENT, which looks exactly like a missing instrument.
+        resource = (os.environ.get("TCLAB_RESOURCE")
+                    or self.get_parameter("resource").value or "").strip()
         timeout_ms = int(self.get_parameter("timeout_ms").value)
         units = str(self.get_parameter("units").value).strip()
         with self._lock:
@@ -95,10 +99,12 @@ class TemperatureNode(Node):
             except Exception as exc:
                 tc._close()
                 self.last_error = str(exc)
+                asked = repr(resource) if resource else "<auto-discover Wavelength on USB>"
                 self.get_logger().warning(
-                    f"TC10 LAB unavailable ({exc}); node runs, reports "
-                    "connected=false. Set TCLAB_RESOURCE in ros2_ws/.env "
-                    "(/dev/usbtmc0 works when the kernel driver holds it).")
+                    f"TC10 LAB unavailable; node runs, reports connected=false.\n"
+                    f"  tried:  {asked}\n"
+                    f"  error:  {type(exc).__name__}: {exc}",
+                    throttle_duration_sec=60.0)
                 return False
         self.get_logger().info(f"TC10 LAB connected on {tc.resource}: {idn}")
         return True

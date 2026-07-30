@@ -66,8 +66,10 @@ Full command manual: `docs/API.md` in the repository. Interactive docs:
 ## Test
 
 ```bash
-python scopio_client/test_scopio_client.py      # no hardware needed
+pip install fastapi uvicorn                     # the mock gateway
+python scopio_client/test_scopio_client.py      # no microscope needed
 ```
 
-Runs a mock gateway on localhost and drives the SDK against it: HTTP calls and
-errors, MJPEG frame splitting, WebSocket subscribe/action, and reconnect.
+Starts a mock gateway on localhost and drives the SDK at it: HTTP calls and
+errors, partial updates, SCPI success/failure, MJPEG frame splitting, and the
+WebSocket subscribe / action / reconnect paths.

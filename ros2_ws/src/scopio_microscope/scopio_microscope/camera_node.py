@@ -129,14 +129,7 @@ class CameraNode(Node):
         self._start_camera()
         if self.picam2 is None:
             self._start_bridge()
-        if self.bridge_url is not None:
-            # Push this node's settings once, so `camera/state` and the camera
-            # server cannot disagree about what the camera is actually doing.
-            try:
-                self._apply_framerate(self.cam["framerate"])
-                self._apply_controls()
-            except Exception as exc:
-                self.get_logger().warning(f"camera server not ready for controls ({exc}).")
+        self._pushed_controls = False   # see _sync_bridge_controls
 
         publish_fps = max(1.0, float(self.get_parameter("publish_fps").value))
         self.create_timer(1.0 / publish_fps, self._publish_frame, callback_group=cb)
@@ -354,7 +347,34 @@ class CameraNode(Node):
         except Exception as e:
             self.get_logger().warning(f"capture/publish failed: {e}")
 
+    def _sync_bridge_controls(self):
+        """Push this node's settings to the camera server the first time frames
+        arrive, so `camera/state` and the camera cannot disagree about what the
+        camera is doing.
+
+        On the CONNECT EDGE, not at startup: the camera server comes up before
+        the sensor does (it serves 503 while retrying), so a one-shot push in
+        __init__ just fails once and leaves the two permanently out of sync.
+        The flag resets when frames stop, so a camera restart re-syncs."""
+        if self.bridge_url is None:
+            return
+        if not self.connected:
+            self._pushed_controls = False
+            return
+        if self._pushed_controls:
+            return
+        self._pushed_controls = True      # set first: never retry in a tight loop
+        try:
+            self._apply_framerate(self.cam["framerate"])
+            self._apply_controls()
+            self.get_logger().info("Pushed camera settings to the camera server.")
+        except Exception as exc:
+            self._pushed_controls = False
+            self.get_logger().warning(f"could not push camera settings ({exc}); "
+                                      "will retry", throttle_duration_sec=30.0)
+
     def _publish_state(self):
+        self._sync_bridge_controls()
         msg = CameraState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.connected = self.connected

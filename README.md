@@ -32,6 +32,7 @@ auth**. Client programs need no ROS, no Docker, no DDS — just a URL and a key.
 | [`ros2_ws/`](ros2_ws/) | the Pi backend: ROS 2 driver nodes (`scopio_microscope`), the frozen interface contract (`scopio_interfaces`), and the API gateway (`scopio_gateway`) — one `docker compose up -d` |
 | [`camera_server/`](camera_server/) | the single owner of the Pi camera; MJPEG + controls on loopback :8081 (compose service, systemd fallback) |
 | [`scopio_client/`](scopio_client/) | pip-installable Python SDK: `Scopio(url, api_key)` |
+| [`scopio_mcp/`](scopio_mcp/) | the microscope as an MCP server, so Claude Code (or any agent) can drive it — a thin `scopio_client` app |
 | [`docs/API.md`](docs/API.md) | **the developer manual** — every command with JSON/curl/SDK examples |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture rationale (why a dumb galvo passthrough, why backend/UI split, etc.) |
 | [`ui/`](ui/) | reference web UI (Flask), a pure API client, records video locally |

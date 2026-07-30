@@ -56,6 +56,16 @@ That is what lets the agent read back frames it just recorded with its own file
 tools, and it keeps this repo clean when the two live apart. Add `recordings/`
 to the working folder's `.gitignore`.
 
+## Test
+
+```bash
+pip install fastapi uvicorn                  # the mock gateway
+python scopio_mcp/test_scopio_mcp.py         # no microscope needed
+```
+
+Calls every tool against the mock gateway from `scopio_client`'s test. Run it
+after touching `server.py` or bumping the `mcp` SDK.
+
 ## Safety
 
 `call_service`, `instrument_call` and `galvo_scpi` are unrestricted by design —
