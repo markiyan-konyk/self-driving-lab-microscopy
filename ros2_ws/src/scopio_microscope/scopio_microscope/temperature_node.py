@@ -106,6 +106,8 @@ class TemperatureNode(Node):
                     f"  error:  {type(exc).__name__}: {exc}",
                     throttle_duration_sec=60.0)
                 return False
+        if tc.probe_note:
+            self.get_logger().warning(f"TCLAB_RESOURCE {tc.probe_note}")
         self.get_logger().info(f"TC10 LAB connected on {tc.resource}: {idn}")
         return True
 

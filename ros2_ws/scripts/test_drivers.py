@@ -231,16 +231,25 @@ def test_usbtmc_picks_the_tc10_not_the_other_usbtmc_box():
             FakeTmc.closed.append(self.path)
 
     real_glob, real_dev = mod.glob.glob, mod.UsbtmcDevice
-    mod.glob.glob = lambda p: ["/dev/usbtmc0", "/dev/usbtmc1"] if "usbtmc" in p else []
+    both = ["/dev/usbtmc0", "/dev/usbtmc1"]
+    mod.glob.glob = lambda p: both if p == mod.USBTMC_GLOB else []
     mod.UsbtmcDevice = FakeTmc
     try:
-        tc = TC10LAB("/dev/usbtmc*")
+        tc = TC10LAB(mod.USBTMC_GLOB)
         tc._open()
         assert tc.resource == "/dev/usbtmc1", f"picked {tc.resource}"
-        assert FakeTmc.opened == ["/dev/usbtmc0", "/dev/usbtmc1"]
+        assert FakeTmc.opened == both
         assert FakeTmc.closed == ["/dev/usbtmc0"], "the wrong device must be released"
         assert "*CLS" in tc.device.sent, "the session must be cleared on connect"
         assert "*STB?" in tc.device.sent, "queued stale replies must be drained"
+
+        # A typo'd pattern must not hide an instrument that is plainly present:
+        # find it anyway, and say the config needs fixing.
+        FakeTmc.opened, FakeTmc.closed = [], []
+        typo = TC10LAB("/dev/usbtmc*.")          # trailing '.' -- matches nothing
+        typo._open()
+        assert typo.resource == "/dev/usbtmc1", f"picked {typo.resource}"
+        assert "matched nothing" in typo.probe_note, typo.probe_note
     finally:
         mod.glob.glob, mod.UsbtmcDevice = real_glob, real_dev
 

@@ -29,6 +29,7 @@ import threading
 import pyvisa
 
 WAVELENGTH_VID = 0x1A45
+USBTMC_GLOB = "/dev/usbtmc*"
 
 CONDITION_BITS = {
     0: "current_limit",
@@ -107,6 +108,7 @@ class TC10LAB:
         self.rm = None
         self.device = None
         self.units = ""       # cached by set_units()/get_units(); see status()
+        self.probe_note = ""  # set when _open_usbtmc had to work around the config
 
     def _open(self):
         if self.resource.startswith("/dev/"):
@@ -132,24 +134,31 @@ class TC10LAB:
     def _open_usbtmc(self):
         """Open a kernel usbtmc char device, VERIFYING it is this instrument.
 
-        /dev/usbtmc0 is not reliably the TC10: the Rigol AWG is a USB-TMC device
-        too and the kernel numbers them in enumeration order, so a hard-coded
-        node can silently point the temperature node at the function generator --
-        two nodes then fight over one instrument, which looks exactly like a
-        flapping link. `resource` is treated as a GLOB, every match is asked
-        *IDN?, and only a Wavelength box is accepted.
+        A /dev/... resource selects the TRANSPORT, not the node. The exact path
+        was never load-bearing: /dev/usbtmc0 is not reliably the TC10 (the Rigol
+        AWG is USB-TMC too, and the kernel numbers them in enumeration order, so
+        a hard-coded node can point this node at the function generator -- two
+        nodes on one instrument, which reads as a flapping link). So every
+        /dev/usbtmc* is a candidate, each is asked *IDN?, and only a Wavelength
+        box is accepted. Whatever was configured is tried FIRST, to honour an
+        explicit choice; a pattern that matches nothing is a typo, not a reason
+        to ignore an instrument that is plainly present.
         """
-        candidates = sorted(glob.glob(self.resource))
+        named = sorted(glob.glob(self.resource))
+        candidates = named + [p for p in sorted(glob.glob(USBTMC_GLOB))
+                              if p not in named]
         if not candidates:
-            seen = sorted(glob.glob("/dev/usbtmc*"))
             raise FileNotFoundError(
-                f"no usbtmc device matches {self.resource!r} in THIS process's "
-                f"/dev (saw: {seen or 'no /dev/usbtmc* at all'}). In a container, "
+                f"no usbtmc device matches {self.resource!r}, and no "
+                f"{USBTMC_GLOB} exists in THIS process's /dev. In a container, "
                 "compare with the host: if the host has the node and the "
                 "container does not, recreate the container (its /dev is "
                 "populated at creation) and check the /dev:/dev mount. If the "
                 "HOST has none either, the kernel usbtmc driver is not bound: "
-                "unset TCLAB_RESOURCE to use VISA instead.")
+                "set TCLAB_RESOURCE to a VISA address instead.")
+        if not named:
+            self.probe_note = (f"{self.resource!r} matched nothing -- fix it in "
+                               f"ros2_ws/.env; probing {candidates} instead")
         rejected = []
         for path in candidates:
             try:
