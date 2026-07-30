@@ -70,6 +70,9 @@ Run `/mcp` in Claude Code — the tools appear as `scopio - <name>`. Then ask fo
 `status`: it answers with live telemetry if the Pi is up, and says exactly what
 is missing if it is not.
 
+Want the microscope to run an experiment on its own overnight?
+**[TUTORIAL.md](TUTORIAL.md)** walks from here to an unattended campaign.
+
 ## Tools
 
 | Tool | What it does |

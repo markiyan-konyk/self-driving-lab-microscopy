@@ -235,6 +235,9 @@ def test_a_timed_out_query_does_not_leave_the_session_one_answer_behind():
                 raise TimeoutError("VI_ERROR_TMO")
             return "0"
 
+        def clear(self):
+            self.sent.append("cleared")
+
         def close(self):
             pass
 
@@ -250,9 +253,12 @@ def test_a_timed_out_query_does_not_leave_the_session_one_answer_behind():
 
     tc.device.sent.clear()
     tc.query("TEC:SET?")
-    assert tc.device.sent[0] == "*CLS", tc.device.sent
-    assert "*STB?" in tc.device.sent, tc.device.sent
-    assert tc.device.sent[-1] == "TEC:SET?", tc.device.sent
+    # The resync must use the protocol CLEAR, never a *STB? read-back loop:
+    # every query writes one request and reads one reply, so a drain made of
+    # queries removes exactly as many replies as it adds. That is what once
+    # made the node report its instrument's identity as "0".
+    assert tc.device.sent == ["cleared", "*CLS", "TEC:SET?"], tc.device.sent
+    assert "*STB?" not in tc.device.sent, "a query cannot drain a query backlog"
     assert not tc._desynced
 
     # And a healthy query must not pay for the drain every time.
@@ -310,6 +316,9 @@ def test_usbtmc_picks_the_tc10_not_the_other_usbtmc_box():
                         "/dev/usbtmc1": "Wavelength Electronics,TC10 LAB,123,1.0"}[self.path]
             return "0"          # *STB?: no Message Available
 
+        def clear(self):
+            self.sent.append("cleared")
+
         def close(self):
             FakeTmc.closed.append(self.path)
 
@@ -324,7 +333,7 @@ def test_usbtmc_picks_the_tc10_not_the_other_usbtmc_box():
         assert FakeTmc.opened == both
         assert FakeTmc.closed == ["/dev/usbtmc0"], "the wrong device must be released"
         assert "*CLS" in tc.device.sent, "the session must be cleared on connect"
-        assert "*STB?" in tc.device.sent, "queued stale replies must be drained"
+        assert "cleared" in tc.device.sent, "the session must be CLEARed on connect"
 
         # A typo'd pattern must not hide an instrument that is plainly present:
         # find it anyway, and say the config needs fixing.

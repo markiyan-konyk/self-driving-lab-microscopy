@@ -79,8 +79,13 @@ container log on every retry:
 | `cameras` | Meaning |
 |---|---|
 | `[{"error": ...}]` | libcamera itself won't load — it doesn't match the host kernel's camera stack. Use the systemd fallback. |
-| `[]` | libcamera loaded, no sensor visible. Check the **host** first: `rpicam-hello --list-cameras`. Ribbon in the DSI display port instead of CSI, contacts the wrong way round, or a sensor needing a `config.txt` line. If the host sees it and this doesn't, use the systemd fallback. |
-| non-empty, open failed | The sensor is there but **something else owns it**. Exactly one owner is allowed — the compose service *or* the systemd unit, never both: `systemctl status scopio-camera`. |
+| `[]` | libcamera loaded, no sensor visible. Nothing is holding it; it is not there. Reseat the CSI ribbon at **both** ends (contacts the right way round, CSI port not the DSI display port), then check the host with this service stopped. |
+| non-empty, open failed | The sensor is there but **something else owns it**. Exactly one owner is allowed — this service, the systemd unit (`systemctl status scopio-camera`), or a stray `rpicam-hello`. |
+
+> **`rpicam-hello` fails while this server is running**, with *"Pipeline handler
+> in use by another process"* — that is the sensor being held by us, i.e. the
+> healthy case. To test the host, stop the owner first:
+> `docker compose stop camera && rpicam-hello --list-cameras`.
 
 A camera that appears later (replug, or the systemd unit releasing it) is picked
 up by the retry loop with no restart. The gateway reports `camera_ok: false`

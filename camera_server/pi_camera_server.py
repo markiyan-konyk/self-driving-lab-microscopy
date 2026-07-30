@@ -324,19 +324,26 @@ def enumerate_cameras():
 
 
 def diagnose(camera_list):
-    """The one line that says which problem you actually have."""
+    """The one line that says which problem you actually have.
+
+    Note what the host check is NOT: `rpicam-hello` fails with "Pipeline
+    handler in use by another process" whenever THIS server holds the camera,
+    which is whenever things are working. Stop this service before running it,
+    or you are just watching your own stack own the sensor.
+    """
     if camera_list and isinstance(camera_list[0], dict) and "error" in camera_list[0]:
         return ("libcamera itself failed to load -- the container's libcamera "
                 "does not match the host kernel's camera stack; use the systemd "
                 "fallback (camera_server/install_systemd.sh).")
     if not camera_list:
-        return ("libcamera loaded but sees NO sensor. Check the host first: "
-                "`rpicam-hello --list-cameras`. If the host sees it and this "
-                "does not, use the systemd fallback.")
+        return ("libcamera loaded but sees NO sensor -- nothing is holding it, "
+                "it is not there. Check the ribbon at BOTH ends, then the host "
+                "with the camera service stopped: "
+                "`docker compose stop camera && rpicam-hello --list-cameras`.")
     return ("libcamera SEES the sensor but could not open it -- something else "
-            "already has it. Exactly one owner is allowed: either the `camera` "
-            "compose service or the scopio-camera systemd unit, never both "
-            "(`systemctl status scopio-camera`).")
+            "already has it. Exactly one owner is allowed: this service, the "
+            "scopio-camera systemd unit (`systemctl status scopio-camera`), or "
+            "a stray rpicam-hello -- never two.")
 
 
 def open_camera_forever():

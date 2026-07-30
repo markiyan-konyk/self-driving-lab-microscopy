@@ -150,17 +150,26 @@ If the host lists it and the container doesn't → `docker compose up -d
 --force-recreate`, and check the `/dev:/dev` mount is present. If **neither**
 lists it → hardware, cable, or power.
 
-**Camera.** `camera_ok: false` → ask the camera server directly, it answers 503
-with the reason and a diagnosis: `curl -s http://127.0.0.1:8081/controls`.
-`"cameras": []` means libcamera loaded but sees no sensor — check the **host**
-first with `rpicam-hello --list-cameras` (ribbon in the DSI display port instead
-of CSI, contacts the wrong way round, a sensor that needs a `config.txt` line).
-A non-empty list with an open failure means something else already holds the
-sensor: exactly one owner is allowed, either the `camera` compose service *or*
-the systemd unit, never both — `systemctl status scopio-camera`. If the host
-sees the camera and the container doesn't, the container's libcamera doesn't
-match the host kernel; use the systemd fallback
-(`../camera_server/install_systemd.sh`, then `docker compose stop camera`).
+**Camera.** Ask the camera server — it answers 503 with the cause, what
+libcamera could see, and which of three problems you have:
+
+```bash
+curl -s http://127.0.0.1:8081/controls | python3 -m json.tool
+```
+
+A **200** with `frames` climbing means the camera is fine; anything still broken
+is downstream (gateway, network, viewer). Otherwise read `cameras`: `[]` means
+no sensor is visible — reseat the CSI ribbon at both ends; a non-empty list with
+an open failure means **something else already holds it**; an `error` entry
+means libcamera itself won't load, which is what the systemd fallback
+(`../camera_server/install_systemd.sh`) is for.
+
+> **Do not run `rpicam-hello` while the stack is up.** Exactly one process may
+> hold the sensor, so it fails with *"Pipeline handler in use by another
+> process"* whenever the camera server has it — i.e. whenever things are
+> working. Stop the service first:
+> `docker compose stop camera && rpicam-hello --list-cameras`, then
+> `docker compose start camera`.
 
 **Galvo (Rigol DG1022Z).** The node logs the resource string it tried — read
 the VISA error, the two look alike and mean opposite things:

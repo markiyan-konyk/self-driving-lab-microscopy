@@ -80,10 +80,17 @@ class UsbtmcDevice:
     # that has already finished talking. 256 is the value tc10_read.py settled
     # on against this instrument.
     READ_SIZE = 256
+    # USBTMC_IOCTL_CLEAR = _IO('[', 2). The kernel driver's name for the same
+    # USB-TMC CLEAR request pyvisa exposes as .clear(): flush both buffers.
+    IOCTL_CLEAR = 0x5B02
 
     def __init__(self, path):
         self.path = path
         self._fd = os.open(path, os.O_RDWR)
+
+    def clear(self):
+        import fcntl      # Linux-only; imported here so this module still loads
+        fcntl.ioctl(self._fd, self.IOCTL_CLEAR)
 
     def write(self, cmd):
         os.write(self._fd, (cmd + "\n").encode())
@@ -195,26 +202,33 @@ class TC10LAB:
         raise RuntimeError("no Wavelength TC10 answered on " + ", ".join(rejected))
 
     def _resync(self):
-        """Drop any reply still queued in the instrument.
+        """Throw away any reply still queued in the instrument.
 
         Neither transport frames replies to requests: a reply nobody read stays
         queued, so the next query returns IT and everything after is one answer
-        behind. Bit 4 of *STB? is Message Available; reading it consumes one
-        stale reply at a time. (Lifted from tc10_read.py, which is what makes
-        that script reliable.)
+        behind -- numbers that parse cleanly and are wrong.
 
-        Called on connect and after any failed query -- best effort throughout:
-        if the link is genuinely dead, the caller's own query reports that, and
-        an exception raised from draining would only hide it.
+        This uses the USB-TMC CLEAR control request, which flushes the
+        instrument's input AND output buffers in-protocol. It does NOT try to
+        read the backlog away with *STB?: every query WRITES one request and
+        READS one reply, so a drain made of queries removes exactly as many
+        replies as it adds and the backlog survives untouched. That is not
+        theoretical -- it is what made this node report its instrument's
+        identity as "0".
+
+        Called on connect and after any failed query. Best effort: if the link
+        is genuinely dead the caller's own query reports it, and raising from
+        here would only hide that.
         """
-        self._desynced = False          # first -- this method uses query() itself
+        self._desynced = False
         try:
-            self.command("*CLS")        # clear status + error queue
-            for _ in range(8):
-                if not int(self.query("*STB?")) & 0b1_0000:
-                    return
+            self.device.clear()      # USB-TMC CLEAR: flush both buffers
         except Exception:
-            pass      # a stale reply that will not parse IS the thing we drain
+            pass
+        try:
+            self.command("*CLS")     # then the status + error queues
+        except Exception:
+            pass
 
     def _close(self):
         """Drop the session. Safe to call twice, and on an already-dead link."""
