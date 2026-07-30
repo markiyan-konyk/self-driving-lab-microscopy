@@ -90,10 +90,15 @@ class TemperatureNode(Node):
             try:
                 tc._open()
                 idn = tc.idn()
-                if units:
-                    tc.set_units(units)      # also caches them for status()
-                else:
-                    tc.get_units()
+                # Units are a LABEL on the status topic. Best-effort, like the
+                # galvo's dcinit: a link that answers *IDN? is a working link,
+                # and throwing it away because one cosmetic reply came back in
+                # an unexpected format is how a connected instrument reads as
+                # absent. (This firmware answers TEC:UNITS? with 'CELSIUS'.)
+                try:
+                    tc.set_units(units) if units else tc.get_units()
+                except Exception as exc:
+                    self.get_logger().warning(f"TC10 LAB units unavailable ({exc}).")
                 self.tc, self.idn, self.last_error = tc, idn, ""
                 self._failures = 0
             except Exception as exc:

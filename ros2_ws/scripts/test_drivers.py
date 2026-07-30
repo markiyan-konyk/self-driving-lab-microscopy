@@ -178,6 +178,42 @@ def test_condition_bits_decode():
     assert s["units"] == "C"
 
 
+def test_units_accept_a_word_or_a_code():
+    """This firmware answers TEC:UNITS? with 'CELSIUS', not '0'. A bare
+    int(float(reply)) took the whole node down at connect."""
+    tc = TC10LAB.__new__(TC10LAB)
+    sent = []
+    for reply, expected in [("CELSIUS", "C"), ("0", "C"), ("KELVIN", "K"),
+                            ("2", "F"), ("FAHRENHEIT", "F"), ("RAW", "raw"),
+                            ("3", "raw"), ("wat", "?")]:
+        tc.query = lambda cmd, r=reply: r
+        assert tc.get_units() == expected, f"{reply!r} -> {tc.units!r}"
+
+    # set_units sends the numeric CODE, whichever form the caller used.
+    tc.command = lambda cmd: sent.append(cmd)
+    tc.query = lambda cmd: "CELSIUS"
+    tc.set_units("C")
+    tc.set_units(0)
+    assert sent == ["TEC:UNITS 0", "TEC:UNITS 0"], sent
+
+
+def test_query_float_tolerates_a_decorated_reply():
+    """Same firmware quirk, on a number: take the leading value rather than
+    letting one decorated reply kill the poll."""
+    tc = TC10LAB.__new__(TC10LAB)
+    for reply, expected in [("25.0", 25.0), ("25.0 C", 25.0), ("-1.25", -1.25),
+                            ("+3.5 A", 3.5), ("1.2e-3", 0.0012), (".5", 0.5)]:
+        tc.query = lambda cmd, r=reply: r
+        assert tc.query_float("TEC:ACT?") == expected, f"{reply!r}"
+    tc.query = lambda cmd: "CELSIUS"
+    try:
+        tc.query_float("TEC:ACT?")
+    except ValueError as exc:
+        assert "CELSIUS" in str(exc), "the error must quote what came back"
+    else:
+        raise AssertionError("a reply with no number at all must still raise")
+
+
 def test_status_costs_five_round_trips():
     """Every extra query is another chance per second for the instrument to be
     mid-reply when the next one arrives."""

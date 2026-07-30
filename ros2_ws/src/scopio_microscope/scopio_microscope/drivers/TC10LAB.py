@@ -24,6 +24,7 @@ Temperatures follow set_units() -- Celsius by default.
 
 import glob
 import os
+import re
 import threading
 
 import pyvisa
@@ -47,6 +48,10 @@ CONDITION_BITS = {
 FAULT_BITS = (0, 2, 3, 4, 5, 6, 7, 11)
 
 UNITS = {0: "C", 1: "K", 2: "F", 3: "raw"}
+# TEC:UNITS? answers a code on some firmware and a word ('CELSIUS') on others;
+# both reduce to a first letter. TEC:UNITS takes the code either way.
+UNIT_NAMES = {"C": "C", "K": "K", "F": "F", "R": "raw"}
+UNIT_CODES = {"C": 0, "K": 1, "F": 2, "R": 3}
 
 
 def usb_vid(resource):
@@ -223,10 +228,26 @@ class TC10LAB:
             return self.device.query(cmd).strip()
 
     def query_float(self, cmd):
-        return float(self.query(cmd))
+        """float() of a reply, tolerating a decoration the firmware may add.
+
+        This unit does not always answer in the form the command reference
+        implies -- TEC:UNITS? returns 'CELSIUS', not '0'. So a bare float() on a
+        reply is a landmine: one decorated number used to take the whole node
+        down at connect. Take the leading number if there is one, and only then
+        give up.
+        """
+        reply = self.query(cmd)
+        try:
+            return float(reply)
+        except ValueError:
+            match = re.match(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?",
+                             reply.strip())
+            if match:
+                return float(match.group())
+            raise ValueError(f"{cmd} answered {reply!r}, which is not a number")
 
     def query_int(self, cmd):
-        return int(float(self.query(cmd)))
+        return int(self.query_float(cmd))
 
     # ======================================================================
     # Identity & housekeeping
@@ -279,13 +300,24 @@ class TC10LAB:
     def output_enabled(self):   return self.query("TEC:OUTput?") == "1"
 
     def set_units(self, units):
-        """Active temperature units: 0/C, 1/K, 2/F, 3/RAW. Reads them back, so
-        `units` stays correct without status() spending a round trip on it."""
-        self.command(f"TEC:UNITS {units}")
+        """Active temperature units. Accepts a code (0/1/2/3) or a letter
+        (C/K/F/raw) and always sends the CODE, which is what the command
+        reference documents. Reads them back, so `units` stays correct without
+        status() spending a round trip on it."""
+        code = UNIT_CODES.get(str(units).strip().upper()[:1], units)
+        self.command(f"TEC:UNITS {code}")
         return self.get_units()
 
     def get_units(self):
-        self.units = UNITS.get(self.query_int("TEC:UNITS?"), "?")
+        """Active units as 'C'/'K'/'F'/'raw'.
+
+        The reply is a code on some firmware and a word ('CELSIUS') on others,
+        so both are accepted. This is a LABEL for the status topic -- never let
+        it decide whether the instrument is usable.
+        """
+        reply = self.query("TEC:UNITS?").strip().upper()
+        self.units = (UNITS.get(int(reply), "?") if reply.isdigit()
+                      else UNIT_NAMES.get(reply[:1], "?"))
         return self.units
 
     def set_tolerance(self, deg=0.05, seconds=1.0):
