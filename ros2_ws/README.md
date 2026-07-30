@@ -199,8 +199,19 @@ and puts every subsequent query one answer behind.
 Do not run `tc10_read.py` against the instrument while the stack is up: both
 would be reading one queue, and each would get the other's replies.
 
-**Stage (Sangaboard).** `ls /dev/ttyACM*`, then `docker compose logs scopio |
-grep -i sanga`.
+**Stage (Sangaboard).** A serial device, not VISA. The node prints every serial
+port it can see when it fails — that list *is* the diagnosis:
+
+- **empty** → the board isn't reaching this process. Check the host
+  (`ls -l /dev/ttyACM* /dev/ttyUSB*`, `lsusb`) and the container/host `/dev`
+  comparison above.
+- **the board is listed** → auto-detection didn't recognise it. The library
+  matches on USB vendor/product id, so a board behind a CH340 or FTDI bridge is
+  plugged in and working but invisible. Name it: `SANGABOARD_PORT=/dev/ttyACM0`
+  in `.env`. `scripts/list_instruments.py` prints the ready-made line.
+
+The node retries every 10 s, so a stage plugged in after launch comes up on its
+own — no restart.
 
 **A node missing from `ros2 node list` entirely** means it crashed on import —
 `docker compose logs scopio` has the traceback. That is the one failure mode

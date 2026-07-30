@@ -48,6 +48,7 @@ services:
       # named there: pyvisa-py cannot scan the LAN.
       - GALVO_RESOURCE=${GALVO_RESOURCE:-}
       - TCLAB_RESOURCE=${TCLAB_RESOURCE:-}
+      - SANGABOARD_PORT=${SANGABOARD_PORT:-}
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
       - CAMERA_URL=http://127.0.0.1:8081   # camera_node bridge mode upstream
     working_dir: /workspace

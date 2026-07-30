@@ -17,6 +17,11 @@
 
 /scopio/stage_node:
   ros__parameters:
+    # Serial device of the Sangaboard. Empty => the library auto-detects by USB
+    # vendor/product id, which misses a board behind an unrecognised bridge.
+    # SANGABOARD_PORT in ros2_ws/.env wins over this.
+    port: ""
+    reconnect_period: 10.0
     publish_rate: 5.0        # Hz, StagePosition
     step_x: 40               # default jog/grid step (steps)
     step_y: 40

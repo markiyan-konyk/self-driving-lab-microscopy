@@ -67,7 +67,25 @@ for path in nodes:
     if hint:
         print(hint + "        # a GLOB: the node probes each and keeps this one")
 
-# --- 2. VISA resources ------------------------------------------------------
+# --- 2. serial ports --------------------------------------------------------
+# The Sangaboard stage lives here, and its library auto-detects by USB
+# vendor/product id -- a board behind an unrecognised bridge (CH340, FTDI) is
+# present but not found, which is why SANGABOARD_PORT exists.
+print("\n== serial ports ==")
+try:
+    from serial.tools import list_ports
+    ports = list(list_ports.comports())
+except Exception as exc:
+    print(f"  ! pyserial unavailable: {type(exc).__name__}: {exc}")
+    ports = []
+if not ports:
+    print("  (none)")
+for p in ports:
+    ids = f"{p.vid:04x}:{p.pid:04x}" if p.vid else "no USB id"
+    print(f"  {p.device}  [{ids}]  {p.description}")
+    print(f"    SANGABOARD_PORT={p.device}        # if this is the stage")
+
+# --- 3. VISA resources ------------------------------------------------------
 print("\n== VISA resources ==")
 try:
     import pyvisa
@@ -94,7 +112,7 @@ for res in found:
     print(f"  {res}  {idn}")
     print(f"    {KNOWN[vid]}={res}")
 
-# --- 3. Ethernet units named on the command line ----------------------------
+# --- 4. Ethernet units named on the command line ----------------------------
 hosts = [a for a in sys.argv[1:] if not a.startswith("-")]
 if hosts and rm is not None:
     print("\n== Ethernet ==")

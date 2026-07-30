@@ -17,6 +17,7 @@ Degrades gracefully: with no board present it publishes connected=false and
 move goals/services abort cleanly.
 """
 
+import os
 import threading
 import time
 
@@ -32,20 +33,43 @@ from scopio_interfaces.srv import MoveAbs, StageJog
 from scopio_interfaces.action import MoveStagePath, ScanRegion
 
 
+def serial_ports():
+    """Every serial port pyserial can see here, with USB ids. This is the whole
+    diagnosis: an empty list means the board is not reaching this process at
+    all (unplugged, or the container's /dev is stale); a list that HAS the board
+    means auto-detection did not recognise it, and naming the port fixes it."""
+    try:
+        from serial.tools import list_ports
+    except Exception as exc:
+        return [f"<pyserial unavailable: {type(exc).__name__}: {exc}>"]
+    found = [f"{p.device} [{p.vid:04x}:{p.pid:04x}] {p.description}"
+             if p.vid else f"{p.device} [no USB id] {p.description}"
+             for p in list_ports.comports()]
+    return found or ["(none visible to this process)"]
+
+
 class StageNode(Node):
     def __init__(self):
         super().__init__("stage_node")
         self.declare_parameter("publish_rate", 5.0)
+        self.declare_parameter("port", "")
+        self.declare_parameter("reconnect_period", 10.0)
         self.declare_parameter("step_x", 40)
         self.declare_parameter("step_y", 40)
         self.declare_parameter("step_z", 40)
 
-        self._lock = threading.Lock()
+        # One lock for both the session and the moves: never swap the board out
+        # from under a move in progress.
+        self._lock = threading.RLock()
         self.sb = None
         self.position = {"x": 0, "y": 0, "z": 0}   # open-loop, origin at startup
         self.steps_per_um = {"x": 1.0, "y": 1.0, "z": 1.0}  # from calibration topic
 
-        self._open_board()
+        self._connect()
+        # Every other instrument node retries; this one used to open the board
+        # exactly once, so a stage plugged in after launch stayed dead forever.
+        period = max(2.0, float(self.get_parameter("reconnect_period").value))
+        self.create_timer(period, self._retry_connect)
 
         self.pos_pub = self.create_publisher(StagePosition, "stage/position", 5)
         # Latched calibration: match the publisher's transient-local durability.
@@ -73,14 +97,42 @@ class StageNode(Node):
             callback_group=cb)
 
     # ------------------------------------------------------------------ #
-    def _open_board(self):
-        try:
-            from sangaboard import Sangaboard
-            self.sb = Sangaboard()
-            self.get_logger().info("Sangaboard connected.")
-        except Exception as e:
-            self.get_logger().warning(f"Sangaboard unavailable ({e}); idling.")
-            self.sb = None
+    def _connect(self):
+        """Open the board. SANGABOARD_PORT env > `port` param > the library's
+        own auto-detection.
+
+        The explicit port exists because auto-detection matches on USB
+        vendor/product ids and a board on an unrecognised USB-serial bridge
+        (CH340, FTDI) is simply not found -- with no way to say "it is that
+        one". Every other instrument here can be named in .env; this one could
+        not.
+        """
+        port = (os.environ.get("SANGABOARD_PORT")
+                or self.get_parameter("port").value or "").strip()
+        with self._lock:
+            if self.sb is not None:
+                return True
+            try:
+                from sangaboard import Sangaboard
+                self.sb = Sangaboard(port) if port else Sangaboard()
+            except Exception as exc:
+                asked = repr(port) if port else "<library auto-detection>"
+                self.get_logger().warning(
+                    f"Sangaboard unavailable; node runs, reports connected=false.\n"
+                    f"  tried:  {asked}\n"
+                    f"  error:  {type(exc).__name__}: {exc}\n"
+                    f"  serial ports here: {serial_ports()}\n"
+                    f"  If the board IS listed above, auto-detection missed it: "
+                    f"put SANGABOARD_PORT=<device> in ros2_ws/.env.",
+                    throttle_duration_sec=60.0)
+                return False
+        self.get_logger().info(
+            f"Sangaboard connected on {port or '<auto-detected>'}.")
+        return True
+
+    def _retry_connect(self):
+        if self.sb is None:
+            self._connect()
 
     def _on_calibration(self, msg):
         self.steps_per_um = {"x": msg.steps_per_um_x or 1.0,
