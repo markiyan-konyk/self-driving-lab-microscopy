@@ -33,18 +33,30 @@ from scopio_interfaces.srv import MoveAbs, StageJog
 from scopio_interfaces.action import MoveStagePath, ScanRegion
 
 
+# The Sangaboard v0.5 is an RP2040 HAT: it sits on the 40-pin header and talks
+# over the Pi's UART, so it has NO USB vendor/product id. The library's
+# auto-detection scans USB serial devices, which means a header-mounted board is
+# powered, wired and working yet can never be found -- naming the port is the
+# only way. /dev/serial0 is the Pi's alias for whichever UART is on pins 8/10.
+GPIO_UART_PORTS = ("/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0")
+
+
 def serial_ports():
-    """Every serial port pyserial can see here, with USB ids. This is the whole
-    diagnosis: an empty list means the board is not reaching this process at
-    all (unplugged, or the container's /dev is stale); a list that HAS the board
-    means auto-detection did not recognise it, and naming the port fixes it."""
+    """Every serial port visible here. This list IS the diagnosis: empty means
+    the board is not reaching this process at all; a port that is present means
+    auto-detection did not recognise it, and naming it fixes that."""
     try:
         from serial.tools import list_ports
+        found = [f"{p.device} [{p.vid:04x}:{p.pid:04x}] {p.description}"
+                 if p.vid else f"{p.device} [no USB id] {p.description}"
+                 for p in list_ports.comports()]
     except Exception as exc:
-        return [f"<pyserial unavailable: {type(exc).__name__}: {exc}>"]
-    found = [f"{p.device} [{p.vid:04x}:{p.pid:04x}] {p.description}"
-             if p.vid else f"{p.device} [no USB id] {p.description}"
-             for p in list_ports.comports()]
+        found = [f"<pyserial unavailable: {type(exc).__name__}: {exc}>"]
+    # comports() reports USB serial devices; the header UART may not appear
+    # there at all, so check it directly -- that is where a HAT lives.
+    header = [p for p in GPIO_UART_PORTS if os.path.exists(p)]
+    if header:
+        found.append(f"GPIO header UART present: {header}")
     return found or ["(none visible to this process)"]
 
 
@@ -98,36 +110,43 @@ class StageNode(Node):
 
     # ------------------------------------------------------------------ #
     def _connect(self):
-        """Open the board. SANGABOARD_PORT env > `port` param > the library's
-        own auto-detection.
+        """Open the board. SANGABOARD_PORT env > `port` param > auto-detection.
 
-        The explicit port exists because auto-detection matches on USB
-        vendor/product ids and a board on an unrecognised USB-serial bridge
-        (CH340, FTDI) is simply not found -- with no way to say "it is that
-        one". Every other instrument here can be named in .env; this one could
-        not.
+        Auto-detection only ever finds a board on USB. A v0.5 HAT on the 40-pin
+        header speaks the Pi's UART and has no USB identity at all, so it is
+        invisible to it -- hence the explicit port, and hence the header UARTs
+        being tried before giving up.
         """
         port = (os.environ.get("SANGABOARD_PORT")
                 or self.get_parameter("port").value or "").strip()
         with self._lock:
             if self.sb is not None:
                 return True
-            try:
-                from sangaboard import Sangaboard
-                self.sb = Sangaboard(port) if port else Sangaboard()
-            except Exception as exc:
-                asked = repr(port) if port else "<library auto-detection>"
+            attempts = []
+            for candidate in ([port] if port else
+                              [None] + [p for p in GPIO_UART_PORTS
+                                        if os.path.exists(p)]):
+                try:
+                    from sangaboard import Sangaboard
+                    self.sb = Sangaboard(candidate) if candidate else Sangaboard()
+                    opened = candidate or "<auto-detected>"
+                    break
+                except Exception as exc:
+                    attempts.append(f"{candidate or '<auto-detection>'}: "
+                                    f"{type(exc).__name__}: {exc}")
+            else:
                 self.get_logger().warning(
-                    f"Sangaboard unavailable; node runs, reports connected=false.\n"
-                    f"  tried:  {asked}\n"
-                    f"  error:  {type(exc).__name__}: {exc}\n"
-                    f"  serial ports here: {serial_ports()}\n"
-                    f"  If the board IS listed above, auto-detection missed it: "
-                    f"put SANGABOARD_PORT=<device> in ros2_ws/.env.",
+                    "Sangaboard unavailable; node runs, reports connected=false.\n"
+                    + "".join(f"  tried  {a}\n" for a in attempts)
+                    + f"  serial ports here: {serial_ports()}\n"
+                    "  A v0.5 HAT on the 40-pin header is a UART device, not "
+                    "USB: set SANGABOARD_PORT=/dev/serial0 in ros2_ws/.env, and "
+                    "on the Pi enable the UART with the serial LOGIN CONSOLE "
+                    "off (raspi-config > Interface Options > Serial Port), or "
+                    "a getty holds the port and talks over you.",
                     throttle_duration_sec=60.0)
                 return False
-        self.get_logger().info(
-            f"Sangaboard connected on {port or '<auto-detected>'}.")
+        self.get_logger().info(f"Sangaboard connected on {opened}.")
         return True
 
     def _retry_connect(self):

@@ -470,6 +470,31 @@ def test_mono_sensor_does_not_reject_the_whole_request():
         cs.picam2 = None
 
 
+def test_exposure_longer_than_the_frame_lowers_the_frame_rate():
+    """A frame cannot be shorter than its own exposure. Pinning
+    FrameDurationLimits below ExposureTime asks the sensor for the impossible;
+    some stall on it rather than clamp, which looks like frozen video."""
+    cs = _camera_server()
+    cam = MonoCamera()
+    cs.picam2 = cam
+    try:
+        cs.state.update(framerate=30.0, exposure=20000)
+        # 200 ms exposure at 30 fps (33.3 ms frames) is not satisfiable.
+        cs.apply_controls({"exposure": 200000})
+        lo, hi = cam.applied["FrameDurationLimits"]
+        assert lo == hi >= 200000, cam.applied["FrameDurationLimits"]
+        assert cs.state["framerate"] < 5.0, cs.state["framerate"]
+
+        # Going back to a short exposure must restore the requested rate.
+        cs.apply_controls({"framerate": 30.0, "exposure": 5000})
+        lo, hi = cam.applied["FrameDurationLimits"]
+        assert lo == hi == 33333, cam.applied["FrameDurationLimits"]
+        assert cs.state["framerate"] == 30.0
+    finally:
+        cs.picam2 = None
+        cs.state.update(framerate=30.0, exposure=20000)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:

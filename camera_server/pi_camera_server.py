@@ -131,6 +131,21 @@ def apply_controls(d):
         if val is not None:
             c[ctrl] = val
             state[key] = val
+    # Exposure and frame duration must stay coherent: a frame cannot be shorter
+    # than its own exposure. Pinning FrameDurationLimits below ExposureTime asks
+    # the sensor for something impossible, and a sensor may stall on that rather
+    # than clamp -- one frame, then nothing. camera_node's fps budget keeps them
+    # consistent, but a client POSTing here goes straight past that, so enforce
+    # it at the only place that owns the camera. Exposure wins; fps gives way.
+    if "ExposureTime" in c or "FrameDurationLimits" in c:
+        dur = int(1_000_000 / state["framerate"])
+        if state["exposure"] > dur:
+            dur = state["exposure"] + 500
+            state["framerate"] = round(1_000_000 / dur, 2)
+            print(f"exposure {state['exposure']} us does not fit the frame; "
+                  f"frame rate lowered to {state['framerate']} fps", flush=True)
+        c["FrameDurationLimits"] = (dur, dur)
+
     if c and picam2 is not None:
         picam2.set_controls(supported(c))
     return get_controls()
@@ -155,8 +170,17 @@ def do_white_balance():
 
 
 def get_controls():
-    """Current settings, merging commanded state with live camera metadata."""
+    """Current settings, merging commanded state with live camera metadata.
+
+    `frames` and `frame_age_s` are the diagnosis when video freezes: if frames
+    keeps climbing while a viewer is stuck, the sensor is fine and the problem
+    is downstream (proxy, browser). If it stops climbing, the ENCODER stopped
+    and the cause is here or in the camera.
+    """
     out = dict(state)
+    out["frames"] = output.frames
+    out["frame_age_s"] = (round(time.monotonic() - output.at, 2)
+                          if output.at else None)
     try:
         md = picam2.capture_metadata() if picam2 is not None else {}
         if "ExposureTime" in md:
@@ -183,11 +207,15 @@ def unavailable():
 class StreamingOutput(io.BufferedIOBase):
     def __init__(self):
         self.frame = None
+        self.frames = 0          # total encoded; reported by GET /controls
+        self.at = 0.0            # monotonic time of the newest frame
         self.condition = Condition()
 
     def write(self, buf):
         with self.condition:
             self.frame = buf
+            self.frames += 1
+            self.at = time.monotonic()
             self.condition.notify_all()
 
 
