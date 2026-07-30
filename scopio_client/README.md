@@ -22,9 +22,13 @@ scope.stage.jog(dz=100)                       # relative move, Sangaboard steps
 scope.stage.move_abs(0, 0, 0)
 scope.galvo.write(":OUTPut1 OFF")             # raw SCPI passthrough
 scope.camera.set_controls(contrast=1.2)       # partial update, nothing clobbered
+scope.temperature.setpoint(37.0)
+scope.temperature.output(True)                # nothing heats while the TEC is off
 
 # Sense
 print(scope.stage.position())                 # latest cached telemetry
+print(scope.temperature.temperature())        # live read from the instrument
+print(scope.galvo.query("*IDN?"))             # SCPI query -> reply string
 scope.subscribe("stage/position", lambda msg, env: print(msg), rate_hz=5)
 for jpeg in scope.stream_frames():            # live video, raw JPEG bytes
     open("frame.jpg", "wb").write(jpeg); break
@@ -37,8 +41,33 @@ result = scope.camera.autofocus(z_range=2000, steps=15,
 print(scope.interfaces())
 ```
 
-Generic escape hatch for anything not wrapped yet (e.g. the future temperature
-node): `scope.call_service("thermal/set_target", {"celsius": 37.0})`.
+### Reaching past the sugar
+
+Two escape hatches cover everything the convenience methods don't:
+
+```python
+scope.call_service("calibration/set", {"um_per_px": 0.42})   # any ROS service
+scope.send_goal("scan_region", {...})                        # any ROS action
+
+# The galvo and temperature nodes each expose a whole driver class. Call any
+# method on it, and ask the instrument itself what it has:
+scope.temperature.call("aux_temperature")
+scope.galvo.call("sinupdate", 1, freq=50)
+[m["name"] for m in scope.galvo.methods()]
+```
+
+Every failure -- unreachable Pi, HTTP error, rejected SCPI, aborted action --
+raises `ScopioError`. Close with `scope.close()` or use it as a context manager;
+that shuts down the background WebSocket thread.
 
 Full command manual: `docs/API.md` in the repository. Interactive docs:
 `http://<pi-ip>:8000/docs`.
+
+## Test
+
+```bash
+python scopio_client/test_scopio_client.py      # no hardware needed
+```
+
+Runs a mock gateway on localhost and drives the SDK against it: HTTP calls and
+errors, MJPEG frame splitting, WebSocket subscribe/action, and reconnect.

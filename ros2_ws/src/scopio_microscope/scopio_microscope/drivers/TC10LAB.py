@@ -3,12 +3,26 @@
 Same shape as dg1022z.DG1022Z: does not open on construction, the node calls
 _open(). Every public method is reachable over the temperature/call service.
 
-command() and query() are the only two methods the rest of the class uses.
+command() and query() are the only two methods the rest of the class uses, and
+they hold _lock -- the node serves temperature/call on a reentrant callback
+group while a timer polls status(), so two threads are regularly inside here.
+
+TWO TRANSPORTS, chosen by what TCLAB_RESOURCE looks like:
+
+  VISA         a resource string ("USB0::0x1A45::...", "TCPIP::10.0.0.5::INSTR"),
+               or empty to discover the first Wavelength box on USB.
+  kernel tmc   a path ("/dev/usbtmc0"). Use this when the kernel's usbtmc driver
+               has claimed the instrument: pyvisa-py then has to detach that
+               driver to reach it over libusb, and on some kernels the result is
+               a device that enumerates fine and answers nothing -- every query
+               times out. Reading and writing the char device the kernel already
+               owns sidesteps the fight. The udev rule ships 0666 on it.
 
 Command reference: COMMAND SET, LAB Series Instruments (COMMAND-00400 rev H).
 Temperatures follow set_units() -- Celsius by default.
 """
 
+import os
 import threading
 
 import pyvisa
@@ -45,6 +59,26 @@ def usb_vid(resource):
         return None
 
 
+class UsbtmcDevice:
+    """The kernel's usbtmc character device, with the slice of the pyvisa
+    resource API this driver uses. The kernel driver applies its own read
+    timeout, so a silent instrument surfaces as OSError(ETIMEDOUT)."""
+
+    def __init__(self, path):
+        self.path = path
+        self._fd = os.open(path, os.O_RDWR)
+
+    def write(self, cmd):
+        os.write(self._fd, (cmd + "\n").encode())
+
+    def query(self, cmd):
+        self.write(cmd)
+        return os.read(self._fd, 4096).decode(errors="replace")
+
+    def close(self):
+        os.close(self._fd)
+
+
 class TC10LAB:
     def __init__(self, resource="", timeout_ms=5000):
         self.resource = resource
@@ -52,8 +86,12 @@ class TC10LAB:
         self._lock = threading.RLock()
         self.rm = None
         self.device = None
+        self.units = ""       # cached by set_units()/get_units(); see status()
 
     def _open(self):
+        if self.resource.startswith("/dev/"):
+            self.device = UsbtmcDevice(self.resource)
+            return
         self.rm = pyvisa.ResourceManager("@py")
         if not self.resource:
             # Match the vendor id in the resource string so we never open
@@ -61,8 +99,10 @@ class TC10LAB:
             usb = [r for r in self.rm.list_resources("USB?*INSTR")
                    if usb_vid(r) == WAVELENGTH_VID]
             if not usb:
-                raise RuntimeError("no TC10 LAB on USB; set TCLAB_RESOURCE for an "
-                                   "Ethernet unit (pyvisa-py cannot scan the LAN)")
+                raise RuntimeError(
+                    "no TC10 LAB on USB. Set TCLAB_RESOURCE: an Ethernet unit "
+                    "must be named (pyvisa-py cannot scan the LAN), and "
+                    "/dev/usbtmc0 works when the kernel driver holds the box.")
             self.resource = usb[0]
         self.device = self.rm.open_resource(self.resource)
         self.device.read_termination = "\n"
@@ -70,18 +110,28 @@ class TC10LAB:
         self.device.timeout = self.timeout_ms
 
     def _close(self):
-        if self.device is not None:
-            self.device.close()
-        if self.rm is not None:
-            self.rm.close()
-        self.device = self.rm = None
+        """Drop the session. Safe to call twice, and on an already-dead link."""
+        with self._lock:
+            for handle in (self.device, self.rm):
+                try:
+                    if handle is not None:
+                        handle.close()
+                except Exception:
+                    pass
+            self.device = self.rm = None
 
     def command(self, cmd):
+        """Write a raw SCPI command."""
         with self._lock:
+            if self.device is None:
+                raise ConnectionError("TC10 LAB session is closed")
             self.device.write(cmd)
 
     def query(self, cmd):
+        """Write a raw SCPI query and return the reply, stripped."""
         with self._lock:
+            if self.device is None:
+                raise ConnectionError("TC10 LAB session is closed")
             return self.device.query(cmd).strip()
 
     def query_float(self, cmd):
@@ -140,8 +190,15 @@ class TC10LAB:
 
     def output_enabled(self):   return self.query("TEC:OUTput?") == "1"
 
-    def set_units(self, units): return self.command(f"TEC:UNITS {units}")  # 0/C 1/K 2/F 3/RAW
-    def get_units(self):        return UNITS.get(self.query_int("TEC:UNITS?"), "?")
+    def set_units(self, units):
+        """Active temperature units: 0/C, 1/K, 2/F, 3/RAW. Reads them back, so
+        `units` stays correct without status() spending a round trip on it."""
+        self.command(f"TEC:UNITS {units}")
+        return self.get_units()
+
+    def get_units(self):
+        self.units = UNITS.get(self.query_int("TEC:UNITS?"), "?")
+        return self.units
 
     def set_tolerance(self, deg=0.05, seconds=1.0):
         """In-tolerance window: within +/-deg for `seconds` sets condition bit 9."""
@@ -314,14 +371,17 @@ class TC10LAB:
         return [CONDITION_BITS[b] for b in FAULT_BITS if cond & (1 << b)]
 
     def status(self):
-        """Everything the status topic needs, in one call (7 round trips)."""
+        """Everything the status topic needs, in FIVE round trips. This runs on
+        the node's poll timer, so every query added here is one more chance per
+        second for the instrument to be mid-reply when the next one arrives.
+        `units` is the cached value from set_units()/get_units()."""
         cond = self.query_int("TEC:COND?")
         return {
             "temperature": self.query_float("TEC:ACT?"),
             "setpoint": self.query_float("TEC:SET?"),
             "current": self.query_float("TEC:I?"),
             "voltage": self.query_float("TEC:V?"),
-            "units": UNITS.get(self.query_int("TEC:UNITS?"), "?"),
+            "units": self.units,
             "output": bool(cond & (1 << 10)),
             "in_tolerance": bool(cond & (1 << 9)),
             "condition": cond,

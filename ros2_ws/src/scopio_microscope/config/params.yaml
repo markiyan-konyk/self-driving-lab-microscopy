@@ -28,9 +28,8 @@
     # device (it never opens another vendor's instrument). Set GALVO_RESOURCE in
     # ros2_ws/.env to name it explicitly; that wins over this.
     resource: ""
-    auto_discover: true
     init_on_connect: true    # on connect, DC mode + outputs ON, so update(ch,val) moves the galvo
-    publish_rate: 5.0        # Hz, AwgStatus
+    publish_rate: 5.0        # Hz, AwgStatus (cached state, no polling)
     reconnect_period: 15.0
     # 15 s, not 5: a large arbitrary-waveform upload takes the DG1022Z a few
     # seconds to ingest over USB-TMC.
@@ -39,16 +38,22 @@
 /scopio/temperature_node:
   ros__parameters:
     # Address of the TC10 LAB. Empty => auto-discover the first WAVELENGTH-vendor
-    # USB device. An Ethernet unit must be named (pyvisa-py cannot scan the LAN);
-    # TCLAB_RESOURCE in ros2_ws/.env wins over this.
+    # USB device. TCLAB_RESOURCE in ros2_ws/.env wins over this, and must be set
+    # for an Ethernet unit (pyvisa-py cannot scan the LAN) or to use the kernel
+    # usbtmc device (TCLAB_RESOURCE=/dev/usbtmc0).
     resource: ""
-    units: "C"               # forced on connect; "" leaves the instrument alone
+    units: "C"               # forced on connect; "" reads them instead
+    # 1 Hz costs FIVE USB-TMC round trips per second (see TC10LAB.status()).
+    # Turn it down if the instrument reports timeouts under load.
     publish_rate: 1.0        # Hz, TemperatureStatus (this node polls)
-    reconnect_period: 15.0
+    # 5 s, not 15: opening this instrument is quick, and the session is only
+    # dropped after three consecutive failures, so retrying often cannot thrash.
+    reconnect_period: 5.0
     timeout_ms: 5000
 
 /scopio/calibration_node:
   ros__parameters:
-    # Persisted spatial calibration (survives restarts). Relative paths are
-    # resolved against the process working directory.
+    # Persisted spatial calibration. Relative to the process working directory,
+    # which compose sets to /workspace -- the bind-mounted repo root on the Pi,
+    # so it survives `docker compose down`. The node logs the absolute path.
     calibration_file: "calibration.json"

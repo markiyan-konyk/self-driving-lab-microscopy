@@ -54,7 +54,7 @@ client can join. **ROS owns the hardware; the UI becomes one more ROS client.**
 - **Harden & freeze the existing scaffold, don't rebuild.** The `marki`-branch
   nodes (camera/stage/galvo/tracker + `scopio_interfaces` + gateway + Docker)
   were good. We completed and reshaped them and declared `scopio_interfaces`
-  **v1.0 frozen** — a documented contract (see `ros2_ws/docs/INTERFACES.md`) so
+  **v1.0 frozen** — a documented contract (see `ros2_ws/src/scopio_interfaces/`) so
   external authors know the inputs/outputs and can rely on them.
 - **Recording is a client concern; the Pi only streams.** The Pi 4 (4 GB) must
   not take extra load, and the footage is small (~600×400), so the camera node
@@ -87,7 +87,7 @@ client can join. **ROS owns the hardware; the UI becomes one more ROS client.**
   later.** Same-LAN DDS worked at this point in the project (see §6 for what
   replaced it as the client-facing path); USB-gadget gives a point-to-point
   link; off-site uses a mesh VPN or a Zenoh bridge for the *DDS graph itself*,
-  which stays Pi-internal now anyway. See `ros2_ws/docs/CONNECTIVITY.md`.
+  which stays Pi-internal now anyway. See `ros2_ws/README.md`.
 - ~~The monolith (`microscope/`) is kept, untouched, as the debugging tool.~~
   **No longer true:** `microscope/` was deleted once `ui/` and `galvo_draw/`
   fully replaced it (see §6). `viscosity/` remains — and, since §8 deleted
@@ -150,7 +150,7 @@ authentication**: anything on the network/domain could command the hardware.
   pure dead weight once the last debugging use for it passed. Its git history
   still has it if anyone needs to dig it up. `viscosity/` and `galvo_tests/`
   are unrelated (offline analysis / hardware bench scripts) and stay.
-- See `docs/API.md` for the resulting command manual and `ros2_ws/docs/CONNECTIVITY.md`
+- See `docs/API.md` for the resulting command manual and `ros2_ws/README.md`
   for what's left of the DDS-networking story (now Pi-internal only).
 
 ## 7. Instruments are exposed as a whole CLASS, not a feature list
@@ -224,5 +224,5 @@ result out). `temperature/call` and `awg/call` are the whole API.
   touches pixels is the autofocus sharpness metric — that is a hardware control
   loop closing on the stage, not scene understanding, and it stays.
 - **Contract impact:** removals are breaking, so `scopio_interfaces` goes to
-  **v2.0** (see `ros2_ws/docs/INTERFACES.md`). Any client subscribing to `beads`
+  **v2.0** (see `ros2_ws/src/scopio_interfaces/`). Any client subscribing to `beads`
   must drop it; nothing else in the contract changed.

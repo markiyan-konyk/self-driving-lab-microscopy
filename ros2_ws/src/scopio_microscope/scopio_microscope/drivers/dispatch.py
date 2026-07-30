@@ -1,31 +1,28 @@
 """Turn a driver class into a ROS service surface: call a method by name.
 
-Used by galvo_node (DG1022Z), and by any future instrument node the same way.
-The node owns the instrument object; a client sends `{method, args, kwargs}` as JSON strings
-(scopio_interfaces/srv/InstrumentCall) and gets the JSON-encoded return value
-back. That is the whole API -- every method the driver class has ever had, or
-will have, is reachable the day it is written, with no new .srv files, no
-gateway change and no client update.
+Used by galvo_node (DG1022Z) and temperature_node (TC10LAB), and by any future
+instrument node the same way. The node owns the instrument object; a client
+sends `{method, args, kwargs}` as JSON strings (InstrumentCall.srv) and gets the
+JSON-encoded return value back. That is the whole API -- every method the driver
+class has ever had, or will have, is reachable the day it is written, with no new
+.srv files, no gateway change and no client update.
 
 Why JSON strings and not typed fields: ROS request fields are statically typed,
 so a typed API would need one service per method signature -- exactly the
 combinatorial explosion this design avoids (see docs/DECISIONS.md).
 
-Safety rails, deliberately thin:
-  * private methods (leading underscore) are not reachable;
-  * BLOCKED holds the few public methods that would break the NODE rather than
-    do instrument work (tearing down the session it owns);
-  * everything else is fair game -- the client is trusted, it already has an
-    API key, and a raw `.command("...")` escape hatch exists anyway.
+Safety rails, deliberately thin: private methods (leading underscore) and
+BLOCKED are unreachable; everything else is fair game -- the client is trusted,
+it already has an API key, and raw SCPI is exposed anyway.
 """
 
 import inspect
 import json
 import math
 
-# Public driver methods a client must NOT reach: close() drops the VISA session
-# the node holds, and the driver cannot re-open it by itself (the node's own
-# reconnect path does that -- exposed as the "reconnect" meta-method).
+# A public method that would tear down the session the NODE owns, rather than do
+# instrument work. The drivers name theirs _close/_drop (already private), so
+# this is standing insurance for the next driver, not a live rule.
 BLOCKED = frozenset({"close"})
 
 
@@ -104,24 +101,6 @@ def call(driver, method, args_json="", kwargs_json=""):
     except TypeError as exc:      # wrong arity/name -- a request error, not a fault
         raise DispatchError(f"{method}{inspect.signature(fn)}: {exc}") from exc
     return to_json(fn(*args, **kwargs))
-
-
-def is_link_error(exc):
-    """True when an exception means "the instrument link is broken", false when
-    it means "that call was wrong" (a float() on a garbled reply, a divide by
-    zero in a helper...). Nodes use it to decide whether to tear the session
-    down and reconnect, so one client's bad argument cannot knock the
-    instrument offline for everyone.
-
-    Matched by NAME for the VISA/driver types on purpose: this module stays
-    import-free of pyvisa so it can be reasoned about (and unit-tested) without
-    any hardware stack installed.
-    """
-    if isinstance(exc, (OSError, EOFError)):        # includes ConnectionError
-        return True
-    return type(exc).__name__ in (
-        "VisaIOError", "InvalidSession", "LibraryError",   # pyvisa
-    )
 
 
 def describe(driver_cls, extra=()):

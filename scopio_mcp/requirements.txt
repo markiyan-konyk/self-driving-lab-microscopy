@@ -1,3 +1,5 @@
-mcp>=1.2
+# The SDK is a sibling folder, so it is installed by the README's command
+# (pip resolves relative paths in a requirements file against your CWD, not
+# against this file -- putting it here only works from one directory).
+mcp>=2.0
 pillow>=10.0
--e ../scopio_client

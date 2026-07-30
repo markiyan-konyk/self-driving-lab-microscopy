@@ -11,8 +11,10 @@ Claude Code  --stdio/MCP-->  scopio_mcp/server.py  --HTTP-->  gateway (Pi)  --> 
 
 ## Setup
 
+From the **repo root**:
+
 ```bash
-pip install -r scopio_mcp/requirements.txt
+pip install -e ./scopio_client -r scopio_mcp/requirements.txt
 cp scopio_mcp/.env.example scopio_mcp/.env      # then fill in URL + key
 ```
 
@@ -40,6 +42,7 @@ Check it loaded with `/mcp`. Tools appear as `scopio - <name>`.
 | `stage_move` | Relative or absolute stage moves, in steps. |
 | `camera_controls` | Read or partially write camera settings. |
 | `grab_frame` | One frame, downscaled, returned as an image Claude can *see*. |
+| `white_balance` | One-shot AWB, then locked. Run it when the light changes. |
 | `focus_metric` | Cheap sharpness number for focus sweeps. |
 | `record_clip` | Record N seconds to `recordings/<name>/00000.jpg…` + measured fps. |
 | `instrument_call` | Any driver method on `galvo` or `temperature`. |

@@ -94,10 +94,12 @@ def apply_controls(d):
         c["AeEnable"] = False
         c["AnalogueGain"] = ag
         state["analogue_gain"] = ag
+    # Gains only if POSITIVE: a 0 here is a half-filled request, not a request
+    # for a black frame. (Same reason fps/exposure/gain above use `if x:`.)
     red, blue = _num(d.get("red_gain")), _num(d.get("blue_gain"))
-    if red is not None or blue is not None:
-        r = red if red is not None else state["red_gain"]
-        b = blue if blue is not None else state["blue_gain"]
+    if red or blue:
+        r = red if red else state["red_gain"]
+        b = blue if blue else state["blue_gain"]
         c["AwbEnable"] = False
         c["ColourGains"] = (r, b)
         state["red_gain"], state["blue_gain"] = r, b
@@ -149,7 +151,8 @@ def unavailable():
     non-200 is what preserves the gateway's `camera_ok: false` (camera_proxy
     only checks the status of GET /controls) now that the server itself stays
     up instead of crash-looping."""
-    return {"error": camera_error, "cameras": camera_list}
+    return {"error": camera_error, "cameras": camera_list,
+            "diagnosis": diagnose(camera_list)}
 
 
 class StreamingOutput(io.BufferedIOBase):
@@ -222,13 +225,19 @@ class Handler(server.BaseHTTPRequestHandler):
         try:
             while True:
                 with output.condition:
-                    output.condition.wait()
+                    # Bounded wait: if the encoder stops delivering (sensor
+                    # yanked mid-stream), end the response instead of holding
+                    # the client open forever with no way to tell it apart from
+                    # a slow camera.
+                    if not output.condition.wait(timeout=10.0):
+                        return
                     frame = output.frame
-                self.wfile.write(b"--FRAME\r\n")
-                self.wfile.write(b"Content-Type: image/jpeg\r\n")
-                self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode())
-                self.wfile.write(frame)
-                self.wfile.write(b"\r\n")
+                if frame:
+                    self.wfile.write(b"--FRAME\r\n")
+                    self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                    self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode())
+                    self.wfile.write(frame)
+                    self.wfile.write(b"\r\n")
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -246,6 +255,22 @@ def enumerate_cameras():
         return Picamera2.global_camera_info()
     except Exception as exc:                       # libcamera itself failed to load
         return [{"error": f"{type(exc).__name__}: {exc}"}]
+
+
+def diagnose(camera_list):
+    """The one line that says which problem you actually have."""
+    if camera_list and isinstance(camera_list[0], dict) and "error" in camera_list[0]:
+        return ("libcamera itself failed to load -- the container's libcamera "
+                "does not match the host kernel's camera stack; use the systemd "
+                "fallback (camera_server/install_systemd.sh).")
+    if not camera_list:
+        return ("libcamera loaded but sees NO sensor. Check the host first: "
+                "`rpicam-hello --list-cameras`. If the host sees it and this "
+                "does not, use the systemd fallback.")
+    return ("libcamera SEES the sensor but could not open it -- something else "
+            "already has it. Exactly one owner is allowed: either the `camera` "
+            "compose service or the scopio-camera systemd unit, never both "
+            "(`systemctl status scopio-camera`).")
 
 
 def open_camera_forever():
@@ -271,10 +296,13 @@ def open_camera_forever():
             print(f"Camera open {SIZE[0]}x{SIZE[1]}", flush=True)
             return
         except Exception as exc:
+            seen = enumerate_cameras()
             camera_error = f"{type(exc).__name__}: {exc}"
-            camera_list = enumerate_cameras()
-            print(f"Camera unavailable ({camera_error}); libcamera sees "
-                  f"{camera_list}; retrying in {delay:.0f}s", flush=True)
+            camera_list = seen
+            print(f"Camera unavailable ({camera_error})\n"
+                  f"  libcamera sees: {seen}\n"
+                  f"  {diagnose(seen)}\n"
+                  f"  retrying in {delay:.0f}s", flush=True)
             time.sleep(delay)
             delay = min(delay * 2, 30.0)
 

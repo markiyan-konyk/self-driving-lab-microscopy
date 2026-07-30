@@ -5,13 +5,14 @@ DG1022Z: CH1 = X mirror, CH2 = Y mirror) through the vendored, EDITABLE
 `drivers/dg1022z.DG1022Z` class, and offers it to clients two ways:
 
   1. `awg/call`  -- ANY public method of the driver class, by name, with JSON
-     args. Today that is `dcinit`, `dcupdate`, `dcmove`, `sininit`, `sinupdate`;
-     the moment you add a method to dg1022z.py it is reachable here, with no new
-     .srv, no gateway and no client change. Example: a UI button that nudges the
-     laser calls `awg/call` with method="dcupdate", args=[1, 0.20].
-  2. `awg/write` / `awg/query` -- raw SCPI passthrough, for clients that compose
-     their own SCPI. The DG1022Z driver keeps its SCPI escape hatches commented
-     out, so these route straight to the underlying VISA session it holds.
+     args. The galvo ones are `dcinit`, `update`, `move`, `sininit`,
+     `sinupdate`, `offsets`, `position`; the rest of the class is the plain
+     instrument. Add a method to dg1022z.py and it is reachable here the same
+     instant -- no new .srv, no gateway and no client change. Example: a UI
+     slider calls `awg/call` with method="update", args=[1, 0.20].
+     Call `list_methods` for the live list with signatures.
+  2. `awg/write` / `awg/query` -- raw SCPI passthrough for clients that compose
+     their own SCPI; they route through the driver's locked command()/query().
 
 Connection is the NODE's job, not the client's: DG1022Z() does not open on
 construction, so `_connect` builds the object and calls its `_open()`. `_open`
@@ -50,20 +51,7 @@ from scopio_interfaces.srv import AwgQuery, AwgWrite, InstrumentCall
 from .drivers import dispatch
 from .drivers.dg1022z import DG1022Z
 
-RIGOL_VID = 0x1AB1
-
-
-def usb_vid(resource):
-    """Vendor id from a VISA resource string; pyvisa-py writes it in decimal,
-    NI-VISA in hex. None for non-USB resources."""
-    parts = resource.split("::")
-    if len(parts) < 2 or not parts[0].upper().startswith("USB"):
-        return None
-    try:
-        return int(parts[1], 0)
-    except ValueError:
-        return None
-
+MAX_FAILURES = 3
 
 META_METHODS = (
     {"name": "list_methods", "signature": "()",
@@ -82,14 +70,17 @@ class GalvoNode(Node):
         self.declare_parameter("publish_rate", 5.0)
         self.declare_parameter("timeout_ms", 15000)
         self.declare_parameter("reconnect_period", 15.0)
-        self.declare_parameter("auto_discover", True)
         self.declare_parameter("init_on_connect", True)
 
-        self._lock = threading.Lock()   # guards _gen swaps; VISA I/O is locked inside DG1022Z
+        # Held for the whole of _connect/_release, so a reconnect asked for over
+        # the service cannot race the retry timer into two sessions on one USB
+        # device. Opening a VISA session can take longer than the retry period.
+        self._lock = threading.RLock()
         self.gen = None
         self.idn = ""
         self.last_command = ""
         self.last_error = ""
+        self._failures = 0
 
         self._connect()
 
@@ -101,100 +92,74 @@ class GalvoNode(Node):
 
         rate = max(0.5, float(self.get_parameter("publish_rate").value))
         self.create_timer(1.0 / rate, self._publish_status, callback_group=cb)
+        # The retry timer stays in the node's default (mutually exclusive)
+        # group: opening a VISA session can outlast the retry period, and a
+        # connect attempt must never stack on top of the previous one.
         period = max(2.0, float(self.get_parameter("reconnect_period").value))
-        self.create_timer(period, self._retry_connect, callback_group=cb)
+        self.create_timer(period, self._retry_connect)
 
     # ------------------------------------------------------------------ #
     #  Connection
     # ------------------------------------------------------------------ #
-    def _resolve_resource(self):
-        """GALVO_RESOURCE env > `resource` param > the first RIGOL on USB.
-
-        Auto-discovery matches the Rigol vendor id, read out of the resource
-        STRING, so another vendor's instrument is never opened. It used to take
-        the first USB device it saw, which meant it opened the temperature
-        controller and knocked its readings out on every retry.
-        """
-        resource = os.environ.get("GALVO_RESOURCE") or self.get_parameter("resource").value
-        if resource or not self.get_parameter("auto_discover").value:
-            return resource
-        try:
-            import pyvisa
-            found = list(pyvisa.ResourceManager("@py").list_resources())
-        except Exception as exc:
-            self.get_logger().warning(f"VISA enumeration failed ({exc}).")
-            return ""
-        rigol = [r for r in found if usb_vid(r) == RIGOL_VID]
-        if not rigol:
-            return ""
-        self.get_logger().info(f"Auto-selected AWG resource: {rigol[0]}")
-        return rigol[0]
-
     def _connect(self):
-        resource = self._resolve_resource()
-        if not resource:
-            # DG1022Z._open() falls back to list_resources()[0] on an empty
-            # string, which would grab the temperature controller. Never call it
-            # without a resolved Rigol.
-            self.last_error = "no Rigol AWG found"
-            self.get_logger().warning(
-                "No Rigol AWG found; set GALVO_RESOURCE in ros2_ws/.env if it is "
-                "on Ethernet. Node runs, reports connected=false.")
-            return False
-        try:
-            # DG1022Z() does NOT open on construction -- the node opens it.
-            gen = DG1022Z(resource, timeout_ms=int(self.get_parameter("timeout_ms").value))
-            gen._open()
-            idn = gen.device.query("*IDN?").strip()
-            # Put both channels in DC mode at their offsets with outputs ON, so a
-            # client's `update(ch, val)` positions the galvo immediately -- no
-            # separate init call needed. Best-effort: a connected-but-uninitable
-            # AWG still counts as connected. (Set init_on_connect:false to skip.)
-            if self.get_parameter("init_on_connect").value:
-                try:
-                    gen.dcinit()
-                except Exception as exc:
-                    self.get_logger().warning(f"AWG dcinit failed ({exc}).")
-            with self._lock:
-                self.gen = gen
-                self.idn = idn
-                self.last_error = ""
-            self.get_logger().info(f"AWG connected: {idn}")
-            return True
-        except Exception as exc:
-            self.last_error = str(exc)
-            self.get_logger().warning(
-                f"AWG connect failed ({exc}); node runs, reports connected=false.")
-            return False
+        """Open a session. GALVO_RESOURCE env > `resource` param > the driver's
+        own Rigol-vendor-id discovery (which never opens another vendor's box)."""
+        resource = os.environ.get("GALVO_RESOURCE") or self.get_parameter("resource").value
+        timeout_ms = int(self.get_parameter("timeout_ms").value)
+        with self._lock:
+            if self.gen is not None:
+                return True
+            try:
+                # DG1022Z() does NOT open on construction -- the node opens it.
+                gen = DG1022Z(resource, timeout_ms=timeout_ms)
+                gen._open()
+                idn = gen.query("*IDN?")
+                # Put both channels in DC mode at their offsets with outputs ON,
+                # so a client's update(ch, val) positions the galvo immediately.
+                # Best-effort: a connected-but-uninitable AWG still counts as
+                # connected. (Set init_on_connect:false to skip.)
+                if self.get_parameter("init_on_connect").value:
+                    try:
+                        gen.dcinit()
+                    except Exception as exc:
+                        self.get_logger().warning(f"AWG dcinit failed ({exc}).")
+                self.gen, self.idn, self.last_error = gen, idn, ""
+                self._failures = 0
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.get_logger().warning(
+                    f"AWG unavailable ({exc}); node runs, reports connected=false. "
+                    "Set GALVO_RESOURCE in ros2_ws/.env to name it explicitly.")
+                return False
+        self.get_logger().info(f"AWG connected on {gen.resource}: {idn}")
+        return True
 
     def _retry_connect(self):
         if self.gen is None:
             self._connect()
 
     def _release(self):
-        """Give up the session so the retry timer can rebuild it. Closes the raw
-        VISA handles WITHOUT sending SCPI (the link may already be dead, and a
-        write would just burn a full timeout)."""
+        """Give up the session so the retry timer can rebuild it. Drops the VISA
+        handles WITHOUT sending SCPI (the link may already be dead, and a write
+        would just burn a full timeout)."""
         with self._lock:
             gen, self.gen = self.gen, None
-        if gen is None:
-            return False
-        try:
-            if gen.device is not None:
-                gen.device.close()
-            if gen.rm is not None:
-                gen.rm.close()
-        except Exception:
-            pass
-        return True
+            if gen is None:
+                return False
+            gen._drop()
+            self._failures = 0
+            return True
 
     def _fail(self, exc, response):
-        """Record a failed call. A BROKEN LINK costs the session (the reconnect
-        timer rebuilds it); a bad command/argument does not -- one client's
-        mistake must not knock the AWG offline for everybody else."""
+        """Record a failed call. It takes MAX_FAILURES consecutive failures to
+        cost the session, so one slow reply mid-waveform-upload does not knock
+        the AWG offline for everybody. A bad command or argument never counts --
+        those raise DispatchError and are answered without coming through here."""
         self.last_error = str(exc)
-        if dispatch.is_link_error(exc) and self._release():
-            self.get_logger().warning(f"AWG link lost ({exc}); will reconnect.")
+        self._failures += 1
+        if self._failures >= MAX_FAILURES and self._release():
+            self.get_logger().warning(
+                f"AWG dropped after {MAX_FAILURES} failures ({exc}); will reconnect.")
         response.success = False
         response.error = f"{type(exc).__name__}: {exc}"
         return response
@@ -246,6 +211,7 @@ class GalvoNode(Node):
             response.result = dispatch.call(gen, method, request.args, request.kwargs)
             self.last_command = f"{method}()"
             self.last_error = ""
+            self._failures = 0
             response.success = True
             response.error = ""
         except dispatch.DispatchError as exc:      # bad request: link is fine
@@ -256,8 +222,8 @@ class GalvoNode(Node):
         return response
 
     # ------------------------------------------------------------------ #
-    #  Raw SCPI passthrough (driver's command()/query() are commented out,
-    #  so these talk to the VISA session the driver holds, under its lock).
+    #  Raw SCPI passthrough -- the driver's own locked command()/query(), so
+    #  it serializes against every other client of the same session.
     # ------------------------------------------------------------------ #
     def _on_write(self, request, response):
         gen = self.gen
@@ -266,10 +232,10 @@ class GalvoNode(Node):
             response.error = "AWG unavailable"
             return response
         try:
-            with gen._lock:
-                gen.device.write(request.command)
+            gen.command(request.command)
             self.last_command = request.command
             self.last_error = ""
+            self._failures = 0
             response.success = True
             response.error = ""
         except Exception as exc:
@@ -284,12 +250,11 @@ class GalvoNode(Node):
             response.error = "AWG unavailable"
             return response
         try:
-            with gen._lock:
-                reply = gen.device.query(request.command)
+            response.response = gen.query(request.command)
             self.last_command = request.command
             self.last_error = ""
+            self._failures = 0
             response.success = True
-            response.response = (reply or "").strip()
             response.error = ""
         except Exception as exc:
             response.response = ""
@@ -297,8 +262,8 @@ class GalvoNode(Node):
         return response
 
     def destroy_node(self):
-        # Clean shutdown: use the driver's own close (outputs off), best-effort,
-        # then drop the session. On a restart the retry timer re-opens it.
+        # Clean shutdown: the driver's own close turns the outputs off first.
+        # Best-effort -- a dead link must not block shutdown.
         gen = self.gen
         if gen is not None:
             try:

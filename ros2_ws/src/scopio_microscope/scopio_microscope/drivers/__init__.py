@@ -1,8 +1,11 @@
 """Vendored, editable instrument driver classes owned by the SCOPIO nodes.
 
-Each file here is a self-contained plain-python driver (ros2_ws/ builds into a
-container and must not import from outside itself). dg1022z.py is a copy of the
-repo-root DG1022Z.py; TC10LAB.py lives only here -- edit it in place.
+Each file here is a self-contained plain-python driver: ros2_ws/ builds into a
+container, so these must import nothing from outside this workspace and nothing
+beyond pyvisa and the standard library. THESE are the drivers the backend runs --
+edit them in place. (The repo-root DG1022Z.py is an older bench copy and is not
+what the nodes load.)
+
 A node wraps one of these classes and publishes EVERY public method of it over a
 single generic `InstrumentCall` service:
 

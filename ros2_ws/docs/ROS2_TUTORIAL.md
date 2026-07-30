@@ -5,7 +5,7 @@
 > 1. Example interface names (`LaserState`, `ZeroTweezers`, `recording/*`,
 >    `RunGalvoWaveform`, `tweezers/zero`) are from an early scaffold and were
 >    renamed/removed in v1.0. For the real, current contract see
->    [INTERFACES.md](INTERFACES.md) and [NODES.md](NODES.md).
+>    the `.msg`/`.srv`/`.action` files in `src/scopio_interfaces/`.
 > 2. §9 (Docker) and §10 (architecture) describe an earlier design where a
 >    `scopio_ui`/`ui_gateway` package lived *inside* this workspace and served
 >    the browser directly from the Pi. That package never shipped this way —
@@ -13,7 +13,7 @@
 >    and there is also a `scopio_gateway` package in *this* workspace (a
 >    FastAPI+rclpy HTTP/WebSocket API, not a browser-facing UI). See
 >    [../../../docs/API.md](../../../docs/API.md) and
->    [CONNECTIVITY.md](CONNECTIVITY.md) for what's actually there now.
+>    [../README.md](../README.md) for what's actually there now.
 >
 > The ROS **concepts** below (nodes, topics, services, actions, executors,
 > colcon/ament) are all still accurate and worth learning from — only the
@@ -486,7 +486,6 @@ node's full name:
 ```yaml
 /scopio/galvo_node:
   ros__parameters:
-    auto_discover: true
     timeout_ms: 15000
 ```
 The launch file passes this file to each node; each node picks out its own

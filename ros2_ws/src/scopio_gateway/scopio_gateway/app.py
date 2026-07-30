@@ -25,7 +25,6 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 
 from . import camera_proxy
 from .auth import keystore, require_api_key
-from .conversion import build_msg  # noqa: F401  (re-export convenience)
 from .introspection import interfaces_payload
 from .ros_bridge import UnknownInterface, bridge
 from .ws import websocket_endpoint
@@ -62,7 +61,10 @@ async def health():
 
 @app.get("/api/v1/interfaces", dependencies=[Depends(require_api_key)])
 async def interfaces():
-    return interfaces_payload(bridge)
+    try:
+        return interfaces_payload(bridge)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 @app.get("/api/v1/status", dependencies=[Depends(require_api_key)])
@@ -84,9 +86,9 @@ async def call_service(
     """Call any ROS 2 service on the microscope.
 
     `service_path` is relative to /scopio (e.g. `stage/jog`); the JSON body
-    maps to the service's request fields (see /api/v1/interfaces). NOTE the
-    NaN rule: on float fields, JSON null means "leave unchanged" for the
-    services that use NaN sentinels (camera/set_controls, calibration/set).
+    maps to the service's request fields (see /api/v1/interfaces). A float
+    field you leave out is sent as NaN, which every SCOPIO service reads as
+    "leave this one alone" -- so a partial body is safe (see conversion.py).
     """
     try:
         return await bridge.call_service(service_path, body, timeout=timeout)
@@ -97,6 +99,8 @@ async def call_service(
     except asyncio.TimeoutError:
         raise HTTPException(504, f"Service call timed out after {timeout}s "
                                  "(is the node running and the hardware alive?)")
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 # ------------------------------------------------------------------ camera

@@ -53,20 +53,23 @@ Env: `CAM_HOST` (127.0.0.1), `CAM_PORT` (8081), `CAM_W`/`CAM_H` (640x480).
 
 The server **serves anyway** and retries opening the sensor in the background
 (2 s, backing off to 30 s) — it does not exit, so it cannot crash-loop the
-container and hide the reason. Every endpoint answers **503** with the cause:
+container and hide the reason. Every endpoint answers **503** naming the cause,
+what libcamera could see, and which of the three problems you have:
 
-```json
-{"error": "IndexError: list index out of range", "cameras": []}
+```bash
+curl -s http://127.0.0.1:8081/controls
+{"error": "IndexError: list index out of range", "cameras": [], "diagnosis": "..."}
 ```
 
-`"cameras": []` is the diagnostic: picamera2 imported and libcamera loaded, but
-**no sensor is visible to this process**. In order of likelihood — the camera is
-not visible on the *host* either (`rpicam-hello --list-cameras`: ribbon in the
-DSI/display port rather than CSI, contacts facing the wrong way, or a sensor
-`config.txt` does not auto-detect); or the host is fine and the container's
-libcamera does not match the host kernel's camera stack, which is what the
-systemd fallback above exists for.
+The `cameras` list is the discriminator, and the same three cases print in the
+container log on every retry:
+
+| `cameras` | Meaning |
+|---|---|
+| `[{"error": ...}]` | libcamera itself won't load — it doesn't match the host kernel's camera stack. Use the systemd fallback. |
+| `[]` | libcamera loaded, no sensor visible. Check the **host** first: `rpicam-hello --list-cameras`. Ribbon in the DSI display port instead of CSI, contacts the wrong way round, or a sensor needing a `config.txt` line. If the host sees it and this doesn't, use the systemd fallback. |
+| non-empty, open failed | The sensor is there but **something else owns it**. Exactly one owner is allowed — the compose service *or* the systemd unit, never both: `systemctl status scopio-camera`. |
 
 A camera that appears later (replug, or the systemd unit releasing it) is picked
-up by the retry loop with no restart. The gateway still reports
-`camera_ok: false` throughout — 503 is deliberately not 200.
+up by the retry loop with no restart. The gateway reports `camera_ok: false`
+throughout — 503 is deliberately not 200.

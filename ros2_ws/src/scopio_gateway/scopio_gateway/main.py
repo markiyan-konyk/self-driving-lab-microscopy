@@ -12,6 +12,7 @@ Env:
 """
 
 import os
+import traceback
 
 import uvicorn
 
@@ -23,7 +24,16 @@ def main():
     host = os.environ.get("SCOPIO_GATEWAY_HOST", "0.0.0.0")
     port = int(os.environ.get("SCOPIO_GATEWAY_PORT", "8000"))
 
-    bridge.start()
+    # Serve even if the graph does not come up. Raising here used to crash-loop
+    # the container under `restart: unless-stopped`, so nothing answered on 8000
+    # and /health could not report ros_ok=false -- the failure looked like a
+    # network problem instead of a ROS one.
+    try:
+        bridge.start()
+    except Exception:
+        traceback.print_exc()
+        print("Gateway starting WITHOUT ROS: /health will report ros_ok=false.",
+              flush=True)
     try:
         uvicorn.run(app, host=host, port=port, log_level="info")
     finally:

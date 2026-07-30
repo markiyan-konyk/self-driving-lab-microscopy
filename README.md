@@ -78,4 +78,4 @@ the LAN).
 
 Status: restructured for the API-gateway architecture on branch `remake`;
 gateway + clients validated against the no-hardware graph, on-Pi hardware
-bring-up per [`ros2_ws/docs/BRINGUP.md`](ros2_ws/docs/BRINGUP.md).
+bring-up per [`ros2_ws/README.md`](ros2_ws/README.md).

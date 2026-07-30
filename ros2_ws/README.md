@@ -1,126 +1,197 @@
-# SCOPIO backend (ROS 2 graph + API gateway)
+# SCOPIO backend — everything that runs on the Raspberry Pi
 
-Turns the microscope into the **sensor + effectuator** of the self-driving
-lab. All planning/decision logic lives off-board: external programs (the UI,
-galvo_draw, agents) are **API clients** of the gateway — they speak JSON over
-HTTP/WebSocket with an API key, never ROS. The Pi only senses, publishes, and
-effectuates.
+The microscope is the **sensor + effectuator** of the self-driving lab. This
+workspace senses, streams and moves hardware; it makes no decisions and does no
+image analysis. Every external program (`../ui`, `../galvo_draw`, agents) is an
+**API client** over HTTP/WebSocket with an API key — nothing outside the Pi
+speaks ROS.
 
+## Run it
+
+```bash
+cd ros2_ws
+cp .env.example .env                            # which instrument is which
+python3 scripts/generate_api_key.py laptop      # once per client; note the key
+docker compose up -d --build
+curl http://127.0.0.1:8000/api/v1/health
 ```
-cp .env.example .env           # once: which VISA instrument is which (gitignored)
-docker compose up -d           # brings up ALL of this:
-  scopio   -> the ROS 2 driver graph under /scopio (this workspace)
-  camera   -> ../camera_server (picamera2 MJPEG, loopback :8081)
-  gateway  -> src/scopio_gateway (HTTP/WS API, LAN :8000, API keys)
-```
 
-`.env` is the **only** place the rig's hardware wiring is written down
-(`GALVO_RESOURCE`, `TCLAB_RESOURCE`, camera size). Compose reads it by itself —
-nothing to export, nothing to remember between sessions — and `temperature_test.py`
-reads the same file, so the bench script and the backend can't disagree. Edit it,
-then `docker compose up -d` again to apply.
+Three services come up together:
 
-This is the **backend**. (An earlier, pre-ROS Flask monolith that drove the
-hardware directly, `microscope/`, has since been deleted — everything it did
-is now covered by this stack plus `../ui` and `../galvo_draw`; see
-`../docs/DECISIONS.md` §6.)
-
-## Learning / operating this
-
-- **New to ROS 2?** Read [docs/ROS2_TUTORIAL.md](docs/ROS2_TUTORIAL.md) — a
-  from-zero tutorial taught through this exact codebase.
-- **Bringing it up on the Pi?** Follow [docs/BRINGUP.md](docs/BRINGUP.md) — an
-  ordered checklist + smoke tests that validate the stack layer by layer.
-- **Writing a client program?** You want [../docs/API.md](../docs/API.md) and
-  [../scopio_client](../scopio_client) — not this workspace.
-
-## Packages
-
-| Package | Type | What it is |
+| Service | What | Port |
 |---|---|---|
-| `scopio_interfaces` | ament_cmake | The contract: msgs / srvs / **actions** (frozen v1.0) |
-| `scopio_microscope` | ament_python | The driver nodes (camera, stage, galvo, temperature, calibration) + the vendored instrument drivers in `scopio_microscope/drivers/` |
-| `scopio_gateway` | ament_python | The HTTP/WS API gateway (FastAPI + rclpy) |
+| `scopio` | the ROS 2 driver graph under `/scopio` | — (DDS on localhost) |
+| `camera` | `../camera_server`, picamera2 MJPEG — the **only** owner of the sensor | 8081 loopback |
+| `gateway` | the public HTTP/WebSocket API, API-key auth | **8000, LAN** |
 
-### Nodes (all under the `/scopio` namespace)
+`restart: unless-stopped` on all three, so `sudo systemctl enable docker` is
+enough to survive a reboot with no SSH session.
 
-> The interface contract is **frozen at v1.0** — see
-> [docs/INTERFACES.md](docs/INTERFACES.md) (field-level ICD) and
-> [docs/NODES.md](docs/NODES.md). The table below is a summary.
+**`.env` is the one place this rig's wiring is written down** (gitignored,
+because it describes *this* Pi). Compose reads it automatically. Both instrument
+lines are optional — each node discovers its own instrument by USB **vendor id**
+and will never open the other one — but naming them is faster and is *required*
+for an Ethernet unit, since pyvisa-py cannot scan a LAN:
+
+```bash
+docker compose down                     # a running node holds its instrument
+python3 scripts/list_instruments.py     # prints ready-to-paste GALVO_/TCLAB_ lines
+```
+
+Change `.env` → `docker compose up -d` again.
+
+Once before trusting the USB instruments, on the Pi:
+
+```bash
+sudo cp udev/99-scopio-instruments.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+# then UNPLUG AND REPLUG — a live libusb session keeps the old permissions
+```
+
+Without it a non-root `list_resources()` silently omits the instrument: libusb
+has to open the device node just to read the descriptors, and those are
+root-only by default.
+
+## Verify
+
+```bash
+curl http://127.0.0.1:8000/api/v1/health            # no auth: ok, ros_ok, camera_ok
+python3 scripts/smoke_test_api.py --url http://127.0.0.1:8000 [--hardware]
+python3 scripts/test_drivers.py                     # driver logic, no hardware
+docker compose exec scopio bash scripts/smoke_test.sh   # the raw ROS graph
+```
+
+Interactive API docs at `http://<pi>:8000/docs`; live schema for every service,
+topic and action at `GET /api/v1/interfaces`. Writing a client? See
+[`../docs/API.md`](../docs/API.md) and [`../scopio_client`](../scopio_client) —
+not this workspace.
+
+## Nodes
+
+All under `/scopio`. **Every node degrades gracefully**: with its hardware
+absent it still starts and reports `connected = false`, so the graph always
+comes up and you bring hardware online piece by piece.
 
 | Node | Publishes | Services | Actions |
 |---|---|---|---|
 | `camera_node` | `image/compressed`, `camera/state` | `camera/set_controls`, `camera/set_framerate`, `camera/white_balance` | `camera/autofocus` |
 | `stage_node` | `stage/position` | `stage/jog`, `stage/move_abs` | `stage/move_path`, `scan_region` |
-| `galvo_node` | `awg/status` | `awg/call` (any driver method), `awg/write`, `awg/query` (raw SCPI) | — |
-| `temperature_node` | `temperature/status` | `temperature/call` (any driver method) | — |
+| `galvo_node` | `awg/status` | `awg/call`, `awg/write`, `awg/query` | — |
+| `temperature_node` | `temperature/status` | `temperature/call` | — |
 | `calibration_node` | `calibration` (latched) | `calibration/set` | — |
 
-> **Recording is not a node, and neither is image analysis** — the camera only
-> streams; clients record locally and do their own detection/tracking off the
-> Pi. **The instrument nodes expose a whole driver CLASS** (`awg/call`,
-> `temperature/call`): every method the class has is callable by any app, so
-> the ROS layer never decides which instrument features are "supported" and
-> meaning (volts→pixels→µm, temperature ramps) stays in client code. See
-> [docs/DECISIONS.md](../docs/DECISIONS.md) for why.
+The field-level contract is the `.msg`/`.srv`/`.action` files in
+`src/scopio_interfaces/` — they carry their own comments and are the only
+authority. Treat them as **frozen**: changing a field is an ABI break.
 
-Design notes:
-- **The camera has one owner: `../camera_server`** (picamera2 can't run in
-  this Ubuntu container). `camera_node` runs in **bridge mode**: it ingests
-  the camera server's MJPEG over loopback, republishes `image/compressed`,
-  forwards the camera services, and runs the autofocus action on the ingested
-  frames. The frozen interface behaves identically either way.
-- Every node **degrades gracefully**: missing camera/stage/galvo → the node
-  still starts and reports `connected=false`, so the graph comes up on a
-  partial rig (or a hardware-less dev box) and you bring things online piece
-  by piece.
-- **The backend never analyses the image.** It streams frames and moves
-  hardware; bead detection, tracking and every decision that depends on them
-  run on the client side, off the Pi (`../viscosity`, `../viscosity_agent`).
-- **Actions** carry long-horizon goals (a whole stage path, a region scan,
-  an autofocus sweep) so execution doesn't depend on per-step latency.
-- The gateway maps the graph to JSON **generically** (introspected from the
-  live graph) — a new node needs zero gateway changes to become remotely
-  usable; it just shows up in `GET /api/v1/interfaces`.
+Three design rules explain most of what looks unusual here (the *why* is in
+[`../docs/DECISIONS.md`](../docs/DECISIONS.md)):
 
-## Build & run (on the Pi)
+- **The camera has exactly one owner: `../camera_server`.** picamera2/libcamera
+  ship from Raspberry Pi OS and cannot run in the Ubuntu ROS container, so
+  `camera_node` runs in *bridge mode*: it ingests the camera server's MJPEG over
+  loopback, republishes `image/compressed`, forwards the camera services, and
+  runs autofocus on the ingested frames. The frozen interface behaves
+  identically either way.
+- **The instrument nodes expose a whole driver CLASS**, not a curated subset.
+  `awg/call` and `temperature/call` take `{method, args, kwargs}` as JSON, so
+  every method of `scopio_microscope/drivers/{dg1022z,TC10LAB}.py` is reachable
+  the instant it is written — no new `.srv`, no gateway change, no client
+  update. Call `list_methods` for names, signatures and docstrings (it works
+  while the hardware is disconnected — it introspects the class).
+- **The backend never analyses a frame and never records.** Both are client
+  jobs, off the Pi (`../ui`, `../viscosity`, `../viscosity_agent`).
+
+**Calibration persists.** `calibration_node` writes `calibration.json` to the
+bind-mounted repo root on the Pi's real disk, atomically, and logs the absolute
+path at startup — it survives `docker compose down`, rebuilds and reboots.
+
+## When something doesn't work
+
+Everything below assumes the software is right, which is the point: each node
+reports its own state, so start with what the graph says.
 
 ```bash
-cd ros2_ws
-# Optional: pin the AWG (else laser stays "disabled"):
-echo 'GALVO_RESOURCE=USB0::0x1AB1::0x0642::DG1ZA...::INSTR' > .env
-python3 scripts/generate_api_key.py <client-name>     # per client app/person
-docker compose up -d --build
+curl -s http://127.0.0.1:8000/api/v1/health
+curl -s -H "X-API-Key: $KEY" http://127.0.0.1:8000/api/v1/status | python3 -m json.tool
+docker compose logs -f scopio camera gateway
 ```
 
-Verify: `curl http://127.0.0.1:8000/api/v1/health`. Then drive it from any
-machine — see [../docs/API.md](../docs/API.md). For direct graph poking during
-backend development (`ros2 topic echo ...`), see
-[docs/CONNECTIVITY.md](docs/CONNECTIVITY.md).
+`/api/v1/status` carries `connected` and `last_error` for every instrument.
+That error string is the real diagnosis — read it before changing anything.
 
-## Local development
+**Camera.** `camera_ok: false` → ask the camera server directly, it answers 503
+with the reason and a diagnosis: `curl -s http://127.0.0.1:8081/controls`.
+`"cameras": []` means libcamera loaded but sees no sensor — check the **host**
+first with `rpicam-hello --list-cameras` (ribbon in the DSI display port instead
+of CSI, contacts the wrong way round, a sensor that needs a `config.txt` line).
+A non-empty list with an open failure means something else already holds the
+sensor: exactly one owner is allowed, either the `camera` compose service *or*
+the systemd unit, never both — `systemctl status scopio-camera`. If the host
+sees the camera and the container doesn't, the container's libcamera doesn't
+match the host kernel; use the systemd fallback
+(`../camera_server/install_systemd.sh`, then `docker compose stop camera`).
 
-**No-hardware dev stack** (works on a laptop, even under Docker Desktop):
+**Galvo (Rigol DG1022Z).** `docker compose down && python3
+scripts/list_instruments.py` — if it isn't listed, it's udev/libusb or the
+cable, not the node. If it is, paste `GALVO_RESOURCE=` into `.env`. Then
+`POST /api/v1/service/awg/query {"command": "*IDN?"}`.
+
+**Temperature (TC10 LAB).** If `list_instruments.py` finds it but every query
+times out, the kernel's `usbtmc` driver has the interface and pyvisa-py's
+detach-and-use-libusb dance is losing. Check the char device directly:
+
+```bash
+echo '*IDN?' > /dev/usbtmc0 && head -c 200 /dev/usbtmc0
+```
+
+If that answers, put `TCLAB_RESOURCE=/dev/usbtmc0` in `.env` — the driver talks
+to the char device instead and skips the fight entirely. Note that a *single*
+timeout no longer drops the session (it takes three in a row), so brief stalls
+show up as `last_error` on `temperature/status` rather than a connect/disconnect
+cycle.
+
+**Stage (Sangaboard).** `ls /dev/ttyACM*`, then `docker compose logs scopio |
+grep -i sanga`.
+
+**A node missing from `ros2 node list` entirely** means it crashed on import —
+`docker compose logs scopio` has the traceback. That is the one failure mode
+that is never hardware.
+
+## Development
+
+No-hardware stack, works on a laptop (including Docker Desktop):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-python3 scripts/smoke_test_api.py --url http://localhost:8000
+python3 scripts/smoke_test_api.py --url http://127.0.0.1:8000
 ```
 
-**Edit nodes live** without rebuilding the image:
+Edit nodes without rebuilding the image:
 
 ```bash
 docker compose run --rm scopio bash
-# in the container:
 cd /workspace/ros2_ws && colcon build --symlink-install && source install/setup.bash
 ros2 launch scopio_microscope microscope.launch.py
 ```
 
-## Status
+Poking the graph directly (backend work only — clients use the gateway):
 
-Interfaces frozen at **v1.0**; API gateway + client SDK added (branch
-`remake`). The camera runs as its own compose service (`../camera_server`,
-Debian bookworm + RPi apt archive) with a systemd fallback — validating
-picamera2-in-container on the real Pi is the one open hardware risk (see
-BRINGUP step "camera gate"). Galvo geometry constants are placeholders in
-`microscope/galvo_geometry.py` pending `galvo_tests/03_precision.py`.
+```bash
+docker compose exec scopio bash
+ros2 topic echo /scopio/temperature/status
+ros2 service call /scopio/awg/call scopio_interfaces/srv/InstrumentCall "{method: 'list_methods'}"
+```
+
+New to ROS 2? [`docs/ROS2_TUTORIAL.md`](docs/ROS2_TUTORIAL.md) teaches it
+through this exact codebase.
+
+### Security model
+
+The gateway is the only LAN-facing surface: API-key auth on every route except
+`/api/v1/health`, keys in `secrets/api_keys.json` (hot-reloaded; generate and
+revoke with `scripts/generate_api_key.py`). The camera server is loopback-only.
+The DDS graph has no auth, which is fine *because* it never faces the network —
+keep it that way. For remote access put the Pi on a mesh VPN (Tailscale) or
+behind a TLS reverse proxy; never port-forward 8000 raw, the API key would
+travel in clear.

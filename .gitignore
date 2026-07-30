@@ -19,5 +19,8 @@ recordings/
 # Local env files
 .env
 
+# Per-rig state written by the running backend, not source.
+calibration.json
+
 # Personal working notes -- not part of the project's documentation.
 PROJECT_NOTES.md

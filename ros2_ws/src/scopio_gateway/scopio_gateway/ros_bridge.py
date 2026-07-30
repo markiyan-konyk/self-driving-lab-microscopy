@@ -102,6 +102,11 @@ class RosBridge:
 
     # ------------------------------------------------------ type discovery
     def refresh_types(self):
+        if self.node is None:
+            # The gateway serves even when rclpy failed to start (see main.py),
+            # so every graph lookup funnels through here for one clear reason.
+            raise RuntimeError("gateway is not attached to a ROS graph "
+                               "(see /api/v1/health: ros_ok)")
         with self._lock:
             self._service_types = {
                 name: types[0]
@@ -185,7 +190,8 @@ class RosBridge:
         full_name = resolve(path)
         type_str = self.service_type(full_name)
         srv_cls = get_service(type_str)
-        request = build_msg(srv_cls.Request, body or {})
+        # nan_for_missing: on a service, an omitted float means "leave it alone".
+        request = build_msg(srv_cls.Request, body or {}, nan_for_missing=True)
         client = self._client_for(full_name, type_str)
         fut = client.call_async(request)
         try:

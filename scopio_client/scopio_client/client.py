@@ -42,12 +42,16 @@ DEFAULT_TIMEOUT = 15.0
 
 class Scopio:
     def __init__(self, base_url, api_key, timeout=DEFAULT_TIMEOUT):
-        self.base_url = base_url.rstrip("/")
+        base_url = base_url.strip().rstrip("/")
+        if not base_url.startswith(("http://", "https://")):
+            base_url = "http://" + base_url      # "10.42.0.1:8000" is a fine URL to type
+        self.base_url = base_url
         self.api_key = api_key
         self.timeout = timeout
         self._http = requests.Session()
         self._http.headers["X-API-Key"] = api_key
-        ws_url = self.base_url.replace("http", "ws", 1) + f"/api/v1/ws?api_key={api_key}"
+        # http -> ws, https -> wss (keys are hex, so no query escaping needed).
+        ws_url = "ws" + self.base_url[4:] + f"/api/v1/ws?api_key={api_key}"
         self._ws = WsManager(ws_url)
         self.stage = _Stage(self)
         self.camera = _Camera(self)
@@ -242,13 +246,16 @@ class _InstrumentCall:
 class _Galvo(_InstrumentCall):
     SERVICE = "awg/call"
 
-    def write(self, command):
-        """Send one raw SCPI command to the AWG. Raises on failure."""
-        resp = self._s.call_service("awg/write", {"command": command})
+    def _scpi(self, service, command):
+        resp = self._s.call_service(service, {"command": command})
         if not resp.get("success", False):
-            raise ScopioError(f"awg/write failed: {resp.get('error')}",
+            raise ScopioError(f"{service} {command!r}: {resp.get('error')}",
                               payload=resp)
         return resp
+
+    def write(self, command):
+        """Send one raw SCPI command to the AWG. Raises on failure."""
+        self._scpi("awg/write", command)
 
     def write_all(self, commands):
         """Send a list of SCPI commands in order (stops at the first failure)."""
@@ -256,7 +263,8 @@ class _Galvo(_InstrumentCall):
             self.write(cmd)
 
     def query(self, command):
-        return self._s.call_service("awg/query", {"command": command})
+        """Send one SCPI query and return the instrument's reply string."""
+        return self._scpi("awg/query", command)["response"]
 
     def status(self):
         return self._s.telemetry("awg/status")

@@ -7,8 +7,9 @@ This manager:
 
   * lazily connects on first use;
   * runs a single recv thread dispatching frames by id;
-  * auto-reconnects (1 s backoff) and re-subscribes live subscriptions --
-    in-flight actions on a dropped connection fail with ScopioError;
+  * reconnects for as long as the client lives (1 s between attempts) and
+    re-subscribes live subscriptions -- in-flight actions on a dropped
+    connection fail with ScopioError;
   * is thread-safe for sends.
 """
 
@@ -73,7 +74,15 @@ class WsManager:
         while not self._closed:
             ws = self._ws
             if ws is None:
-                time.sleep(0.2)
+                # Keep retrying: the microscope may be rebooting, and
+                # _connect_locked re-sends every surviving subscription.
+                time.sleep(1.0)
+                try:
+                    with self._lock:
+                        if not self._closed and self._ws is None:
+                            self._connect_locked()
+                except Exception:
+                    pass
                 continue
             try:
                 raw = ws.recv()
@@ -83,18 +92,12 @@ class WsManager:
             except Exception:
                 if self._closed:
                     return
-                # Connection dropped: fail waiters, then reconnect + resubscribe.
                 self._ws = None
-                for q in self._waiters.values():
+                # Fail everyone waiting on this connection (list(): the waiting
+                # threads pop themselves out of the dict as they give up).
+                for q in list(self._waiters.values()):
                     q.put({"op": "error", "code": "disconnected",
                            "detail": "WebSocket connection lost"})
-                time.sleep(1.0)
-                try:
-                    with self._lock:
-                        if not self._closed:
-                            self._connect_locked()
-                except Exception:
-                    pass
                 continue
             self._dispatch(env)
 

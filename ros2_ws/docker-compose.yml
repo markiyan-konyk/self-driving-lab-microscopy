@@ -86,7 +86,13 @@ services:
       - CAM_H=${CAM_H:-480}
 
   gateway:
-    image: scopio-microscope:jazzy   # same image as scopio -- no extra build
+    # Same image as scopio. The build block is repeated (not just `image:`) so
+    # the layer cache makes it free AND `docker compose up gateway` on its own
+    # works instead of trying to pull a tag that only exists locally.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: scopio-microscope:jazzy
     container_name: scopio-gateway
     network_mode: host
     ipc: host

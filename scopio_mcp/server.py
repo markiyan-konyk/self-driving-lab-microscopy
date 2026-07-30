@@ -24,7 +24,7 @@ def _load_env():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+            os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
 
 
 _load_env()
@@ -135,6 +135,13 @@ def grab_frame(max_width: int = 800) -> Image:
 
 
 @mcp.tool()
+def white_balance() -> dict:
+    """Run a one-shot auto white balance and lock the result. Blocks ~1.5 s
+    while the camera converges. Use it when the illumination has changed."""
+    return scope().camera.white_balance()
+
+
+@mcp.tool()
 def focus_metric() -> dict:
     """Cheap sharpness score for the current view. Higher is sharper; compare
     values across z positions to focus manually."""
@@ -175,11 +182,15 @@ def instrument_call(instrument: str, method: str, args: Optional[list] = None,
 
 
 @mcp.tool()
-def galvo_scpi(command: str) -> Any:
+def galvo_scpi(command: str) -> str:
     """Send one raw SCPI command to the AWG driving the tweezers. A command
-    ending in '?' is sent as a query and returns the instrument's reply."""
+    ending in '?' is sent as a query and returns the instrument's reply;
+    anything else is a write and returns 'ok'. Raises if the AWG rejects it."""
     g = scope().galvo
-    return g.query(command) if command.strip().endswith("?") else g.write(command)
+    if command.strip().endswith("?"):
+        return g.query(command)
+    g.write(command)
+    return "ok"
 
 
 if __name__ == "__main__":

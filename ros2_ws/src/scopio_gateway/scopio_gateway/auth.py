@@ -63,6 +63,12 @@ class KeyStore:
         """Return the key's name if presented matches a stored key, else None."""
         if not presented:
             return None
+        # compare_digest raises TypeError on non-ASCII str; keys are hex, so
+        # anything unencodable is simply wrong -- a 401, not a 500.
+        try:
+            presented.encode("ascii")
+        except UnicodeEncodeError:
+            return None
         with self._lock:
             self._load()
             match = None

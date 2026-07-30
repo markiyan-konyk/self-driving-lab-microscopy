@@ -8,20 +8,22 @@ Two directions:
 
 THE NaN RULE (important, documented in docs/API.md):
 Several SCOPIO interfaces (SetCameraControls, CalibrationSet) use NaN as the
-"leave this field unchanged" sentinel. JSON has no NaN, and a float field
-omitted from the request would be built as 0.0 -- actively clobbering the
-setting. So on the way IN, every float/double field that is absent or null in
-the JSON body becomes NaN? No -- absent stays at the message default (0.0 for
-plain floats), because most interfaces (MoveAbs, StageJog fields...) expect 0
-defaults. Instead the rule is:
+"leave this field unchanged" sentinel. JSON has no NaN, and a float field left
+out of the request would otherwise be built as 0.0 -- which is not "unchanged",
+it is a command to set that gain to zero. So on the way IN:
 
-  * JSON null on a float/double field  -> NaN  ("leave unchanged")
-  * absent float field                 -> message default (0.0)
+  * JSON null (or the string "nan") on a float/double field -> NaN
+  * a float field ABSENT from a SERVICE REQUEST             -> NaN
+  * a float field absent from an ACTION GOAL or a published
+    message                                                 -> 0.0 (the default)
 
-and the scopio_client SDK convenience methods pre-fill null for you on the
-NaN-sentinel services, so `scope.camera.set_controls(contrast=1.2)` never
-clobbers the other controls. Raw callers of the generic endpoint must send
-null (or the string "nan") explicitly for fields they want left alone.
+Services are the ones that take partial "set this subset" bodies, and EVERY
+float field in the frozen contract belongs to such a service (SetCameraControls,
+CalibrationSet, SetFramerate) -- everything where 0 is a meaningful value
+(positions, ranges, step counts) is an integer. Action goals are complete
+requests where an absent `settle_s` genuinely means "don't pause", so they keep
+the plain default. That is why `nan_for_missing` is a per-call flag rather than
+a property of the field type.
 
 On the way OUT, NaN/inf become null (JSON-safe).
 """
@@ -71,8 +73,8 @@ def _nested_msg_type(field_type):
     return inner if "/" in inner else None
 
 
-def _prepare(data, msg_cls):
-    """Recursively map JSON null -> NaN on float fields (the NaN rule)."""
+def _prepare(data, msg_cls, nan_for_missing=False):
+    """Recursively apply the NaN rule to a JSON-derived dict."""
     if not isinstance(data, dict):
         return data
     out = {}
@@ -94,23 +96,32 @@ def _prepare(data, msg_cls):
             if nested is not None:
                 nested_cls = get_message(normalize_msg_type(nested))
                 if isinstance(value, list):
-                    out[key] = [_prepare(v, nested_cls) for v in value]
+                    out[key] = [_prepare(v, nested_cls, nan_for_missing) for v in value]
                 else:
-                    out[key] = _prepare(value, nested_cls)
+                    out[key] = _prepare(value, nested_cls, nan_for_missing)
             else:
                 out[key] = value
+    if nan_for_missing:
+        for key, ftype in fields.items():
+            if key not in out and _is_float_field(ftype):
+                out[key] = float("nan")
     return out
 
 
-def build_msg(msg_cls, data):
+def build_msg(msg_cls, data, nan_for_missing=False):
     """Build a ROS message of type msg_cls from a JSON-derived dict.
+
+    nan_for_missing=True fills every float field the body left out with NaN --
+    used for service requests, where omitting a field means "leave it alone".
+    It must run even for an EMPTY body: `POST camera/set_controls {}` has to be
+    a no-op, not "set every colour gain to zero".
 
     Raises ValueError with a readable message on bad/unknown fields.
     """
     msg = msg_cls()
-    if data:
+    if data or nan_for_missing:
         try:
-            set_message_fields(msg, _prepare(data, msg_cls))
+            set_message_fields(msg, _prepare(data or {}, msg_cls, nan_for_missing))
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError(str(exc)) from exc
     return msg

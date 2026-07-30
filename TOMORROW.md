@@ -47,5 +47,5 @@ curl $env:SCOPIO_URL/api/v1/health   # sanity check
 python ui\run_ui.py                  # -> http://localhost:8080
 ```
 
-Full detail / troubleshooting: `docs/BRINGUP.md` (Pi), `docs/WINDOWS_CLIENT.md`
+Full detail / troubleshooting: `ros2_ws/README.md` (Pi), `docs/WINDOWS_CLIENT.md`
 (laptop), `docs/API.md` (every command).

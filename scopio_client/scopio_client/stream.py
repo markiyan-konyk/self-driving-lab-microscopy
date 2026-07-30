@@ -8,23 +8,30 @@ EOI = b"\xff\xd9"   # end of image
 
 
 def iter_jpegs(response, chunk_size=16384, max_buffer=8 * 1024 * 1024):
-    """Yield complete JPEG frames from a `requests` streamed response."""
+    """Yield complete JPEG frames from a `requests` streamed response.
+
+    Closes the response when you stop iterating (break, .close(), or GC), so a
+    caller that only wants one frame does not leave the Pi holding an open
+    MJPEG connection."""
     buf = b""
-    for chunk in response.iter_content(chunk_size=chunk_size):
-        if not chunk:
-            continue
-        buf += chunk
-        while True:
-            start = buf.find(SOI)
-            if start < 0:
+    try:
+        for chunk in response.iter_content(chunk_size=chunk_size):
+            if not chunk:
+                continue
+            buf += chunk
+            while True:
+                start = buf.find(SOI)
+                if start < 0:
+                    buf = b""
+                    break
+                end = buf.find(EOI, start + 2)
+                if end < 0:
+                    if start > 0:
+                        buf = buf[start:]
+                    break
+                yield buf[start:end + 2]
+                buf = buf[end + 2:]
+            if len(buf) > max_buffer:   # corrupt stream guard
                 buf = b""
-                break
-            end = buf.find(EOI, start + 2)
-            if end < 0:
-                if start > 0:
-                    buf = buf[start:]
-                break
-            yield buf[start:end + 2]
-            buf = buf[end + 2:]
-        if len(buf) > max_buffer:   # corrupt stream guard
-            buf = b""
+    finally:
+        response.close()

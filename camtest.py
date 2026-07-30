@@ -365,8 +365,73 @@ def verdict(f, model):
     has_overlay = "dtoverlay=imx" in cfg or "dtoverlay=arducam" in cfg
     auto = "camera_auto_detect=1" in cfg
     pi5 = "Raspberry Pi 5" in model
+    pi4 = "Raspberry Pi 4" in model or "Raspberry Pi 3" in model
     cm = "Compute Module" in model
     causes = []
+
+    # The driver bound to the i2c address and the sensor did not answer. This is
+    # PROOF the overlay applied and config.txt is right, so every software cause
+    # below is irrelevant -- say so instead of burying it in a list of maybes.
+    dmesg_low = (f.get("dmesg") or "").lower()
+    probe_failed = any(s in dmesg_low for s in (
+        "failed to get sensor out of standby", "probe with driver imx296 failed",
+        "failed to read chip id", "error -5", "failed: -5", "-eio"))
+    if probe_failed:
+        say()
+        say("=" * 62)
+        say("DIAGNOSIS: the SOFTWARE is fine -- the sensor is not electrically there")
+        say("=" * 62)
+        say("  dmesg shows the imx296 driver bound at i2c 0x1a and its first")
+        say("  register write returned -5 (EIO) -- no I2C acknowledgement. So:")
+        say("    * config.txt / the overlay ARE correct (the driver only exists")
+        say("      because the overlay loaded), and")
+        say("    * nothing on the far end of the ribbon replied.")
+        say("  Changing config.txt further cannot fix this. It is the cable, the")
+        say("  connector, the port, or the module's power.")
+        say()
+        if pi4:
+            say("  YOUR BOARD: " + model)
+            say("  A Pi 4's camera port is 15-PIN. There is no 22-pin camera port on")
+            say("  this board, so the 22-pin camera end must reach it through a")
+            say("  22-pin-to-15-pin adapter cable -- the usual culprit. In order:")
+            say()
+            say("   1. RIGHT SOCKET? The Pi 4 has TWO identical 15-pin FFC sockets.")
+            say("      Read the silkscreen: the camera goes in the one marked")
+            say("      CAMERA, not the one marked DISPLAY. A camera in DISPLAY")
+            say("      produces exactly this -5, because the sensor's i2c lines")
+            say("      never reach bus 10.")
+            say("   2. RIGHT CABLE? A 22->15-pin cable is directional and comes in")
+            say("      variants. The 15-pin end goes in the PI, the 22-pin end in")
+            say("      the CAMERA. A Pi-Zero-style cable (22-pin meant for the Pi")
+            say("      end) wired in reverse will not carry i2c correctly.")
+            say("   3. RIGHT WAY UP? At BOTH ends the silver contacts must face the")
+            say("      connector's contacts: on the Pi the blue tab faces the USB/")
+            say("      ethernet side; on the camera the contacts face the PCB, away")
+            say("      from the lens. Flipped = no i2c = this exact error.")
+            say("   4. FULLY LATCHED? Push the FFC fully home and press the latch")
+            say("      down evenly at both corners. Power OFF first -- CSI is not")
+            say("      hot-pluggable, and probing a half-seated cable is how sensors")
+            say("      die.")
+        say()
+        say("  DECISIVE TEST (Pi 4 keeps the camera i2c bus powered, so this is")
+        say("  meaningful here):   sudo i2cdetect -y 10")
+        say("    0x1a listed  -> wiring is good; suspect the module or its clock")
+        say("                    (Vision Components boards need")
+        say("                    dtoverlay=imx296,clock-frequency=54000000)")
+        say("    nothing      -> confirmed dead link: wrong socket, wrong cable,")
+        say("                    flipped cable, or not latched")
+        say()
+        say("  ALSO WORTH RULING OUT:")
+        say("    * Power: vcgencmd get_throttled   (non-zero = brownouts; an")
+        say("      under-fed 5V rail leaves the sensor unresponsive)")
+        say("    * Module identity: an Arducam/Waveshare IMX296 often needs the")
+        say("      VENDOR's overlay or driver, not the mainline imx296 one. Say")
+        say("      which board it is if reseating does not fix it.")
+        say("    * Try the camera on another Pi, or another camera on this port,")
+        say("      to decide between 'bad module' and 'bad port/cable'.")
+        say()
+        say("  Re-run after each physical change:  python3 camtest.py --list")
+        return
 
     if f.get("edited_since_boot"):
         causes.append(("REBOOT REQUIRED",
@@ -410,9 +475,8 @@ def verdict(f, model):
                        "IMX296 boards.",
                        "camera_auto_detect=0   (keep the explicit dtoverlay line)"))
 
-    dm = (f.get("dmesg") or "").lower()
-    if f.get("dt_nodes") and ("failed to read chip id" in dm or "probe.*failed" in dm
-                              or "no such device" in dm):
+    dm = dmesg_low
+    if f.get("dt_nodes") and ("no such device" in dm or "timeout" in dm):
         causes.append(("SENSOR NOT ANSWERING",
                        "The driver loaded and tried to talk to the sensor but got "
                        "nothing -- that is wiring or power, not software.",
