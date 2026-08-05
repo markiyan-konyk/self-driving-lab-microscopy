@@ -361,9 +361,7 @@ def open_camera_forever():
     delay = 2.0
     while True:
         try:
-            cam = Picamera2()
-            cam.configure(cam.create_video_configuration(main={"size": SIZE}))
-            cam.start_recording(MJPEGEncoder(), FileOutput(output))
+
             cam = Picamera2()
 
 # Select a sensor mode that provides the full field of view (crop_limits starts at 0,0)
