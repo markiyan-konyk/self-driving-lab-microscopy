@@ -364,6 +364,21 @@ def open_camera_forever():
             cam = Picamera2()
             cam.configure(cam.create_video_configuration(main={"size": SIZE}))
             cam.start_recording(MJPEGEncoder(), FileOutput(output))
+            cam = Picamera2()
+
+# Select a sensor mode that provides the full field of view (crop_limits starts at 0,0)
+# Index 5 from the logs: 1640x1232 at 8-bit depth (full FoV, lighter than 10-bit)
+            full_fov_mode = cam.sensor_modes[5]
+
+# Create a configuration that forces full-sensor readout while downscaling to the desired SIZE
+            config = cam.create_video_configuration(
+              sensor={"output_size": full_fov_mode['size'], "bit_depth": full_fov_mode['bit_depth']},
+              main={"size": SIZE, "format": "RGB888"},  # SIZE remains (640, 480) as defined earlier
+              controls={"FrameRate": 30}                # Adjustable up to 81fps for this mode
+            )
+
+            cam.configure(config)
+            cam.start_recording(MJPEGEncoder(), FileOutput(output))
             picam2 = cam
             camera_error, camera_list = None, []
             # Print what this sensor actually offers: it is the fastest answer to
