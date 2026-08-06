@@ -12,7 +12,7 @@ import time
 
 import numpy as np
 
-from galvo import WaveGen
+from DG1022Z import WaveGen
 
 RESOURCE = None        # None = auto-pick the first USB VISA device, or hardcode "USB0::0x1AB1::0x0642::SERIAL::INSTR"
 RADIUS   = 1.0         # circle radius, VOLTS

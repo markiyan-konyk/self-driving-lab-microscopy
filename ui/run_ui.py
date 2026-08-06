@@ -260,6 +260,31 @@ def _cam_dict():
             "sharpness": cs["sharpness"]}
 
 
+@app.route("/health")
+def health():
+    """Can this UI reach the microscope, and if not, why.
+
+    Deliberately NOT behind the login: a connection you cannot diagnose without
+    first logging in is a connection you cannot diagnose. Carries no sample
+    data -- only whether the link works.
+
+    frames_ingested is the number that matters when video looks wrong. Compare
+    it with the camera server's own `frames` (GET :8081/controls on the Pi):
+    both climbing means the pixels are arriving and the problem is in the
+    browser; the Pi's climbing while this one is stuck means the break is
+    between them -- gateway, network or proxy.
+    """
+    with state.lock:
+        seq, fps = state.jpeg_seq, round(state.stream_fps, 1)
+    return jsonify({
+        "scope_url": SCOPIO_URL,
+        "scope_reachable": state.connected,
+        "scope_error": state.last_error,
+        "frames_ingested": seq,
+        "stream_fps": fps,
+    })
+
+
 @app.route("/video_feed")
 @login_required
 def video_feed():
