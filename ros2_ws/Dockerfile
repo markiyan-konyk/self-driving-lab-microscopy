@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-colcon-common-extensions \
         python3-opencv \
+        python3-gpiozero \
+        python3-lgpio \
         ffmpeg \
         libusb-1.0-0 \
         ros-jazzy-sensor-msgs \
