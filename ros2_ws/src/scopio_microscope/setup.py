@@ -31,6 +31,7 @@ setup(
             "galvo_node = scopio_microscope.galvo_node:main",
             "temperature_node = scopio_microscope.temperature_node:main",
             "calibration_node = scopio_microscope.calibration_node:main",
+            "relay_node = scopio_microscope.relay_node:main",
         ],
     },
 )
