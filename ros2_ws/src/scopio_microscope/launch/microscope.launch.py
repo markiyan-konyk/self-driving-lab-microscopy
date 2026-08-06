@@ -45,4 +45,5 @@ def generate_launch_description():
         Node(executable="stage_node", name="stage_node", **common),
         Node(executable="galvo_node", name="galvo_node", **common),
         Node(executable="temperature_node", name="temperature_node", **common),
+        Node(executable="relay_node", name="relay_node", **common),
     ])
