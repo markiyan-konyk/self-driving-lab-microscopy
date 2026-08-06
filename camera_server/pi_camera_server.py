@@ -363,6 +363,8 @@ def open_camera_forever():
         try:
 
             cam = Picamera2()
+            for i, mode in enumerate(cam.sensor_modes):
+              print(f"SENSOR MODE {i}: {mode}", flush=True)
             
             full_fov_mode = cam.sensor_modes[5]
             
