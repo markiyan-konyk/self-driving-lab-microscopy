@@ -386,6 +386,7 @@ def open_camera_forever():
                 cam.set_controls({"ScalerCrop": crop})
             
             cam.start_recording(MJPEGEncoder(), FileOutput(output))
+            picam2 = cam
             camera_error, camera_list = None, []
             # Print what this sensor actually offers: it is the fastest answer to
             # "why did that control not take" and it says mono vs colour outright.
