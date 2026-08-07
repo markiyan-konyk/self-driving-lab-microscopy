@@ -76,6 +76,47 @@ main {
     display: flex; flex-direction: column; gap: 10px;
     padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line);
 }
+.galvo-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.galvo-title-row .section-title {
+    margin: 0;
+}
+
+.laser-toggle {
+    min-width: 92px;
+    min-height: 34px;
+    padding: 5px 10px;
+
+    /* OFF: same general appearance as the movement buttons */
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+
+    font-size: 12px;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.laser-toggle.on {
+    /* ON: green, matching the normal recording button */
+    background: linear-gradient(
+        90deg,
+        var(--accent-deep),
+        var(--accent)
+    );
+    border-color: transparent;
+    color: #06140e;
+}
+
+.laser-toggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
 .galvo-status { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 .galvo-status.on { color: var(--accent-bright); }
 .galvo-status.off { color: #fca5a5; }

@@ -571,6 +571,72 @@
         setInterval(pollGalvo, 3000); pollGalvo();
 
         // ============================================================
+        //  GPIO laser relay
+        // ============================================================
+        const laserToggleBtn = $('laserToggleBtn');
+
+        let laserOn = false;
+        let laserAvailable = false;
+        let laserBusy = false;
+
+        function paintLaserButton() {
+            laserToggleBtn.disabled = !laserAvailable || laserBusy;
+            laserToggleBtn.classList.toggle('on', laserOn);
+            laserToggleBtn.textContent = laserOn ? 'Laser ON' : 'Laser OFF';
+            laserToggleBtn.setAttribute(
+                'aria-pressed',
+                laserOn ? 'true' : 'false'
+            );
+        }
+
+        async function refreshLaserState() {
+            try {
+                const response = await request('/relay/status');
+                const result = await response.json();
+
+                laserAvailable = !!result.available;
+                laserOn = !!result.on;
+            } catch (error) {
+                laserAvailable = false;
+                laserOn = false;
+            }
+
+            paintLaserButton();
+        }
+
+        laserToggleBtn.addEventListener('click', async () => {
+            if (!laserAvailable || laserBusy) return;
+
+            laserBusy = true;
+            paintLaserButton();
+
+            try {
+                const response = await postJSON('/relay/set', {
+                    on: !laserOn
+                });
+
+                const result = await response.json();
+
+                laserAvailable = !!result.available;
+                laserOn = !!result.on;
+
+                msg(laserOn ? 'Laser switched ON' : 'Laser switched OFF');
+            } catch (error) {
+                msg('Laser control failed: ' + error.message);
+
+                // Read the real state again if the command failed.
+                await refreshLaserState();
+            } finally {
+                laserBusy = false;
+                paintLaserButton();
+            }
+        });
+
+        // Read the initial state and keep it synchronized with ROS.
+        refreshLaserState();
+        setInterval(refreshLaserState, 2000);
+
+        // ============================================================
         //  Sample temperature  (Wavelength TC10 LAB)
         // ============================================================
         // Two separate commands, mirroring the instrument: writing a number sets

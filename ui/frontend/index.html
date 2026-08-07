@@ -23,8 +23,21 @@ __STYLE__
         <!-- ===== LEFT: galvo laser + recordings library ===== -->
         <aside class="library">
             <!-- Galvo laser: X = CH1, Y = CH2 on the Rigol wavegen -->
+
             <section class="galvo-section">
-                <p class="section-title">Galvo Laser</p>
+                <div class="galvo-title-row">
+                    <p class="section-title">Galvo Laser</p>
+
+                    <button
+                        id="laserToggleBtn"
+                        class="laser-toggle"
+                        type="button"
+                        aria-pressed="false"
+                        disabled>
+                        Laser OFF
+                    </button>
+                </div>
+
                 <div class="galvo-status off" id="galvoStatus">Connecting…</div>
                 <div class="galvo-slider">
                     <div class="galvo-head">

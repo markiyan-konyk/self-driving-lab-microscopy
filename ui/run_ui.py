@@ -114,6 +114,7 @@ class State:
         self.stage = None           # stage/position message dict
         self.awg = None             # awg/status message dict (galvo wavegen)
         self.temp = None            # temperature/status message dict (TC10 LAB)
+        self.relay = None
         self.calibration = None     # calibration message dict (latched)
         self.connected = False      # gateway subscriptions established
 
@@ -153,6 +154,7 @@ def _subscribe_loop():
                 scope.subscribe("camera/state", store("camera"), rate_hz=4)
                 scope.subscribe("stage/position", store("stage"), rate_hz=10)
                 scope.subscribe("awg/status", store("awg"), rate_hz=2)
+                scope.subscribe("relay/state", store("relay"))
                 scope.subscribe("calibration", store("calibration"))
                 # Separate try: an older backend without temperature_node must
                 # not stop the UI from getting camera/stage/galvo telemetry.
@@ -337,6 +339,60 @@ def telemetry():
         "scope_error": state.last_error,
     })
 
+# ---- relay ----
+@app.route("/relay/status")
+@login_required
+def relay_status():
+    with state.lock:
+        current = state.relay
+
+    if current is None:
+        return jsonify({
+            "available": False,
+            "on": False,
+        })
+
+    return jsonify({
+        "available": True,
+        "on": bool(current.get("data", False)),
+    })
+
+@app.route("/relay/set", methods=["POST"])
+@login_required
+def relay_set():
+    body = request.get_json(silent=True) or {}
+    on = body.get("on")
+
+    if not isinstance(on, bool):
+        return jsonify({
+            "error": "'on' must be true or false"
+        }), 400
+
+    try:
+        result = scope.call_service(
+            "relay/set",
+            {"data": on},
+        )
+    except ScopioError as exc:
+        return jsonify({
+            "error": str(exc)
+        }), 503
+
+    if not result.get("success", False):
+        return jsonify({
+            "error": result.get("message", "Relay command failed")
+        }), 503
+
+    # Update the local cache immediately. ROS telemetry will subsequently
+    # confirm the same state.
+    with state.lock:
+        state.relay = {"data": on}
+
+    return jsonify({
+        "available": True,
+        "on": on,
+        "message": result.get("message", ""),
+    })
 
 # ---- stage ----
 @app.route("/move/<direction>", methods=["GET", "POST"])
