@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ROS 2 node controlling the laser relay on BCM GPIO23."""
+"""ROS 2 node controlling the laser relay on BCM GPIO17."""
 
 import threading
 
@@ -15,7 +15,7 @@ class RelayNode(Node):
     def __init__(self):
         super().__init__("relay_node")
 
-        self.declare_parameter("gpio_pin", 23)
+        self.declare_parameter("gpio_pin", 17) # Do not use 14,15, 23-25. they are used by sangaboard
         self.declare_parameter("active_high", True)
 
         gpio_pin = int(self.get_parameter("gpio_pin").value)
@@ -43,7 +43,6 @@ class RelayNode(Node):
 
         try:
             # gpiozero uses BCM numbering:
-            # BCM GPIO23 is physical header pin 16.
             self._relay = OutputDevice(
                 gpio_pin,
                 active_high=active_high,
