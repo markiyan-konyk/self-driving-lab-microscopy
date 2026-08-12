@@ -1,19 +1,64 @@
 """MCP server exposing the SCOPIO microscope to Claude Code, on top of the
-existing HTTP gateway (via scopio_client). Config: scopio_mcp/.env."""
+existing HTTP gateway (via scopio_client). Config: scopio_mcp/.env.
+
+Tool surface and the discovery contract: see README.md. The short version is
+that nothing here hard-codes what the microscope can do -- describe_instrument
+asks the live ROS graph and the live driver classes, so a node or a driver
+method added on the Pi is usable from here with no change to this file.
+"""
 
 import io
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from mcp.server.mcpserver import Image, MCPServer
+try:                                    # mcp >= 2
+    from mcp.server.mcpserver import Image, MCPServer
+except ImportError:                     # mcp 1.x -- same tool/run/Image surface
+    from mcp.server.fastmcp import FastMCP as MCPServer, Image
+
 from PIL import Image as PILImage
 
-from scopio_client import Scopio, ScopioError
+try:
+    from scopio_client import Scopio, ScopioError
+except ImportError:                     # the #1 setup failure -- say what to do
+    raise SystemExit(
+        "scopio_client is not installed for this interpreter "
+        f"({sys.executable}).\n"
+        "  pip install -e ./scopio_client -r scopio_mcp/requirements.txt\n"
+        "and point your .mcp.json 'command' at THAT interpreter.")
 
 HERE = Path(__file__).parent      # where the server lives (config only)
 RECORDINGS = Path("recordings")   # relative to the CLIENT's working directory
+NS = "/scopio/"                   # the gateway reports full ROS names
+
+# instrument -> (its status topic, what it is). The status topic is read from
+# the cached telemetry snapshot, so the index costs the instruments nothing.
+INSTRUMENTS = {
+    "galvo": ("awg/status",
+              "Rigol DG1022Z arbitrary-waveform generator; CH1/CH2 steer the "
+              "galvo mirrors of the optical tweezers"),
+    "temperature": ("temperature/status",
+                    "Wavelength TC10 LAB sample-temperature controller (TEC)"),
+}
+
+INSTRUCTIONS = """\
+SCOPIO is a self-driving-lab microscope: a Raspberry Pi owns the hardware as a
+ROS 2 graph, and these tools reach it over an HTTP gateway.
+
+Start with describe_instrument() -- it is a live capability map, not a fixed
+menu, so it is authoritative even for hardware added after this server shipped.
+
+Three things worth knowing before you drive it:
+  * The Pi senses and effects; it never analyses. record_clip writes frames to
+    YOUR working directory and you analyse them with your own code.
+  * Use the MEASURED fps record_clip returns for any timing, never the
+    requested one -- asking for 120 may yield 89.
+  * A node reporting connected=false means its hardware is absent or unplugged,
+    not that the microscope is broken. Every other node still works.
+"""
 
 
 def _load_env():
@@ -28,7 +73,7 @@ def _load_env():
 
 
 _load_env()
-mcp = MCPServer("scopio")
+mcp = MCPServer("scopio", instructions=INSTRUCTIONS)
 _scope = None
 
 
@@ -43,6 +88,15 @@ def scope() -> Scopio:
             )
         _scope = Scopio(os.environ.get("SCOPIO_URL", "http://127.0.0.1:8000"), key)
     return _scope
+
+
+def _short(name):
+    """'/scopio/stage/jog' -> 'stage/jog' (what every tool here takes)."""
+    return name[len(NS):] if name.startswith(NS) else name
+
+
+def _instrument(name):
+    return {"galvo": scope().galvo, "temperature": scope().temperature}.get(name)
 
 
 def _frames(count=None, seconds=None):
@@ -62,19 +116,65 @@ def _frames(count=None, seconds=None):
 
 # ---------------------------------------------------------------- discovery
 @mcp.tool()
-def describe_instrument() -> dict:
-    """The microscope's full capability map: every ROS service, topic and action
-    with per-field schemas, plus every driver method on the galvo and
-    temperature instruments. Call this first -- it is authoritative and live."""
-    s = scope()
-    out = s.interfaces()
-    out["instrument_methods"] = {}
-    for name, ns in (("galvo", s.galvo), ("temperature", s.temperature)):
+def describe_instrument(subject: Optional[str] = None) -> dict:
+    """What this microscope can do, asked of the live graph. CALL THIS FIRST.
+
+    Two levels, so the whole capability map never lands in context at once (the
+    two driver classes alone are ~240 methods):
+
+      describe_instrument()             an index -- every service, topic and
+                                        action by name, plus the instruments
+      describe_instrument('stage/jog')  the field schema of one service, topic
+                                        or action
+      describe_instrument('galvo')      every driver method on that instrument,
+                                        with signature and docstring
+      describe_instrument('galvo.sin')  only the driver methods matching 'sin'
+
+    Instrument methods are read from the CLASS, so they list even while the
+    hardware is unplugged. Call them with instrument_call.
+    """
+    data = scope().interfaces()
+    if subject is None:
+        telemetry = scope().status().get("telemetry") or {}
+        return {
+            "services": [_short(n) for n in data["services"]],
+            "topics": [_short(n) for n in data["topics"]],
+            "actions": [_short(n) for n in data["actions"]],
+            "instruments": {
+                name: {
+                    "what": what,
+                    "connected": bool(((telemetry.get(topic) or {}).get("msg")
+                                       or {}).get("connected")),
+                }
+                for name, (topic, what) in INSTRUMENTS.items()
+            },
+            "next": "describe_instrument('<name>') for a schema, "
+                    "'<instrument>' for its driver methods, or "
+                    "'<instrument>.<text>' to search them.",
+        }
+
+    # Both forms work: the gateway reports '/scopio/stage/jog', every tool here
+    # takes 'stage/jog', and an agent will paste either back at this one.
+    key = _short(subject.strip()).lstrip("/")
+    name, _, query = key.partition(".")
+    ns = _instrument(name)
+    if ns is not None:
         try:
-            out["instrument_methods"][name] = ns.methods()
+            methods = ns.methods()
         except ScopioError as exc:
-            out["instrument_methods"][name] = f"unavailable: {exc}"
-    return out
+            return {"instrument": name, "error": str(exc)}
+        if query:
+            methods = [m for m in methods if query.lower() in m["name"].lower()]
+        return {"instrument": name, "methods": methods,
+                "call_with": f"instrument_call('{name}', '<method>', args=[...])"}
+
+    for kind in ("services", "topics", "actions"):
+        for full, spec in data[kind].items():
+            if _short(full) == key:
+                return {"kind": kind[:-1], "name": key, **spec}
+    raise ValueError(
+        f"no service, topic, action or instrument called {subject!r}. Call "
+        "describe_instrument() with no argument for the index of what exists.")
 
 
 @mcp.tool()
@@ -173,12 +273,30 @@ def record_clip(seconds: float = 10.0, name: Optional[str] = None) -> dict:
 def instrument_call(instrument: str, method: str, args: Optional[list] = None,
                     kwargs: Optional[dict] = None) -> Any:
     """Call a driver method on 'galvo' (DG1022Z AWG, optical tweezers) or
-    'temperature' (TC LAB). describe_instrument lists every method and its
-    signature."""
-    ns = {"galvo": scope().galvo, "temperature": scope().temperature}.get(instrument)
+    'temperature' (TC LAB). describe_instrument('<instrument>') lists every
+    method and its signature."""
+    ns = _instrument(instrument)
     if ns is None:
         raise ValueError("instrument must be 'galvo' or 'temperature'")
     return ns.call(method, *(args or []), **(kwargs or {}))
+
+
+@mcp.tool()
+def laser(on: Optional[bool] = None) -> dict:
+    """Switch the laser relay, or read it back when called with no argument.
+
+    Its own tool rather than a call_service, so that permitting or refusing
+    laser control is a decision you can make separately from everything else.
+    A null reading is UNKNOWN, not off: the microscope has never reported a
+    relay state, so treat the laser as live until it does.
+    """
+    state = scope().laser
+    if on is None:
+        return {"on": state.is_on()}
+    result = state.set(bool(on))
+    if not result.get("success", True):
+        raise RuntimeError(result.get("message") or "relay refused the command")
+    return {"on": bool(on), "message": result.get("message", "")}
 
 
 @mcp.tool()

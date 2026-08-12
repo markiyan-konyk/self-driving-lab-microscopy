@@ -213,8 +213,12 @@ Create `.claude\settings.json` in the lab folder:
 ```
 
 Deliberately listed one by one, because **whatever you leave out will hang the
-run**. `galvo_scpi` is absent on purpose: this campaign has no business firing
-the laser, so if it ever tries, the run stalls and you find out.
+run**. `laser` and `galvo_scpi` are absent on purpose: this campaign has no
+business firing the tweezers, so if it ever tries, the run stalls and you find
+out. (That is exactly why `laser` is its own tool rather than something reached
+through `call_service` — a capability you cannot name is a capability you
+cannot withhold. Note that `call_service` IS on the list here and can reach the
+relay itself; drop it too if you want the laser genuinely unreachable.)
 
 `Bash` is broad, and it has to be — the agent writes and runs its own analysis
 code. That is the point of it.

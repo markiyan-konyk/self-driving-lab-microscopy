@@ -77,8 +77,8 @@ Want the microscope to run an experiment on its own overnight?
 
 | Tool | What it does |
 |---|---|
-| `describe_instrument` | Live capability map: services, topics, actions + schemas, and every galvo/temperature driver method. Start here. |
-| `status` | Health plus latest stage/camera/temperature/AWG/calibration telemetry. |
+| `describe_instrument` | Live capability map. Start here — see [Discovery](#discovery). |
+| `status` | Health plus latest stage/camera/temperature/AWG/relay/calibration telemetry. |
 | `call_service` | Any ROS service by path (`stage/jog`, `calibration/set`, ...). |
 | `send_goal` | Long actions: `camera/autofocus`, `stage/move_path`, `scan_region`. |
 | `stage_move` | Relative or absolute stage moves, in steps. |
@@ -88,7 +88,41 @@ Want the microscope to run an experiment on its own overnight?
 | `focus_metric` | Cheap sharpness number for focus sweeps. |
 | `record_clip` | Record N seconds to `recordings/<name>/00000.jpg…` + measured fps. |
 | `instrument_call` | Any driver method on `galvo` or `temperature`. |
+| `laser` | Switch the laser relay, or read it back. |
 | `galvo_scpi` | One raw SCPI command to the AWG (`?` ⇒ query). |
+
+## Discovery
+
+Nothing in this server hard-codes what the microscope can do. Twelve of the
+thirteen tools are transport; `describe_instrument` is the map, and it is built
+from the **live** ROS graph and the **live** driver classes on every call. Add a
+node on the Pi or a method to a driver, and an agent can use it the same
+minute — no change here, no change to the gateway, no change to the SDK.
+
+It answers in two levels, because the whole map is far too big for one reply
+(the two driver classes are ~240 methods, ~7k tokens, before any schemas):
+
+```
+describe_instrument()              index: every service, topic and action BY NAME,
+                                   plus each instrument and whether it is connected
+describe_instrument('stage/jog')   the field schema of that one service
+                                   (topics and actions too; either 'stage/jog'
+                                   or '/scopio/stage/jog' works)
+describe_instrument('galvo')       every driver method on the DG1022Z, with
+                                   signature and one-line doc
+describe_instrument('galvo.sin')   only the ones matching 'sin'
+```
+
+So the usual loop is: index once (~600 tokens), drill into the two or three
+things this experiment needs, then work. Instrument methods are introspected
+from the **class**, so they list correctly even while that instrument is
+unplugged — `connected: false` in the index tells you the difference between
+"this capability does not exist" and "that box is switched off".
+
+The server also ships standing `instructions` (shown to the model once at
+connect) covering the three rules that are not guessable from a tool schema:
+the Pi never analyses, always use `record_clip`'s **measured** fps, and one node
+reporting `connected: false` does not mean the microscope is down.
 
 ## Where recordings go
 
@@ -101,17 +135,38 @@ to the working folder's `.gitignore`.
 ## Test
 
 ```bash
-pip install fastapi uvicorn                  # the mock gateway
+pip install fastapi uvicorn websockets       # the mock gateway
 python scopio_mcp/test_scopio_mcp.py         # no microscope needed
 ```
 
-Calls every tool against the mock gateway from `scopio_client`'s test. Run it
-after touching `server.py` or bumping the `mcp` SDK.
+Two checks, no hardware and no Pi:
+
+- **registration** — starts `server.py` as a real MCP client would, over stdio,
+  with the microscope deliberately unreachable, and asserts the handshake
+  succeeds and the tool set is exactly what this README lists. Registering must
+  never depend on the rig being switched on, or a powered-down microscope looks
+  like a broken install.
+- **behaviour** — calls every tool against the mock gateway from
+  `scopio_client`'s test, including that the discovery index stays an index.
+
+Run it after touching `server.py` or bumping the `mcp` SDK. `websockets` is
+needed because uvicorn answers WebSocket upgrades with a 404 without it.
+
+## Supported `mcp` versions
+
+Both generations: 1.x (`mcp.server.fastmcp.FastMCP`) and 2.x
+(`mcp.server.mcpserver.MCPServer`). `server.py` imports whichever is installed —
+the decorator, `run()` and `Image` surface it uses is identical across the
+rename, so you never have to match the SDK to the server.
 
 ## Safety
 
 `call_service`, `instrument_call` and `galvo_scpi` are unrestricted by design —
-they mirror the gateway's generic surface. The ROS nodes currently enforce **no
-range limits** on stage, temperature or AWG. Add clamps in the nodes (and/or
-scoped API keys in the gateway) before running an agent unattended; a limit
-enforced only by a prompt is not a limit.
+they mirror the gateway's generic surface. `laser` is a separate tool for one
+reason: an allowlist (see [TUTORIAL.md](TUTORIAL.md) step 5) can then permit or
+withhold the laser on its own, which it cannot do for a capability that is only
+reachable through a generic escape hatch.
+
+The ROS nodes enforce **no range limits** on stage, temperature or AWG. Add
+clamps in the nodes (and/or scoped API keys in the gateway) before running an
+agent unattended; a limit enforced only by a prompt is not a limit.

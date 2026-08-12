@@ -46,6 +46,7 @@ async def status(request: Request):
     _auth(request)
     return {"telemetry": {
         "stage/position": {"msg": {"x": 1, "y": 2, "z": 3}, "stamp": 0.0},
+        "relay/state": {"msg": {"data": True}, "stamp": 0.0},
         "temperature/status": None,          # node not up yet -- must not crash
     }}
 
@@ -63,6 +64,8 @@ async def service(path: str, request: Request, body: dict = Body(default={})):
         return {"ok": True, "echo": body}
     if path == "calibration/set":
         return {"ok": True, "echo": body}
+    if path == "relay/set":
+        return {"success": True, "message": "Relay ON" if body["data"] else "Relay OFF"}
     if path == "awg/write":
         return {"success": True, "error": ""}
     if path == "awg/query":
@@ -245,6 +248,12 @@ def test_against_mock_gateway():
             raise AssertionError("an unknown calibration field must raise")
         except ScopioError:
             pass
+
+        # -- laser: is_on() reads telemetry, and "no state reported" is None
+        # (unknown), NEVER False -- an unknown laser has to be treated as live.
+        assert scope.laser.is_on() is True
+        assert scope.laser.off()["message"] == "Relay OFF"
+        assert scope.laser.on()["message"] == "Relay ON"
 
         # -- instruments: success unwraps to a value, failure raises
         assert scope.galvo.query("*IDN?") == "RIGOL,DG1022Z"

@@ -77,7 +77,7 @@ scope.stage.jog(dz=100)
 | Method + path | Auth | Meaning |
 |---|---|---|
 | `GET /api/v1/health` | no | `{ok, ros_ok, camera_ok, auth_configured, uptime_s}` |
-| `GET /api/v1/status` | yes | one-call snapshot: latest `stage/position`, `camera/state`, `awg/status`, `temperature/status`, `calibration` + camera reachability |
+| `GET /api/v1/status` | yes | one-call snapshot: latest `stage/position`, `camera/state`, `awg/status`, `temperature/status`, `relay/state`, `calibration` + camera reachability |
 | `GET /api/v1/interfaces` | yes | discovery: every service/topic/action with per-field schemas |
 | `POST /api/v1/service/{name}` | yes | **generic service call** (section 4) |
 | `GET /api/v1/stream.mjpg` | yes | live MJPEG video |
@@ -147,6 +147,14 @@ actually applied after clamping/derivation).
 
 #### `camera/white_balance` — one-shot hardware AWB (WhiteBalance)
 Request `{}` → `{success, red_gain, blue_gain, message}`. Takes ~1.5 s.
+
+#### `relay/set` — switch the laser relay (std_srvs/SetBool)
+Request `{data: true}` (ON) → `{success, message}`. State is published on the
+latched `relay/state`. On `success: false` the relay's position is **unknown**,
+not off: the node reports ON unless it managed to switch it off itself.
+```python
+scope.laser.on()          # scope.laser.is_on() -> True / False / None (unknown)
+```
 
 #### `calibration/set` — persist spatial calibration (CalibrationSet, NaN rule!)
 Request `{um_per_px, steps_per_um_x, steps_per_um_y, steps_per_um_z}` (float
@@ -246,7 +254,7 @@ about that request echo it.
 ```
 
 - `rate_hz` (optional) decimates server-side; without it you get every message.
-- Latched topics (`calibration`) deliver their retained value immediately.
+- Latched topics (`calibration`, `relay/state`) deliver their retained value immediately.
 - Video topics are refused with `{"op":"error","code":"use_mjpeg"}` — use
   `GET /api/v1/stream.mjpg`.
 
@@ -258,6 +266,7 @@ about that request echo it.
 | `camera/state` | CameraState | all camera settings + measured fps |
 | `awg/status` | AwgStatus | AWG `connected`, resource string |
 | `temperature/status` | TemperatureStatus | temperature, setpoint, TEC current/voltage, `output_enabled`, `in_tolerance`, `sensor_fault` |
+| `relay/state` | std_msgs/Bool | laser relay on/off (latched). No value reported means UNKNOWN — treat the laser as live, never as off |
 | `calibration` | Calibration | µm/px + steps/µm (latched) |
 | `image/compressed` | CompressedImage | *refused over WS — use the MJPEG stream* |
 

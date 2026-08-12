@@ -1,5 +1,8 @@
 # The SDK is a sibling folder, so it is installed by the README's command
 # (pip resolves relative paths in a requirements file against your CWD, not
 # against this file -- putting it here only works from one directory).
-mcp>=2.0
+#
+# 1.x and 2.x are BOTH supported: server.py imports whichever is present, and
+# the tool/run/Image surface it uses is identical across the rename.
+mcp>=1.9
 pillow>=10.0

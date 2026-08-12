@@ -14,6 +14,7 @@ Convenience namespaces (thin sugar over the generic surface):
                  / white_balance() / autofocus(...)
     scope.galvo.write(cmd) / write_all(cmds) / query(cmd) / status()
     scope.temperature.temperature() / setpoint(c) / output(on) / status()
+    scope.laser.on() / off() / set(bool) / is_on()
     scope.calibration.get() / set(um_per_px=...)
     scope.stream_frames()                            # generator of JPEG bytes
 
@@ -57,6 +58,7 @@ class Scopio:
         self.camera = _Camera(self)
         self.galvo = _Galvo(self)
         self.temperature = _Temperature(self)
+        self.laser = _Laser(self)
         self.calibration = _Calibration(self)
 
     # ------------------------------------------------------------ plumbing
@@ -308,6 +310,30 @@ class _Temperature(_InstrumentCall):
         if on is None:
             return self.call("output_enabled")
         return self.call("output", bool(on))
+
+
+class _Laser:
+    """The laser relay -- one GPIO pin on the Pi, on or off.
+
+    is_on() reads cached telemetry (no traffic to the pin). It returns None when
+    the microscope has never reported a state, which is NOT "off": treat an
+    unknown laser as live."""
+
+    def __init__(self, scope):
+        self._s = scope
+
+    def is_on(self):
+        state = self._s.telemetry("relay/state")
+        return None if state is None else bool(state.get("data", False))
+
+    def set(self, on):
+        return self._s.call_service("relay/set", {"data": bool(on)})
+
+    def on(self):
+        return self.set(True)
+
+    def off(self):
+        return self.set(False)
 
 
 class _Calibration:

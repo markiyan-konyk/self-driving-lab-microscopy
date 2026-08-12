@@ -20,24 +20,24 @@ __STYLE__
     </div>
 
     <main>
-        <!-- ===== LEFT: galvo laser + recordings library ===== -->
+        <!-- ===== LEFT: instruments ===== -->
         <aside class="library">
+            <!-- The laser interlock. Deliberately the first thing in the column
+                 and the only control on the page that goes amber: it is the one
+                 switch here that can hurt someone. -->
+            <section class="laser-section">
+                <p class="section-title">Laser</p>
+                <button id="laserToggleBtn" class="laser-switch" type="button"
+                        aria-pressed="false" disabled>
+                    <span class="laser-lamp" aria-hidden="true"></span>
+                    <span class="laser-state">OFF</span>
+                </button>
+                <div class="laser-note" id="laserNote">Relay offline</div>
+            </section>
+
             <!-- Galvo laser: X = CH1, Y = CH2 on the Rigol wavegen -->
-
             <section class="galvo-section">
-                <div class="galvo-title-row">
-                    <p class="section-title">Galvo Laser</p>
-
-                    <button
-                        id="laserToggleBtn"
-                        class="laser-toggle"
-                        type="button"
-                        aria-pressed="false"
-                        disabled>
-                        Laser OFF
-                    </button>
-                </div>
-
+                <p class="section-title">Galvo</p>
                 <div class="galvo-status off" id="galvoStatus">Connecting…</div>
                 <div class="galvo-slider">
                     <div class="galvo-head">
@@ -72,11 +72,16 @@ __STYLE__
                 </div>
             </section>
 
-            <!-- Recordings -->
-            <section class="rec-library">
-                <p class="section-title">Recordings</p>
-                <div class="rec-list" id="recordingsList">
-                    <p class="rec-empty" id="recEmpty">No recordings yet.</p>
+            <!-- Where clips land. This program ingests the frames, so its own
+                 disk is the only one they can reach -- name the machine, since
+                 the browser showing this may be somewhere else entirely. -->
+            <section class="dest-section">
+                <p class="section-title">Save Clips To</p>
+                <input type="text" class="dest-path" id="destPath" spellcheck="false"
+                       placeholder="C:\path\to\folder" aria-label="Recording folder">
+                <div class="dest-row">
+                    <span class="dest-host" id="destHost"></span>
+                    <button id="destSetBtn" class="dest-set" type="button">Set</button>
                 </div>
             </section>
         </aside>
@@ -93,8 +98,8 @@ __STYLE__
                 </span>
                 <span class="spacer"></span>
                 <span class="status" id="status">Connecting…</span>
-                <button class="ghost-btn" id="mobileToggle">📱 Phone</button>
-                <a class="ghost-btn" href="/logout">🔒 Lock</a>
+                <button class="ghost-btn" id="mobileToggle">Phone</button>
+                <a class="ghost-btn" href="/logout">Lock</a>
             </div>
 
             <div class="video-frame" id="videoFrame">
@@ -119,8 +124,8 @@ __STYLE__
                     <span class="rec-timer" id="recTimer"></span>
                 </button>
                 <div class="action-row">
-                    <button id="whiteBalanceBtn" class="action-btn">⚖️ White&nbsp;Balance</button>
-                    <button id="autofocusBtn" class="action-btn">🎯 Autofocus</button>
+                    <button id="whiteBalanceBtn" class="action-btn">White&nbsp;Balance</button>
+                    <button id="autofocusBtn" class="action-btn">Autofocus</button>
                 </div>
             </div>
 
@@ -172,111 +177,11 @@ __STYLE__
                 </div>
             </section>
 
-            <!-- Collapsible camera settings -->
-            <section class="cam-section collapsible">
-                <button class="section-toggle" id="camToggle" aria-expanded="true">
-                    <span>Camera</span><span class="chevron">⌄</span>
-                </button>
-                <div class="collapsible-body" id="camBody">
-                    <div class="ctrl-row" data-control="framerate">
-                        <span class="ctrl-name">Frame rate</span>
-                        <input type="range" id="framerate" min="{{ min_fps }}" max="{{ max_fps }}" step="1" value="{{ cam.framerate|int }}">
-                        <input type="number" class="ctrl-val" id="framerateVal" min="{{ min_fps }}" max="{{ max_fps }}" step="1" value="{{ cam.framerate|int }}">
-                        <span class="ctrl-unit">fps</span>
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="framerate" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="framerate" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name"><i class="swatch red"></i>Red</span>
-                        <input type="range" id="redGain" min="0" max="8" step="0.05" value="{{ cam.red_gain }}">
-                        <input type="number" class="ctrl-val" id="redGainVal" min="0" max="8" step="0.05" value="{{ cam.red_gain }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="redGain" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="redGain" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name"><i class="swatch green"></i>Green</span>
-                        <input type="range" id="greenGain" min="0" max="8" step="0.05" value="{{ cam.green_gain }}">
-                        <input type="number" class="ctrl-val" id="greenGainVal" min="0" max="8" step="0.05" value="{{ cam.green_gain }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="greenGain" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="greenGain" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name"><i class="swatch blue"></i>Blue</span>
-                        <input type="range" id="blueGain" min="0" max="8" step="0.05" value="{{ cam.blue_gain }}">
-                        <input type="number" class="ctrl-val" id="blueGainVal" min="0" max="8" step="0.05" value="{{ cam.blue_gain }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="blueGain" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="blueGain" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name">Colour</span>
-                        <input type="range" id="colourGain" min="0.1" max="4" step="0.05" value="{{ cam.colour_gain }}">
-                        <input type="number" class="ctrl-val" id="colourGainVal" min="0.1" max="4" step="0.05" value="{{ cam.colour_gain }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="colourGain" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="colourGain" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name">Brightness&nbsp;Gain</span>
-                        <input type="range" id="analogueGain" min="1" max="16" step="0.1" value="{{ cam.analogue_gain }}">
-                        <input type="number" class="ctrl-val" id="analogueGainVal" min="1" max="16" step="0.1" value="{{ cam.analogue_gain }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="analogueGain" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="analogueGain" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name">Contrast</span>
-                        <input type="range" id="camContrast" min="0" max="4" step="0.05" value="{{ cam.contrast }}">
-                        <input type="number" class="ctrl-val" id="camContrastVal" min="0" max="4" step="0.05" value="{{ cam.contrast }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="camContrast" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="camContrast" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name">Saturation</span>
-                        <input type="range" id="camSaturation" min="0" max="4" step="0.05" value="{{ cam.saturation }}">
-                        <input type="number" class="ctrl-val" id="camSaturationVal" min="0" max="4" step="0.05" value="{{ cam.saturation }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="camSaturation" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="camSaturation" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name">Brightness</span>
-                        <input type="range" id="camBrightness" min="-1" max="1" step="0.05" value="{{ cam.brightness }}">
-                        <input type="number" class="ctrl-val" id="camBrightnessVal" min="-1" max="1" step="0.05" value="{{ cam.brightness }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="camBrightness" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="camBrightness" data-dir="1">›</button>
-                        </div>
-                    </div>
-                    <div class="ctrl-row">
-                        <span class="ctrl-name">Sharpness</span>
-                        <input type="range" id="camSharpness" min="0" max="8" step="0.1" value="{{ cam.sharpness }}">
-                        <input type="number" class="ctrl-val" id="camSharpnessVal" min="0" max="8" step="0.1" value="{{ cam.sharpness }}">
-                        <div class="ctrl-arrows">
-                            <button class="cam-step" data-slider="camSharpness" data-dir="-1">‹</button>
-                            <button class="cam-step" data-slider="camSharpness" data-dir="1">›</button>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
             <!-- Measurements -->
             <section class="measure-section">
                 <p class="section-title">Measurements</p>
-                <button id="calibrateBtn" class="measure-btn">📐 Measure Calibration</button>
-                <button id="measureBtn" class="measure-btn">📏 Measure</button>
+                <button id="calibrateBtn" class="measure-btn">Set Scale</button>
+                <button id="measureBtn" class="measure-btn">Measure</button>
                 <div class="measure-readout" id="scaleReadout">Not calibrated</div>
                 <div class="measure-readout result" id="measureResult"></div>
             </section>
@@ -284,17 +189,6 @@ __STYLE__
             <div class="message" id="message"></div>
         </aside>
     </main>
-
-    <!-- ===== Recording preview modal ===== -->
-    <div class="modal" id="previewModal">
-        <div class="modal-box">
-            <div class="modal-head">
-                <span id="previewTitle">Preview</span>
-                <button class="ghost-btn" id="previewClose">✕ Close</button>
-            </div>
-            <video id="previewVideo" controls preload="metadata"></video>
-        </div>
-    </div>
 
     <!-- ===== Calibration distance prompt ===== -->
     <div class="modal" id="calibModal">

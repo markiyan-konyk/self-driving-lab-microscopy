@@ -23,7 +23,7 @@ import test_scopio_client as mock  # noqa: E402
 EXPECTED_TOOLS = {
     "describe_instrument", "status", "call_service", "send_goal", "stage_move",
     "camera_controls", "grab_frame", "white_balance", "focus_metric",
-    "record_clip", "instrument_call", "galvo_scpi",
+    "record_clip", "instrument_call", "laser", "galvo_scpi",
 }
 
 
@@ -46,15 +46,33 @@ def test_tools():
     registered = {t.name for t in asyncio.run(server.mcp.list_tools())}
     assert registered == EXPECTED_TOOLS, f"tool set drifted: {registered}"
 
-    # -- discovery. The mock's galvo is "offline", so describe_instrument must
-    #    degrade to a message instead of blowing up.
-    desc = server.describe_instrument()
-    assert "services" in desc
-    assert "unavailable" in desc["instrument_methods"]["galvo"]
-    assert desc["instrument_methods"]["temperature"] == 36.6
+    # -- discovery: the INDEX is names only. The two driver classes are ~240
+    #    methods between them; pulling those on every first call is what the
+    #    tiering exists to avoid, so the index must not contain them.
+    index = server.describe_instrument()
+    assert index["services"] == ["stage/jog"], index["services"]
+    assert set(index["instruments"]) == {"galvo", "temperature"}
+    assert index["instruments"]["temperature"]["connected"] is False
+    assert "signature" not in repr(index), "the index must not carry method dumps"
+
+    # -- drilling in: a ROS interface by name, an instrument by name
+    assert server.describe_instrument("stage/jog")["kind"] == "service"
+    assert server.describe_instrument("/scopio/stage/jog")["name"] == "stage/jog"
+    assert server.describe_instrument("temperature")["methods"] == 36.6
+    #    the mock's galvo is "offline": degrade to a message, never blow up
+    assert "offline" in server.describe_instrument("galvo")["error"]
+    try:
+        server.describe_instrument("no/such/thing")
+        raise AssertionError("an unknown subject must raise")
+    except ValueError:
+        pass
 
     assert server.status()["health"]["ok"] is True
     assert server.status()["telemetry"]["stage/position"]["msg"]["x"] == 1
+
+    # -- the laser: an unknown relay state is None (unknown), never False
+    assert server.laser() == {"on": True}
+    assert server.laser(on=False)["message"] == "Relay OFF"
 
     # -- generic surface
     assert server.call_service("stage/jog", {"dx": 5})["echo"] == {"dx": 5}
@@ -99,5 +117,42 @@ def test_tools():
     print("all good")
 
 
+def test_registers_over_stdio():
+    """The thing every other test assumes: an MCP client can START this server
+    and list its tools. Deliberately with NO microscope reachable -- registering
+    the server must never depend on the Pi being up, or a rig that is switched
+    off looks like a broken install.
+    """
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    async def handshake():
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=[str(Path(__file__).resolve().parent / "server.py")],
+            env=dict(os.environ, SCOPIO_URL="http://127.0.0.1:1",
+                     SCOPIO_API_KEY="unused"))
+        async with stdio_client(params) as (r, w):
+            async with ClientSession(r, w) as session:
+                info = await session.initialize()
+                tools = {t.name for t in (await session.list_tools()).tools}
+                # An unreachable microscope is a tool ERROR, never a crash.
+                result = await session.call_tool("status", {})
+                return info, tools, result
+
+    # mcp 2.0 renamed the camelCase result fields; this test covers both SDKs.
+    def field(obj, *names):
+        return next(getattr(obj, n) for n in names if hasattr(obj, n))
+
+    info, tools, result = asyncio.run(handshake())
+    assert field(info, "server_info", "serverInfo").name == "scopio", info
+    assert tools == EXPECTED_TOOLS, f"tool set drifted over stdio: {tools}"
+    assert field(result, "is_error", "isError"), "an unreachable microscope " \
+        "must surface as a tool error, not a crash"
+    assert "cannot reach the microscope" in result.content[0].text
+    print("registers over stdio")
+
+
 if __name__ == "__main__":
+    test_registers_over_stdio()
     test_tools()

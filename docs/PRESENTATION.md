@@ -69,41 +69,114 @@ Five nodes, all under the namespace `/scopio`, all launched by one file
 ### 2a. Graph diagram (mermaid — paste into a slide tool that renders it)
 
 ```mermaid
-flowchart LR
-  subgraph HW[Physical hardware]
-    CAM[Pi camera<br/>CSI]
-    SB[Sangaboard<br/>XYZ stage]
-    AWG[Rigol DG1022Z<br/>galvo mirrors]
-    TC[Wavelength TC10 LAB<br/>sample temperature]
+flowchart TB
+  subgraph RIG["OpenFlexure rig · the physical instrument"]
+    direction LR
+    CAM["Pi camera<br/>CSI ribbon"]
+    STG["Sangaboard<br/>XYZ stage"]
+    AWG["Rigol DG1022Z<br/>→ galvo mirrors"]
+    TC["Wavelength TC10 LAB<br/>sample temperature"]
+    RLY["Laser relay<br/>BCM GPIO17"]
   end
 
-  CS[camera_server<br/>picamera2, :8081 loopback]
+  subgraph PI["Raspberry Pi 4 · one 'docker compose up -d' · 3 services · network_mode host"]
+    direction TB
+    CS["<b>camera</b> service<br/>Debian bookworm + picamera2<br/>MJPEG :8081 — LOOPBACK ONLY, no auth"]
+    subgraph GRAPH["<b>scopio</b> service — ROS 2 Jazzy graph, namespace /scopio"]
+      direction LR
+      KN["calibration_node<br/>µm-per-px · LATCHED"]
+      CN["camera_node<br/>bridge mode"]
+      SN["stage_node"]
+      GN["galvo_node<br/>owns DG1022Z class"]
+      TN["temperature_node<br/>owns TC10LAB class"]
+      RN["relay_node<br/>plain std_srvs/SetBool"]
+    end
+    GW["<b>gateway</b> service — FastAPI + rclpy in ONE process<br/>:8000 · the only LAN-facing port · API key on every route"]
+  end
+
   CAM --> CS
+  STG -- "USB serial" --> SN
+  AWG -- "USB-TMC / VISA" --> GN
+  TC  -- "USB-TMC / VISA" --> TN
+  RLY -- "gpiozero" --> RN
+  CS  -- "MJPEG over loopback" --> CN
+  GRAPH <-. "DDS, localhost only — never faces the LAN" .-> GW
+  CS  -- "MJPEG proxy" --> GW
 
-  subgraph GRAPH["ROS 2 graph — /scopio"]
-    CN[camera_node]
-    SN[stage_node]
-    GN[galvo_node]
-    TN[temperature_node]
-    KN[calibration_node]
+  GW == "HTTP + WebSocket + MJPEG · JSON · X-API-Key<br/>lab Wi-Fi / LAN" ==> SDK
+
+  subgraph OUT["Any laptop, any OS — no ROS, no Docker, no DDS"]
+    direction TB
+    SDK["<b>scopio_client</b> — the SDK<br/>generic: call_service · subscribe · send_goal · stream_frames<br/>sugar: .stage .camera .galvo .temperature .calibration"]
+    UI["ui/ · ui_simple/<br/>Flask control panel<br/>records video locally"]
+    GD["galvo_draw/<br/>shape → arbitrary waveform<br/>owns the laser geometry"]
+    VA["viscosity_agent/<br/>LangGraph AI-scientist<br/>autonomous viscometry"]
+    MCP["scopio_mcp/<br/>197-line MCP server"]
+    SDK --> UI & GD & VA & MCP
   end
 
-  CS -- MJPEG ingest --> CN
-  SB -- serial --> SN
-  AWG -- USB-TMC / VISA --> GN
-  TC -- USB-TMC / VISA --> TN
+  MCP -- "stdio" --> LLM["Claude Code / any LLM agent"]
+  VA -- "recorded clips + real timestamps" --> VIS["viscosity/<br/>offline trackpy → MSD → Stokes–Einstein"]
+  UI -- "recordings/" --> VIS
 
-  CN -- "image/compressed" --> GW
-  CN -- "camera/state" --> GW
-  SN -- "stage/position" --> GW
-  GN -- "awg/status" --> GW
-  TN -- "temperature/status" --> GW
-  KN -- "calibration (LATCHED)" --> GW
-  KN -- "calibration (LATCHED)" --> SN
-  CN -- "srv call: stage/jog (autofocus)" --> SN
-
-  GW[gateway node<br/>rclpy + FastAPI :8000]
+  classDef pi fill:#0f3d2e,stroke:#2ea36b,color:#eaf5ef
+  classDef out fill:#1d2b3a,stroke:#5b8dd6,color:#eaf0f8
+  class CS,GW,KN,CN,SN,GN,TN,RN pi
+  class SDK,UI,GD,VA,MCP,LLM,VIS out
 ```
+
+```mermaid
+flowchart LR
+  subgraph G["/scopio"]
+    KN["calibration_node"]
+    CN["camera_node"]
+    SN["stage_node"]
+    GN["galvo_node"]
+    TN["temperature_node"]
+    RN["relay_node"]
+  end
+  GW["gateway node<br/>rclpy + FastAPI :8000"]
+
+  CN   -- "image/compressed · camera/state" --> GW
+  SN   -- "stage/position" --> GW
+  GN   -- "awg/status" --> GW
+  TN   -- "temperature/status" --> GW
+  RN   -- "relay/state · LATCHED" --> GW
+  KN   -- "calibration · LATCHED" --> GW
+  KN   -- "calibration · LATCHED" --> SN
+  CN   == "srv call: stage/jog — the ONLY node-to-node arrow" ==> SN
+
+  GW -. "services: camera/set_controls · set_framerate · white_balance<br/>stage/jog · move_abs · calibration/set<br/>awg/call · write · query · temperature/call · relay/set" .-> G
+  GW -. "actions: camera/autofocus · stage/move_path · scan_region" .-> G
+```
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant U as ui/run_ui.py (Flask, your laptop)
+  participant S as scopio_client SDK
+  participant G as gateway (FastAPI, Pi)
+  participant R as rclpy bridge (background thread)
+  participant N as stage_node
+  participant H as Sangaboard
+
+  B->>U: POST /move/up
+  U->>S: scope.stage.jog(dz=100)
+  S->>G: POST /api/v1/service/stage/jog<br/>X-API-Key, {"dz":100}
+  G->>G: constant-time key compare (hot-reloaded file)
+  G->>G: "stage/jog" → "/scopio/stage/jog"
+  G->>G: ask the LIVE graph for the type, build msg via rosidl_runtime_py
+  G->>R: call_async(request)
+  R->>N: DDS on localhost
+  N->>H: serial write, accumulate absolute position
+  N-->>R: response
+  R-->>G: call_soon_threadsafe → asyncio
+  G-->>S: JSON {success, x, y, z}
+  S-->>U: dict
+  U-->>B: JSON
+```
+
 
 ### 2b. Who is a publisher, who is a subscriber — **[SHOW THIS]**
 

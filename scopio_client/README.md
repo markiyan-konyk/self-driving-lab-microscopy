@@ -24,11 +24,13 @@ scope.galvo.write(":OUTPut1 OFF")             # raw SCPI passthrough
 scope.camera.set_controls(contrast=1.2)       # partial update, nothing clobbered
 scope.temperature.setpoint(37.0)
 scope.temperature.output(True)                # nothing heats while the TEC is off
+scope.laser.on()                              # the relay on the Pi's GPIO pin
 
 # Sense
 print(scope.stage.position())                 # latest cached telemetry
 print(scope.temperature.temperature())        # live read from the instrument
 print(scope.galvo.query("*IDN?"))             # SCPI query -> reply string
+print(scope.laser.is_on())                    # None means UNKNOWN, never "off"
 scope.subscribe("stage/position", lambda msg, env: print(msg), rate_hz=5)
 for jpeg in scope.stream_frames():            # live video, raw JPEG bytes
     open("frame.jpg", "wb").write(jpeg); break

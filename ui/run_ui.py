@@ -5,18 +5,21 @@ This program owns NO hardware and speaks NO ROS. It is the reference UI for
 the SCOPIO microscope and talks to the Pi's API gateway over plain HTTP/
 WebSocket through the scopio_client SDK:
 
-  subscribes (WS):  camera/state, stage/position, calibration
+  subscribes (WS):  camera/state, stage/position, awg/status,
+                    temperature/status, relay/state, calibration
   video (MJPEG):    /api/v1/stream.mjpg  -> live view + client-side recording
-  services (HTTP):  stage/jog, calibration/set, camera controls
+  services (HTTP):  stage/jog, calibration/set, relay/set, awg/call,
+                    temperature/call, camera white balance
   action (WS):      camera/autofocus (runs on the backend)
 
 Because it is a plain HTTP client it runs on ANY machine that can reach the
 Pi -- no Docker, no WSL2, no DDS, no firewall rules. Several people can run
 their own UI against the same microscope at once.
 
-Recording happens HERE, client-side: the ingested JPEG stream is written to
-MP4 in THIS app's own ./recordings folder, so footage lives with whoever runs
-the UI, and the Pi takes no recording/disk load.
+Recording happens HERE, client-side: the ingested JPEG stream is written to MP4
+on the machine running THIS program (folder set from the UI, default
+./recordings), so footage lives with whoever runs the UI and the Pi takes no
+recording or disk load.
 
 Run:
     pip install -r requirements.txt        # includes -e ../scopio_client
@@ -26,22 +29,21 @@ Run:
 Config comes from ui/.env (loaded automatically); a real environment variable
 overrides the file. SCOPIO_URL + SCOPIO_API_KEY are required; the key is minted
 on the Pi with ros2_ws/scripts/generate_api_key.py. Optional: SCOPIO_UI_PORT
-(8080), SCOPIO_UI_PASSWORD ("password").
+(8080), SCOPIO_UI_PASSWORD ("password"), SCOPIO_RECORDINGS_DIR.
 """
 
 import os
 import re
-import json
 import time
+import socket
 import secrets
 import logging
 import threading
-import subprocess
 from functools import wraps
 
 from flask import (
     Flask, Response, jsonify, render_template_string, request, session,
-    redirect, url_for, send_from_directory, abort,
+    redirect, url_for,
 )
 
 from scopio_client import Scopio, ScopioError
@@ -76,13 +78,15 @@ def _load_dotenv(path):
 _load_dotenv(os.path.join(HERE, ".env"))
 
 FRONTEND_DIR = os.path.join(HERE, "frontend")
-RECORDINGS_DIR = os.path.join(HERE, "recordings")
 PORT = int(os.environ.get("SCOPIO_UI_PORT", 8080))
 PASSWORD = os.environ.get("SCOPIO_UI_PASSWORD", "password")
 SCOPIO_URL = os.environ.get("SCOPIO_URL", "http://127.0.0.1:8000")
 SCOPIO_API_KEY = os.environ.get("SCOPIO_API_KEY", "")
 
-MIN_FPS, MAX_FPS = 1, 120
+# Where clips land, on THIS machine (the one running run_ui.py). Changeable
+# from the UI at runtime -- see /recordings/dir.
+recordings_dir = os.path.abspath(os.environ.get("SCOPIO_RECORDINGS_DIR")
+                                 or os.path.join(HERE, "recordings"))
 
 log = logging.getLogger("scopio_ui")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -129,7 +133,6 @@ _af_running = False
 # ---- client-side recording state ----
 _rec = {"active": False, "thread": None, "stop": threading.Event(),
         "filename": None, "started_at": None, "duration": None}
-_probe_cache = {}
 
 
 def _read(name):
@@ -138,6 +141,17 @@ def _read(name):
 
 
 # ---- background workers ----
+# topic -> State attribute, and the rate to throttle it to (None = unthrottled).
+TELEMETRY = (
+    ("camera/state", "camera", 4),
+    ("stage/position", "stage", 10),
+    ("awg/status", "awg", 2),
+    ("temperature/status", "temp", 2),
+    ("relay/state", "relay", None),
+    ("calibration", "calibration", None),
+)
+
+
 def _subscribe_loop():
     """Establish the WS subscriptions; retry until the gateway is reachable
     (so the UI comes up fine even if the Pi boots later)."""
@@ -147,23 +161,33 @@ def _subscribe_loop():
                 setattr(state, attr, msg)
         return cb
 
-    subscribed = False
+    done, warned = set(), set()
     while True:
         try:
-            if not subscribed:
-                scope.subscribe("camera/state", store("camera"), rate_hz=4)
-                scope.subscribe("stage/position", store("stage"), rate_hz=10)
-                scope.subscribe("awg/status", store("awg"), rate_hz=2)
-                scope.subscribe("relay/state", store("relay"))
-                scope.subscribe("calibration", store("calibration"))
-                # Separate try: an older backend without temperature_node must
-                # not stop the UI from getting camera/stage/galvo telemetry.
+            # One try PER topic, and never re-subscribe one that already took.
+            # A backend older than this UI (no temperature_node, no relay_node)
+            # answers `unknown_topic` for it, and letting that escape cost every
+            # OTHER topic too: the whole batch was retried every 3 s, minting a
+            # fresh subscription id each round, so the gateway piled up a
+            # duplicate rclpy subscription per topic per round while the browser
+            # showed nothing at all. Missing node => only ITS controls go dark.
+            for topic, attr, rate in TELEMETRY:
+                if topic in done:
+                    continue
                 try:
-                    scope.subscribe("temperature/status", store("temp"), rate_hz=2)
+                    scope.subscribe(topic, store(attr), rate_hz=rate)
+                    done.add(topic)
+                    log.info(f"subscribed to {topic}")
                 except ScopioError as e:
-                    log.warning(f"no temperature telemetry ({e}); controls stay offline")
-                subscribed = True
-                log.info("subscribed to microscope telemetry")
+                    # Anything that is not "that node is absent" means the link
+                    # itself is down; the handler below owns that case and says
+                    # so once, instead of once per topic every 3 s.
+                    if (e.payload or {}).get("code") != "unknown_topic":
+                        raise
+                    if topic not in warned:
+                        warned.add(topic)
+                        log.warning(f"no {topic} in the microscope graph; those "
+                                    "controls stay offline until that node appears")
             # Heartbeat. This loop used to return the moment it subscribed, so
             # `connected` was a latch: once true it stayed true through every
             # later outage, and the reason a connection failed only ever
@@ -235,31 +259,11 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    cam = _cam_dict()
     document = (_read("index.html")
                 .replace("__STYLE__", _read("style.css"))
                 .replace("__SCRIPT__", _read("app.js"))
                 .replace("__LOGO__", _read("logo.svg")))
-    return render_template_string(document, steps=steps, cam=cam,
-                                  record_duration=record_duration,
-                                  min_fps=MIN_FPS, max_fps=MAX_FPS)
-
-
-# ---- camera state helpers ----
-def _cam_dict():
-    """Current camera controls as a plain dict for the template / API."""
-    with state.lock:
-        cs = state.camera
-    if cs is None:
-        return {"red_gain": 2.4, "green_gain": 1.0, "blue_gain": 2.5, "framerate": 30,
-                "exposure": 20000, "analogue_gain": 1.0, "colour_gain": 1.0,
-                "contrast": 1.0, "saturation": 1.0, "brightness": 0.0, "sharpness": 1.0}
-    return {"red_gain": cs["red_gain"], "green_gain": cs["green_gain"],
-            "blue_gain": cs["blue_gain"], "framerate": cs["target_fps"],
-            "exposure": cs["exposure_us"], "analogue_gain": cs["analogue_gain"],
-            "colour_gain": cs["colour_gain"], "contrast": cs["contrast"],
-            "saturation": cs["saturation"], "brightness": cs["brightness"],
-            "sharpness": cs["sharpness"]}
+    return render_template_string(document, steps=steps)
 
 
 @app.route("/health")
@@ -314,7 +318,7 @@ def video_feed():
 def status():
     with state.lock:
         st = state.stage
-    return jsonify({"controller_connected": bool(st and st["connected"]),
+    return jsonify({"controller_connected": bool(st and st.get("connected")),
                     "steps": steps})
 
 
@@ -323,13 +327,13 @@ def status():
 def telemetry():
     with state.lock:
         st, cs = state.stage, state.camera
-    pos = {"x": st["x"], "y": st["y"], "z": st["z"]} if st else {"x": 0, "y": 0, "z": 0}
-    fps = round(state.stream_fps, 1) or (cs["measured_fps"] if cs else 0.0)
+    pos = {a: (st or {}).get(a, 0) for a in ("x", "y", "z")}
+    fps = round(state.stream_fps, 1) or (cs.get("measured_fps", 0.0) if cs else 0.0)
     return jsonify({
         "position": pos,
         "fps": fps,
-        "target_fps": cs["target_fps"] if cs else 0.0,
-        "controller_connected": bool(st and st["connected"]),
+        "target_fps": cs.get("target_fps", 0.0) if cs else 0.0,
+        "controller_connected": bool(st and st.get("connected")),
         # Whether the UI can reach the MICROSCOPE at all, and why not. Distinct
         # from controller_connected, which is about the stage: on a network that
         # cannot route to the Pi everything reads "not connected" with no cause,
@@ -339,60 +343,42 @@ def telemetry():
         "scope_error": state.last_error,
     })
 
-# ---- relay ----
+# ---- relay (laser) ----
 @app.route("/relay/status")
 @login_required
 def relay_status():
     with state.lock:
-        current = state.relay
+        current, live = state.relay, state.connected
+    # Gated on `live`: state.relay is a cache nothing clears, so on its own it
+    # keeps the button enabled and green on a last-known value hours after the
+    # Pi went away. The galvo and temperature boxes read that liveness from a
+    # `connected` field inside their message; a bare std_msgs/Bool has none.
+    # `on` still reports the last known value -- an unreachable laser is unknown,
+    # not off, and the button is disabled either way.
+    on = bool(current and current.get("data", False))
+    return jsonify({"available": bool(current is not None and live), "on": on})
 
-    if current is None:
-        return jsonify({
-            "available": False,
-            "on": False,
-        })
-
-    return jsonify({
-        "available": True,
-        "on": bool(current.get("data", False)),
-    })
 
 @app.route("/relay/set", methods=["POST"])
 @login_required
 def relay_set():
     body = request.get_json(silent=True) or {}
     on = body.get("on")
-
     if not isinstance(on, bool):
-        return jsonify({
-            "error": "'on' must be true or false"
-        }), 400
-
+        return jsonify({"error": "'on' must be true or false"}), 400
     try:
-        result = scope.call_service(
-            "relay/set",
-            {"data": on},
-        )
+        result = scope.call_service("relay/set", {"data": on})
     except ScopioError as exc:
-        return jsonify({
-            "error": str(exc)
-        }), 503
-
+        return jsonify({"error": str(exc)}), 503
     if not result.get("success", False):
-        return jsonify({
-            "error": result.get("message", "Relay command failed")
-        }), 503
-
-    # Update the local cache immediately. ROS telemetry will subsequently
-    # confirm the same state.
+        return jsonify({"error": result.get("message", "Relay command failed")}), 503
+    # Cache the new state so the button repaints without waiting for the topic;
+    # relay/state confirms it a moment later (and wins if the node disagrees).
     with state.lock:
         state.relay = {"data": on}
+    return jsonify({"available": True, "on": on,
+                    "message": result.get("message", "")})
 
-    return jsonify({
-        "available": True,
-        "on": on,
-        "message": result.get("message", ""),
-    })
 
 # ---- stage ----
 @app.route("/move/<direction>", methods=["GET", "POST"])
@@ -428,41 +414,11 @@ def set_step(axis, value):
     return str(steps[axis]), 200
 
 
-# ---- camera (curated gateway endpoints -> the Pi camera server) ----
-@app.route("/get_camera_controls")
-@login_required
-def get_camera_controls():
-    try:
-        return jsonify(scope.camera.get_controls())
-    except ScopioError:
-        return jsonify(_cam_dict())     # fall back to cached ROS state
-
-
-@app.route("/set_camera_controls", methods=["POST"])
-@login_required
-def set_camera_controls():
-    d = request.get_json() or {}
-    try:
-        scope.camera.set_controls(**d)
-    except ScopioError as e:
-        return str(e), 503
-    return "OK"
-
-
-@app.route("/set_framerate", methods=["POST"])
-@login_required
-def set_framerate():
-    d = request.get_json() or {}
-    fps = float(d.get("fps", 30))
-    try:
-        res = scope.camera.set_controls(framerate=fps)
-    except ScopioError as e:
-        return jsonify({"error": str(e)}), 503
-    return jsonify({"framerate": res.get("framerate", fps),
-                    "exposure": res.get("exposure", 0),
-                    "analogue_gain": res.get("analogue_gain", 1.0)})
-
-
+# ---- camera calibration (autofocus + one-shot white balance) ----
+# The per-control camera sliders are deliberately NOT here: exposure, gains and
+# frame rate are set once for a sample and then left alone, and a panel of them
+# crowded out the controls an operator actually touches. Anything that needs
+# them reaches the gateway directly (scope.camera.set_controls / the MCP tool).
 @app.route("/white_balance", methods=["POST"])
 @login_required
 def white_balance():
@@ -525,7 +481,7 @@ def get_calibration():
         c = state.calibration
     if c is None or not c.get("has_um_per_px"):
         return jsonify({"um_per_px": None})
-    return jsonify({"um_per_px": c["um_per_px"]})
+    return jsonify({"um_per_px": c.get("um_per_px")})
 
 
 @app.route("/set_calibration", methods=["POST"])
@@ -558,7 +514,7 @@ GALVO_V_MIN, GALVO_V_MAX = -5.0, 5.0
 def _galvo_connected():
     with state.lock:
         awg = state.awg
-    return bool(awg and awg["connected"])
+    return bool(awg and awg.get("connected"))
 
 
 @app.route("/galvo/status")
@@ -609,10 +565,10 @@ def _temp_payload():
     if not t:
         return {"connected": False, "temperature": None, "setpoint": None,
                 "output": False, "in_tolerance": False, "units": "C", "faults": []}
-    return {"connected": bool(t["connected"]),
-            "temperature": _num(t["temperature"]), "setpoint": _num(t["setpoint"]),
-            "output": bool(t["output"]), "in_tolerance": bool(t["in_tolerance"]),
-            "units": t["units"] or "C", "faults": list(t["faults"])}
+    return {"connected": bool(t.get("connected")),
+            "temperature": _num(t.get("temperature")), "setpoint": _num(t.get("setpoint")),
+            "output": bool(t.get("output")), "in_tolerance": bool(t.get("in_tolerance")),
+            "units": t.get("units") or "C", "faults": list(t.get("faults") or [])}
 
 
 @app.route("/temperature/status")
@@ -654,47 +610,70 @@ def temperature_output():
 
 
 # ========== Client-side recording ==========
-def _next_index():
-    os.makedirs(RECORDINGS_DIR, exist_ok=True)
-    nums = [int(m.group(1)) for n in os.listdir(RECORDINGS_DIR)
+def _next_index(folder):
+    nums = [int(m.group(1)) for n in os.listdir(folder)
             if (m := re.match(r"recording_(\d+)_", n))]
     return (max(nums) + 1) if nums else 1
 
 
 def _record_loop(path, fps, duration):
-    """Write the ingested JPEG stream to an MP4 until stopped / duration up."""
+    """Write the ingested JPEG stream to an MP4 until stopped / duration up.
+
+    ONE written frame per INGESTED frame -- it waits on jpeg_seq, exactly like
+    /video_feed. Sampling state.jpeg on a timer instead writes the same frame
+    twice when the camera runs slower than fps and skips frames when it runs
+    faster, so the clip's timebase stops matching real time. That timebase IS
+    the measurement in any motion analysis done on the footage later.
+    """
     import cv2
     import numpy as np
-    writer = None
-    interval = 1.0 / max(1.0, fps)
+    writer, written, last_seq = None, 0, -1
     start = time.time()
     try:
         while not _rec["stop"].is_set():
             if duration and time.time() - start >= duration:
                 break
             with state.lock:
-                jpeg = state.jpeg
-            if jpeg is not None:
-                frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-                if frame is not None:
-                    if writer is None:
-                        h, w = frame.shape[:2]
-                        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"),
-                                                 fps, (w, h))
-                    writer.write(frame)
-            time.sleep(interval)
+                jpeg, seq = state.jpeg, state.jpeg_seq
+            if jpeg is None or seq == last_seq:
+                time.sleep(0.005)
+                continue
+            last_seq = seq
+            frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+            if writer is None:
+                h, w = frame.shape[:2]
+                writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"),
+                                         fps, (w, h))
+                if not writer.isOpened():
+                    # VideoWriter reports this ONLY here: write() on a writer
+                    # that never opened is a silent no-op and leaves no file.
+                    log.error(f"cannot open {path} for writing; recording stopped")
+                    return
+            writer.write(frame)
+            written += 1
     finally:
         if writer is not None:
             writer.release()
-        elapsed = max(1, int(round(time.time() - start)))
-        # Rename to actual length.
-        try:
-            new = re.sub(r"_(\d+s|inf)\.mp4$", f"_{elapsed}s.mp4", path)
-            if new != path and os.path.exists(path):
-                os.rename(path, new)
-        except OSError:
-            pass
-        _rec["active"] = False
+        _finish_recording(path, written, time.time() - start)
+
+
+def _finish_recording(path, frames, elapsed):
+    """Rename the clip to the length it actually ran, and report where it is."""
+    _rec["active"] = False
+    if not frames:
+        log.warning("recording produced no frames; no file was written")
+        return
+    try:
+        new = re.sub(r"_(\d+s|inf)\.mp4$", f"_{max(1, round(elapsed))}s.mp4", path)
+        if new != path and os.path.exists(path):
+            os.rename(path, new)
+            path = new
+    except OSError:
+        pass
+    _rec["filename"] = os.path.basename(path)
+    log.info(f"saved {path}  ({frames} frames, {elapsed:.1f} s)")
 
 
 @app.route("/set_recording_setting", methods=["POST"])
@@ -712,23 +691,44 @@ def set_recording_setting():
 @app.route("/start_recording", methods=["POST"])
 @login_required
 def start_recording():
-    if _rec["active"]:
-        return jsonify({"error": "Already recording"}), 409
+    # The WRITER THREAD is the interlock, not _rec["active"]: the flag is set
+    # False by the thread as it exits, so between /stop_recording returning and
+    # the MP4 actually closing, the flag and reality disagree in both directions
+    # -- a legitimate restart was refused as "already recording", and a second
+    # writer could start while the first still held the file.
+    previous = _rec["thread"]
+    if previous is not None and previous.is_alive():
+        if not _rec["stop"].is_set():
+            return jsonify({"error": "Already recording"}), 409
+        previous.join(timeout=10.0)         # stopping: let it close the file
+        if previous.is_alive():
+            return jsonify({"error": "The previous clip is still being written"}), 409
     with state.lock:
-        cs = state.camera
-    fps = round(state.stream_fps) or (round(cs["measured_fps"] or cs["target_fps"])
-                                      if cs else 15)
-    fps = fps or 15
-    idx = _next_index()
+        cs, have_frames = state.camera, state.jpeg is not None
+    if not have_frames:
+        # Without this the writer is never created, the file never appears, and
+        # the UI counts down a recording that was never happening.
+        return jsonify({"error": "No video from the microscope yet"}), 503
+    try:
+        folder = _ensure_dir(recordings_dir)
+    except OSError as e:
+        return jsonify({"error": f"Cannot write to {recordings_dir}: {e}"}), 400
+    # Clamped: fps is the clip's TIMEBASE, and any motion analysis done on the
+    # footage later is only as good as it. A reconnect that delivers a burst of
+    # buffered frames spikes the measured rate well past anything real.
+    measured = state.stream_fps or (cs.get("measured_fps") or cs.get("target_fps")
+                                    if cs else 0)
+    fps = min(120, max(1, round(measured or 15)))
     dur = record_duration
-    name = f"recording_{idx}_{int(fps)}fps_{int(dur)}s.mp4" if dur else \
-           f"recording_{idx}_{int(fps)}fps_inf.mp4"
-    path = os.path.join(RECORDINGS_DIR, name)
+    tail = f"{int(dur)}s" if dur else "inf"
+    name = f"recording_{_next_index(folder)}_{int(fps)}fps_{tail}.mp4"
+    path = os.path.join(folder, name)
     _rec.update(active=True, filename=name, started_at=time.time(), duration=dur)
     _rec["stop"].clear()
-    _rec["thread"] = threading.Thread(target=_record_loop, args=(path, fps, dur), daemon=True)
+    _rec["thread"] = threading.Thread(target=_record_loop, args=(path, fps, dur),
+                                      daemon=True)
     _rec["thread"].start()
-    return jsonify({"filename": name, "duration": dur})
+    return jsonify({"filename": name, "path": path, "duration": dur})
 
 
 @app.route("/stop_recording", methods=["POST"])
@@ -737,7 +737,15 @@ def stop_recording():
     if not _rec["active"]:
         return jsonify({"error": "Not recording"}), 400
     _rec["stop"].set()
-    return jsonify({"message": "Recording stopped"})
+    # WAIT for the writer to close the file before answering. Returning early
+    # left /recording_status reporting "recording" for another poll or two --
+    # long enough for the browser to flip the button back to "Stop" and restart
+    # the timer -- and meant the reply could not name the file it just saved.
+    thread = _rec["thread"]
+    if thread is not None:
+        thread.join(timeout=15.0)
+    return jsonify({"message": "Recording stopped", "filename": _rec["filename"],
+                    "still_writing": bool(thread and thread.is_alive())})
 
 
 @app.route("/recording_status")
@@ -747,111 +755,38 @@ def recording_status():
     if _rec["active"] and _rec["duration"]:
         remaining = max(0, int(_rec["duration"] - (time.time() - _rec["started_at"])))
     return jsonify({"recording": _rec["active"], "duration": _rec["duration"],
-                    "remaining": remaining})
+                    "remaining": remaining, "filename": _rec["filename"]})
 
 
-# ---- recordings library (operates on THIS app's local folder) ----
-def _safe(name):
-    if not name or name != os.path.basename(name) or not name.lower().endswith(".mp4"):
-        return None
-    return name
+# ---- where clips are saved ----
+# On the machine running THIS program, not on the Pi and not in the browser:
+# the frames are ingested here, so this is the only disk they can reach. Several
+# people may each run their own UI against one microscope, and each keeps its
+# own folder.
+def _ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+    if not os.access(path, os.W_OK):
+        raise OSError("no write permission")
+    return path
 
 
-def _probe(path):
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None, None
-    key = os.path.basename(path)
-    c = _probe_cache.get(key)
-    if c and c[0] == st.st_mtime and c[1] == st.st_size:
-        return c[2], c[3]
-    duration = fps = None
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-             "stream=avg_frame_rate,nb_frames,duration", "-of", "json", path],
-            capture_output=True, text=True, timeout=20)
-        s = (json.loads(out.stdout or "{}").get("streams") or [{}])[0]
-        duration = float(s.get("duration") or 0) or None
-        nb = s.get("nb_frames")
-        if nb and duration:
-            fps = round(int(nb) / duration, 1)
-        else:
-            num, _, den = s.get("avg_frame_rate", "0/0").partition("/")
-            if den and float(den):
-                fps = round(float(num) / float(den), 1)
-    except (subprocess.SubprocessError, ValueError, json.JSONDecodeError, OSError):
-        pass
-    _probe_cache[key] = (st.st_mtime, st.st_size, duration, fps)
-    return duration, fps
-
-
-@app.route("/recordings")
+@app.route("/recordings/dir", methods=["GET", "POST"])
 @login_required
-def recordings():
-    os.makedirs(RECORDINGS_DIR, exist_ok=True)
-    items = []
-    for n in os.listdir(RECORDINGS_DIR):
-        if not n.lower().endswith(".mp4"):
-            continue
-        p = os.path.join(RECORDINGS_DIR, n)
+def recordings_dir_route():
+    global recordings_dir
+    if request.method == "POST":
+        if _rec["active"]:
+            return jsonify({"error": "Stop the recording first"}), 409
+        raw = str((request.get_json(silent=True) or {}).get("path", "")).strip()
+        if not raw:
+            return jsonify({"error": "Give a folder path"}), 400
+        path = os.path.abspath(os.path.expanduser(raw))
         try:
-            st = os.stat(p)
-        except OSError:
-            continue
-        dur, fps = _probe(p)
-        items.append({"name": n, "duration": dur, "fps": fps,
-                      "size": st.st_size, "mtime": st.st_mtime})
-    items.sort(key=lambda x: x["mtime"], reverse=True)
-    return jsonify(items)
-
-
-@app.route("/recordings/file/<path:name>")
-@login_required
-def recordings_file(name):
-    safe = _safe(name)
-    if safe is None:
-        abort(404)
-    return send_from_directory(RECORDINGS_DIR, safe, conditional=True)
-
-
-@app.route("/recordings/delete", methods=["POST"])
-@login_required
-def recordings_delete():
-    safe = _safe((request.get_json() or {}).get("name", ""))
-    if safe is None:
-        return jsonify({"error": "Invalid name"}), 400
-    try:
-        os.remove(os.path.join(RECORDINGS_DIR, safe))
-    except OSError as e:
-        return jsonify({"error": str(e)}), 404
-    _probe_cache.pop(safe, None)
-    return jsonify({"message": "deleted"})
-
-
-@app.route("/recordings/rename", methods=["POST"])
-@login_required
-def recordings_rename():
-    d = request.get_json() or {}
-    safe = _safe(d.get("name", ""))
-    if safe is None:
-        return jsonify({"error": "Invalid name"}), 400
-    base = re.sub(r"[^A-Za-z0-9 _.\-]", "", os.path.splitext(os.path.basename(d.get("new_name", "")))[0]).strip()
-    if not base:
-        return jsonify({"error": "Empty name"}), 400
-    new = base + ".mp4"
-    src = os.path.join(RECORDINGS_DIR, safe)
-    dst = os.path.join(RECORDINGS_DIR, new)
-    if not os.path.exists(src):
-        return jsonify({"error": "Not found"}), 404
-    if os.path.exists(dst) and dst != src:
-        return jsonify({"error": "A recording with that name already exists"}), 409
-    try:
-        os.rename(src, dst)
-    except OSError as e:
-        return jsonify({"error": str(e)}), 400
-    return jsonify({"name": new})
+            _ensure_dir(path)
+        except OSError as e:
+            return jsonify({"error": f"{path}: {e}"}), 400
+        recordings_dir = path
+    return jsonify({"path": recordings_dir, "host": socket.gethostname()})
 
 
 # ========== main ==========

@@ -7,8 +7,13 @@
 
         async function request(path, options = {}) {
             const response = await fetch(path, { cache: 'no-store', ...options });
-            if (!response.ok) throw new Error(await response.text() || response.statusText);
-            return response;
+            if (response.ok) return response;
+            // Unwrap {"error": ...} here, once, so every caller's catch shows the
+            // reason instead of a raw JSON blob in the message bar.
+            const body = await response.text();
+            let detail = body;
+            try { detail = JSON.parse(body).error || body; } catch (_) {}
+            throw new Error(detail || response.statusText);
         }
         const postJSON = (path, body) => request(path, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -66,7 +71,7 @@
 
         const keyMap = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', PageUp: 'page_up', PageDown: 'page_down' };
         document.addEventListener('keydown', e => {
-            if (e.key === 'Escape') { $('calibModal').classList.remove('show'); closePreview(); cancelTool(); return; }
+            if (e.key === 'Escape') { $('calibModal').classList.remove('show'); cancelTool(); return; }
             if (e.target.tagName === 'INPUT') return;
             const dir = keyMap[e.key];
             if (!dir) return;
@@ -144,17 +149,21 @@
             renderTimer();
         }
         function enterRecordingUI(remaining) { isRecording = true; recRemaining = (remaining === undefined ? null : remaining); recStartObserved = Date.now(); renderRecordState(); }
-        function exitRecordingUI(text) { isRecording = false; recRemaining = null; renderRecordState(); if (text) msg(text); loadRecordings(); }
+        function exitRecordingUI(text) { isRecording = false; recRemaining = null; renderRecordState(); if (text) msg(text); }
         async function toggleRecording() {
             if (isRecording) {
-                try { await request('/stop_recording', { method: 'POST' }); } catch (e) { msg('Stop failed: ' + e.message); }
-                exitRecordingUI('Recording stopped & saved.');
+                let saved = '';
+                // Resolves only once the file is closed, so the button never
+                // flips back to "Stop" on the next status poll.
+                try { saved = (await (await request('/stop_recording', { method: 'POST' })).json()).filename || ''; }
+                catch (e) { msg('Stop failed: ' + e.message); }
+                exitRecordingUI(saved ? 'Saved ' + saved : 'Recording stopped.');
                 return;
             }
             try {
                 const d = await (await postJSON('/start_recording', {})).json();
                 enterRecordingUI(d.duration === undefined ? null : d.duration);
-                msg('Recording ' + d.filename);
+                msg('Recording → ' + d.path);
             } catch (e) { msg('Recording failed: ' + e.message); }
         }
         recordBtn.addEventListener('click', toggleRecording);
@@ -170,62 +179,6 @@
             } catch (e) {}
         }
         setInterval(pollRecording, 2000); pollRecording();
-
-        // ============================================================
-        //  Camera controls
-        // ============================================================
-        const camMap = {
-            redGain: 'red_gain', greenGain: 'green_gain', blueGain: 'blue_gain',
-            colourGain: 'colour_gain', analogueGain: 'analogue_gain',
-            camContrast: 'contrast', camSaturation: 'saturation', camBrightness: 'brightness', camSharpness: 'sharpness',
-        };
-        let camDebounce = null;
-        function sendCameraControls() {
-            clearTimeout(camDebounce);
-            camDebounce = setTimeout(() => {
-                const body = {};
-                for (const id in camMap) body[camMap[id]] = parseFloat($(id).value);
-                postJSON('/set_camera_controls', body).catch(e => msg(e.message));
-            }, 80);
-        }
-        async function sendFramerate(fps) {
-            try {
-                const d = await (await postJSON('/set_framerate', { fps: parseInt(fps, 10) })).json();
-                setControlValue('analogueGain', d.analogue_gain, false);
-            } catch (e) { msg(e.message); }
-        }
-        const decimals = step => { const p = String(step).split('.')[1]; return p ? p.length : 0; };
-        function setControlValue(id, value, send) {
-            const sl = $(id), inp = $(id + 'Val');
-            const min = parseFloat(sl.min), max = parseFloat(sl.max), step = parseFloat(sl.step) || 1;
-            let v = Math.min(max, Math.max(min, parseFloat(value)));
-            v = parseFloat(v.toFixed(decimals(step)));
-            sl.value = v; inp.value = v;
-            if (send) (id === 'framerate' ? sendFramerate(v) : sendCameraControls());
-        }
-        function wireControl(id) {
-            const sl = $(id), inp = $(id + 'Val');
-            sl.addEventListener('input', () => { inp.value = sl.value; id === 'framerate' ? sendFramerate(sl.value) : sendCameraControls(); });
-            inp.addEventListener('change', () => setControlValue(id, inp.value, true));
-            document.querySelectorAll('.cam-step[data-slider="' + id + '"]').forEach(b => {
-                b.addEventListener('click', () => setControlValue(id, parseFloat(sl.value) + (parseFloat(sl.step) || 1) * parseInt(b.dataset.dir, 10), true));
-            });
-        }
-        ['framerate', ...Object.keys(camMap)].forEach(wireControl);
-        async function syncCameraControls() {
-            try {
-                const cam = await (await request('/get_camera_controls')).json();
-                setControlValue('framerate', cam.framerate, false);
-                for (const id in camMap) setControlValue(id, cam[camMap[id]], false);
-            } catch (e) {}
-        }
-
-        // Collapsible camera section
-        const camToggle = $('camToggle'), camBody = $('camBody');
-        camToggle.addEventListener('click', () => {
-            const collapsed = camBody.classList.toggle('collapsed');
-            camToggle.setAttribute('aria-expanded', String(!collapsed));
-        });
 
         // ============================================================
         //  Calibration (autofocus / white balance)
@@ -246,7 +199,6 @@
                 const data = await resp.json();
                 if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
                 const finished = await waitForCalibration();
-                await syncCameraControls();
                 msg(finished ? label + ' complete.' : label + ' is taking unusually long — check the server log.');
             } catch (e) { msg(label + ' failed: ' + e.message); }
             finally { autofocusBtn.disabled = false; whiteBalanceBtn.disabled = false; button.classList.remove('busy'); }
@@ -282,65 +234,30 @@
         refreshStatus(); setInterval(refreshStatus, 5000);
 
         // ============================================================
-        //  Recordings library
+        //  Where clips are saved (on the machine running this UI)
         // ============================================================
-        const previewModal = $('previewModal'), previewVideo = $('previewVideo'), previewTitle = $('previewTitle');
-        function fmtSize(b) { if (!b) return '—'; const u = ['B', 'KB', 'MB', 'GB']; let i = 0; while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; } return b.toFixed(b < 10 && i > 0 ? 1 : 0) + ' ' + u[i]; }
-        function fmtDur(s) { if (s == null) return '—'; s = Math.round(s); const m = Math.floor(s / 60), sec = s % 60; return `${m}:${String(sec).padStart(2, '0')}`; }
+        const destPath = $('destPath'), destHost = $('destHost'), destSetBtn = $('destSetBtn');
+        const destSection = document.querySelector('.dest-section');
 
-        function openPreview(name) {
-            previewTitle.textContent = name;
-            previewVideo.src = '/recordings/file/' + encodeURIComponent(name);
-            previewModal.classList.add('show');
+        function paintDest(d) {
+            if (document.activeElement !== destPath) destPath.value = d.path || '';
+            destHost.textContent = d.host ? 'on ' + d.host : '';
+            destSection.classList.add('saved');
+            setTimeout(() => destSection.classList.remove('saved'), 1200);
         }
-        function closePreview() { previewVideo.pause(); previewVideo.removeAttribute('src'); previewVideo.load(); previewModal.classList.remove('show'); }
-        $('previewClose').addEventListener('click', closePreview);
-        previewModal.addEventListener('click', e => { if (e.target === previewModal) closePreview(); });
-
-        async function loadRecordings() {
-            let items = [];
-            try { items = await (await request('/recordings')).json(); } catch (e) { return; }
-            const list = $('recordingsList');
-            list.querySelectorAll('.rec-item').forEach(n => n.remove());
-            $('recEmpty').style.display = items.length ? 'none' : '';
-            items.forEach(it => {
-                const el = document.createElement('div');
-                el.className = 'rec-item';
-
-                const del = document.createElement('button');
-                del.className = 'rec-del'; del.title = 'Delete'; del.textContent = '🗑';
-                del.addEventListener('click', async () => {
-                    if (!confirm('Delete "' + it.name + '"?')) return;
-                    try { await postJSON('/recordings/delete', { name: it.name }); loadRecordings(); }
-                    catch (e) { msg('Delete failed: ' + e.message); }
-                });
-
-                const play = document.createElement('button');
-                play.className = 'rec-play'; play.title = 'Preview'; play.textContent = '▶';
-                play.addEventListener('click', () => openPreview(it.name));
-
-                const name = document.createElement('input');
-                name.className = 'rec-name'; name.value = it.name.replace(/\.mp4$/i, ''); name.title = 'Click to rename';
-                name.addEventListener('change', async () => {
-                    try {
-                        const r = await (await postJSON('/recordings/rename', { name: it.name, new_name: name.value })).json();
-                        if (r.error) throw new Error(r.error);
-                        loadRecordings();
-                    } catch (e) { msg('Rename failed: ' + e.message); loadRecordings(); }
-                });
-                name.addEventListener('keydown', e => { if (e.key === 'Enter') name.blur(); });
-
-                const meta = document.createElement('div');
-                meta.className = 'rec-meta';
-                const fps = it.fps != null ? it.fps : '?';
-                meta.innerHTML = `⏱ <b>${fmtDur(it.duration)}</b> · <b>${fps}</b> fps · ${fmtSize(it.size)}`;
-
-                el.append(del, play, name, meta);
-                list.appendChild(el);
-            });
+        async function setDest() {
+            destSetBtn.disabled = true;
+            try {
+                const d = await (await postJSON('/recordings/dir', { path: destPath.value })).json();
+                if (d.error) throw new Error(d.error);
+                paintDest(d);
+                msg('Clips will be saved to ' + d.path);
+            } catch (e) { msg('Folder not usable: ' + e.message); }
+            finally { destSetBtn.disabled = false; }
         }
-        loadRecordings();
-        setInterval(loadRecordings, 15000);
+        destSetBtn.addEventListener('click', setDest);
+        destPath.addEventListener('keydown', e => { if (e.key === 'Enter') setDest(); });
+        request('/recordings/dir').then(r => r.json()).then(paintDest).catch(() => {});
 
         // ============================================================
         //  Calibration + Measure tools (overlay on the video)
@@ -573,68 +490,53 @@
         // ============================================================
         //  GPIO laser relay
         // ============================================================
-        const laserToggleBtn = $('laserToggleBtn');
+        const laserToggleBtn = $('laserToggleBtn'), laserNote = $('laserNote');
+        const laserState = laserToggleBtn.querySelector('.laser-state');
+        let laserOn = false, laserAvailable = false, laserBusy = false;
 
-        let laserOn = false;
-        let laserAvailable = false;
-        let laserBusy = false;
-
-        function paintLaserButton() {
+        function paintLaser() {
             laserToggleBtn.disabled = !laserAvailable || laserBusy;
             laserToggleBtn.classList.toggle('on', laserOn);
-            laserToggleBtn.textContent = laserOn ? 'Laser ON' : 'Laser OFF';
-            laserToggleBtn.setAttribute(
-                'aria-pressed',
-                laserOn ? 'true' : 'false'
-            );
+            laserState.textContent = laserOn ? 'ON' : 'OFF';
+            laserToggleBtn.setAttribute('aria-pressed', laserOn ? 'true' : 'false');
+            laserToggleBtn.title = laserAvailable ? 'Switch the laser relay'
+                : 'Laser relay offline — this is the last state it reported';
+            // Offline is UNKNOWN, not off: say so rather than showing a calm OFF.
+            laserNote.textContent = !laserAvailable
+                ? (laserOn ? 'Relay offline — assume LIVE' : 'Relay offline')
+                : (laserOn ? 'Relay energised' : 'Relay open');
+            laserNote.classList.toggle('armed', laserOn);
         }
 
-        async function refreshLaserState() {
+        // Never polls over a toggle in flight: it reads a cache the POST has not
+        // written yet, and its await can land AFTER the click handler repaints,
+        // putting the pre-toggle state back under a laser that just changed.
+        async function pollLaser() {
+            if (laserBusy) return;
             try {
-                const response = await request('/relay/status');
-                const result = await response.json();
-
-                laserAvailable = !!result.available;
-                laserOn = !!result.on;
-            } catch (error) {
-                laserAvailable = false;
-                laserOn = false;
+                const d = await (await request('/relay/status')).json();
+                laserAvailable = !!d.available; laserOn = !!d.on;
             }
-
-            paintLaserButton();
+            // laserOn is deliberately left alone: unreachable is unknown, not off.
+            catch (e) { laserAvailable = false; }
+            paintLaser();
         }
 
         laserToggleBtn.addEventListener('click', async () => {
             if (!laserAvailable || laserBusy) return;
-
-            laserBusy = true;
-            paintLaserButton();
-
+            laserBusy = true; paintLaser();
             try {
-                const response = await postJSON('/relay/set', {
-                    on: !laserOn
-                });
-
-                const result = await response.json();
-
-                laserAvailable = !!result.available;
-                laserOn = !!result.on;
-
-                msg(laserOn ? 'Laser switched ON' : 'Laser switched OFF');
-            } catch (error) {
-                msg('Laser control failed: ' + error.message);
-
-                // Read the real state again if the command failed.
-                await refreshLaserState();
-            } finally {
-                laserBusy = false;
-                paintLaserButton();
+                const d = await (await postJSON('/relay/set', { on: !laserOn })).json();
+                laserAvailable = !!d.available; laserOn = !!d.on;
+                msg(laserOn ? 'Laser switched ON.' : 'Laser switched OFF.');
             }
+            // No re-read here: the state is now unknown, the poll below resyncs
+            // within 2 s, and the button keeps showing the last state we know of.
+            catch (e) { msg('Laser control failed: ' + e.message); }
+            finally { laserBusy = false; paintLaser(); }
         });
 
-        // Read the initial state and keep it synchronized with ROS.
-        refreshLaserState();
-        setInterval(refreshLaserState, 2000);
+        setInterval(pollLaser, 2000); pollLaser();
 
         // ============================================================
         //  Sample temperature  (Wavelength TC10 LAB)
