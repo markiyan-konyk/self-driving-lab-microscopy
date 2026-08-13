@@ -449,15 +449,19 @@
         const galvoUpdateBtn = $('galvoUpdateBtn'), galvoReadout = $('galvoReadout');
         const galvoSection = document.querySelector('.galvo-section'), galvoStatusEl = $('galvoStatus');
         let galvoConnected = false;
+        // The operator has staged a value that has not been sent yet. While
+        // this is set, polling must NOT overwrite the controls -- that would
+        // delete what they were in the middle of typing.
+        let galvoStaged = false;
 
         const clampGalvo = v => { v = parseFloat(v); return isFinite(v) ? Math.max(-5, Math.min(5, v)) : 0; };
         function stageGalvo(slider, box, v) { v = clampGalvo(v); slider.value = v; box.value = v.toFixed(2); }
 
         // Slider drag -> update the paired number box only (no network traffic).
-        galvoX.addEventListener('input', () => { galvoXVal.value = clampGalvo(galvoX.value).toFixed(2); });
-        galvoY.addEventListener('input', () => { galvoYVal.value = clampGalvo(galvoY.value).toFixed(2); });
-        galvoXVal.addEventListener('change', () => stageGalvo(galvoX, galvoXVal, galvoXVal.value));
-        galvoYVal.addEventListener('change', () => stageGalvo(galvoY, galvoYVal, galvoYVal.value));
+        galvoX.addEventListener('input', () => { galvoXVal.value = clampGalvo(galvoX.value).toFixed(2); galvoStaged = true; });
+        galvoY.addEventListener('input', () => { galvoYVal.value = clampGalvo(galvoY.value).toFixed(2); galvoStaged = true; });
+        galvoXVal.addEventListener('change', () => { stageGalvo(galvoX, galvoXVal, galvoXVal.value); galvoStaged = true; });
+        galvoYVal.addEventListener('change', () => { stageGalvo(galvoY, galvoYVal, galvoYVal.value); galvoStaged = true; });
 
         function setGalvoStatus(connected) {
             galvoConnected = !!connected;
@@ -475,15 +479,29 @@
                 const d = await (await postJSON('/galvo/update', { x, y })).json();
                 if (d.error) throw new Error(d.error);
                 setGalvoStatus(d.connected);
-                galvoReadout.textContent = `CH1 ${x.toFixed(2)} V · CH2 ${y.toFixed(2)} V`;
+                galvoStaged = false;          // sent: polling owns the controls again
+                paintGalvoPosition(d.x, d.y);
                 msg('Galvo updated.');
             } catch (e) { msg('Galvo update failed: ' + e.message); }
             finally { galvoUpdateBtn.disabled = !galvoConnected; }
         });
 
+        function paintGalvoPosition(x, y) {
+            stageGalvo(galvoX, galvoXVal, x);
+            stageGalvo(galvoY, galvoYVal, y);
+            galvoReadout.textContent = `CH1 ${clampGalvo(x).toFixed(2)} V · CH2 ${clampGalvo(y).toFixed(2)} V`;
+        }
+
         async function pollGalvo() {
-            try { setGalvoStatus((await (await request('/galvo/status')).json()).connected); }
-            catch (e) { setGalvoStatus(false); }
+            try {
+                const d = await (await request('/galvo/status')).json();
+                setGalvoStatus(d.connected);
+                // Show where the mirrors REALLY are. An agent over MCP, or a
+                // second UI, moves the same instrument; before this the sliders
+                // only ever showed what this browser had commanded, so the panel
+                // and the hardware quietly drifted apart.
+                if (!galvoStaged && d.x != null) paintGalvoPosition(d.x, d.y);
+            } catch (e) { setGalvoStatus(false); }
         }
         setInterval(pollGalvo, 3000); pollGalvo();
 

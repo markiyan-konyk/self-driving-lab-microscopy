@@ -153,17 +153,25 @@ class DG1022Z:
         self.xpos = self.ypos = 0.0      # what we just wrote IS the zero position
 
     def offsets(self, x=None, y=None):
-        """The per-axis trim that centres each mirror, in volts. Read it with no
-        arguments. Every update()/move()/sininit() position is relative to it."""
-        if x is None and y is None:
-            return {"x": self.xoffset, "y": self.yoffset}
+        """Read (no arguments) or set the per-axis trim that centres each mirror,
+        in volts. This is the ZERO of the position scale: update(1, 0) parks the
+        X mirror at xoffset volts, not at 0 V on the connector. Returns the pair
+        either way, so a write needs no read-back to confirm."""
         if x is not None:
             self.xoffset = float(x)
         if y is not None:
             self.yoffset = float(y)
+        return {"x": self.xoffset, "y": self.yoffset}
 
     def update(self, ch: int, val: float):
-        """Jump a mirror to a position in volts, on top of its calibrated offset."""
+        """Jump ONE mirror to a position: ch 1 = X, ch 2 = Y; val in volts.
+
+        `val` is a DEFLECTION measured from the calibrated centre, not a raw
+        connector voltage: the driver writes val + that axis's offset (see
+        offsets()). So val=0 means "centred", which is 0 V only when the offset
+        is 0. Returns the resulting {x, y} position, so a caller never needs a
+        second call to check the write landed.
+        """
         val = float(val)
         if ch == 1:
             self.xpos, out = val, val + self.xoffset
@@ -172,19 +180,29 @@ class DG1022Z:
         else:
             raise ValueError(f"channel must be 1 (X) or 2 (Y), got {ch}")
         self.command(f":SOURce{ch}:VOLTage:OFFSet {out:.3f}")
+        return self.position()
 
     def position(self):
-        """Where the mirrors were last commanded to, in volts."""
+        """Both mirrors as {x, y} deflections in volts (ch 1 = X, ch 2 = Y).
+
+        This is where they were last COMMANDED to, held by the node that owns
+        the instrument -- so it reflects every client's writes, not just yours.
+        The DG1022Z has no true position readback; a hand on the front panel is
+        the one thing this cannot see. (For the raw connector voltage including
+        the offset, query offset(ch) instead -- that one does hit the wire.)
+        """
         return {"x": self.xpos, "y": self.ypos}
 
     def move(self, ch: int, endval: float, t: float = 1.0, steps: int = 60):
-        """Ramp a mirror to a position over t seconds instead of jumping there."""
+        """Ramp one mirror to a position over t seconds instead of jumping there.
+        Same axes and offset convention as update(); returns the final {x, y}."""
         start = self.xpos if ch == 1 else self.ypos
         steps = max(1, int(steps))
         dwell = max(0.0, float(t)) / steps
         for i in range(1, steps + 1):
             self.update(ch, start + (float(endval) - start) * i / steps)
             time.sleep(dwell)
+        return self.position()
 
     def sininit(self, freq=None, amp=None, phase=None):
         """Start both mirrors scanning: a sine on each channel about its current

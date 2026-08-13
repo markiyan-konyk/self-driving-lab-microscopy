@@ -92,14 +92,25 @@ log = logging.getLogger("scopio_ui")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
 
 
-# Screen-direction -> stage displacement, mirrors the backend's convention
-# (camera mounted 90 deg to the stage: screen up/down = stage X, left/right = Y).
+# Screen direction -> stage displacement.
+#
+# THIS IS A MOUNTING CALIBRATION, not a fact about the software: it encodes how
+# the camera is rotated and flipped relative to the stage on THIS rig. Remount
+# the camera and it has to be re-derived. To do that, jog one axis at a time and
+# write down which way the picture goes:
+#
+#   observed on this rig:  +x -> picture LEFT     +y -> picture UP
+#                          -x -> picture RIGHT    -y -> picture DOWN
+#
+# then give each button the delta that produces the direction it is named after,
+# which is what the table below is. (Before this it was a quarter turn out: "up"
+# panned left and "right" panned up.) Z is unaffected -- it is focus, not pan.
 def dir_delta(direction, steps):
     return {
-        "up":        (steps["x"], 0, 0),
-        "down":      (-steps["x"], 0, 0),
-        "left":      (0, -steps["y"], 0),
-        "right":     (0, steps["y"], 0),
+        "up":        (0, steps["y"], 0),
+        "down":      (0, -steps["y"], 0),
+        "left":      (steps["x"], 0, 0),
+        "right":     (-steps["x"], 0, 0),
         "page_up":   (0, 0, steps["z"]),
         "page_down": (0, 0, -steps["z"]),
     }.get(direction)
@@ -520,7 +531,21 @@ def _galvo_connected():
 @app.route("/galvo/status")
 @login_required
 def galvo_status():
-    return jsonify({"connected": _galvo_connected(), "x": _galvo["x"], "y": _galvo["y"]})
+    """Where the mirrors ACTUALLY are, not where this UI last put them.
+
+    The node owns the one driver object every client's writes go through, so its
+    position() reflects an agent over MCP or a second UI just as much as us. It
+    is local bookkeeping, not a query -- no SCPI reaches the instrument, so
+    polling it every few seconds costs the shared USB session nothing.
+    """
+    connected = _galvo_connected()
+    if connected:
+        try:
+            pos = scope.galvo.call("position")
+            _galvo["x"], _galvo["y"] = float(pos["x"]), float(pos["y"])
+        except (ScopioError, KeyError, TypeError, ValueError):
+            pass          # awg/status stays the authority on being connected
+    return jsonify({"connected": connected, "x": _galvo["x"], "y": _galvo["y"]})
 
 
 @app.route("/galvo/update", methods=["POST"])

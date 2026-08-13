@@ -23,7 +23,7 @@ import test_scopio_client as mock  # noqa: E402
 EXPECTED_TOOLS = {
     "describe_instrument", "status", "call_service", "send_goal", "stage_move",
     "camera_controls", "grab_frame", "white_balance", "focus_metric",
-    "record_clip", "instrument_call", "laser", "galvo_scpi",
+    "record_clip", "instrument_call", "temperature", "laser", "galvo_scpi",
 }
 
 
@@ -58,7 +58,12 @@ def test_tools():
     # -- drilling in: a ROS interface by name, an instrument by name
     assert server.describe_instrument("stage/jog")["kind"] == "service"
     assert server.describe_instrument("/scopio/stage/jog")["name"] == "stage/jog"
-    assert server.describe_instrument("temperature")["methods"] == 36.6
+    detail = server.describe_instrument("temperature")
+    assert detail["methods"] == 36.6
+    # The axis/channel mapping and the setpoint-vs-output split live HERE, not
+    # only in the index: an agent that drills straight in must still see them.
+    assert "CH1 = X" in server.describe_instrument("galvo")["what"]
+    assert "output is a separate switch" in detail["what"].replace("TEC ", "")
     #    the mock's galvo is "offline": degrade to a message, never blow up
     assert "offline" in server.describe_instrument("galvo")["error"]
     try:
@@ -69,6 +74,13 @@ def test_tools():
 
     assert server.status()["health"]["ok"] is True
     assert server.status()["telemetry"]["stage/position"]["msg"]["x"] == 1
+
+    # -- "set the sample to 20 C" must also DRIVE it, not just store a number
+    assert server.temperature(celsius=20.0)["output_on"] is None  # mock: no telemetry
+    assert mock.state["temperature_calls"][-2:] == [
+        ("set_setpoint", [20.0]), ("output", [True])], mock.state["temperature_calls"]
+    server.temperature(enable=False)
+    assert mock.state["temperature_calls"][-1] == ("output", [False])
 
     # -- the laser: an unknown relay state is None (unknown), never False
     assert server.laser() == {"on": True}

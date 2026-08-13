@@ -67,9 +67,12 @@ def test_usb_vid():
 # ------------------------------------------------------------- galvo moves
 def test_update_applies_offset_and_validates_channel():
     gen = awg()
-    gen.offsets(x=0.25, y=-0.10)
-    gen.update(1, 1.0)
-    gen.update(2, 1.0)
+    assert gen.offsets(x=0.25, y=-0.10) == {"x": 0.25, "y": -0.10}
+    # A mutation that returns nothing costs its caller a whole extra round trip
+    # just to find out whether it landed -- so every galvo write reports the
+    # position it produced.
+    assert gen.update(1, 1.0) == {"x": 1.0, "y": 0.0}
+    assert gen.update(2, 1.0) == {"x": 1.0, "y": 1.0}
     assert gen.position() == {"x": 1.0, "y": 1.0}
     assert gen.device.writes == [":SOURce1:VOLTage:OFFSet 1.250",
                                  ":SOURce2:VOLTage:OFFSet 0.900"]

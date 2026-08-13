@@ -9,6 +9,7 @@ convention, SCPI success/failure unwrapping, MJPEG frame splitting, stream
 close, and the WebSocket subscribe/action/reconnect paths.
 """
 
+import json
 import socket
 import threading
 import time
@@ -27,7 +28,8 @@ N_FRAMES = 5
 app = FastAPI()
 # "jpeg" is swappable so scopio_mcp's test can serve a real, decodable image.
 state = {"drop_ws_after_message": False, "reject_ws": False,
-         "controls": {"contrast": 1.0}, "jpeg": JPEG}
+         "controls": {"contrast": 1.0}, "jpeg": JPEG,
+         "temperature_calls": []}
 
 
 def _auth(request):
@@ -73,6 +75,11 @@ async def service(path: str, request: Request, body: dict = Body(default={})):
     if path == "awg/call":
         return {"success": False, "result": "", "error": "instrument offline"}
     if path == "temperature/call":
+        # Recorded so a caller can assert WHICH driver methods it drove, in
+        # order -- a setpoint written without the output switched on heats
+        # nothing, and that is invisible in the return value.
+        state["temperature_calls"].append(
+            (body.get("method"), json.loads(body.get("args") or "[]")))
         return {"success": True, "result": "36.6", "error": ""}
     raise HTTPException(404, f"No such service in the graph: {path}")
 

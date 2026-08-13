@@ -96,6 +96,24 @@ def test_a_second_recording_cannot_start_over_the_first():
         assert len([f for f in os.listdir(tmp) if f.endswith(".mp4")]) == 2
 
 
+def test_each_jog_button_pans_the_way_it_is_labelled():
+    """Measured on the rig: +x pans the picture LEFT and +y pans it UP (the
+    camera is mounted turned relative to the stage). Every button must therefore
+    command the delta that produces the direction it is named after -- this was
+    a quarter turn out, so "up" panned left and "right" panned up."""
+    picture = {(1, 0): "left", (-1, 0): "right", (0, 1): "up", (0, -1): "down"}
+    steps = {"x": 40, "y": 40, "z": 40}
+    for button in ("up", "down", "left", "right"):
+        dx, dy, dz = run_ui.dir_delta(button, steps)
+        assert dz == 0, f"{button} must not touch focus"
+        moved = picture[(0 if not dx else dx // abs(dx), 0 if not dy else dy // abs(dy))]
+        assert moved == button, f"pressing {button} pans {moved}"
+    # Focus is the other axis entirely, and is not part of the rotation.
+    assert run_ui.dir_delta("page_up", steps) == (0, 0, 40)
+    assert run_ui.dir_delta("page_down", steps) == (0, 0, -40)
+    assert run_ui.dir_delta("sideways", steps) is None
+
+
 def test_the_recording_folder_is_validated():
     app = run_ui.app.test_client()
     with app.session_transaction() as s:

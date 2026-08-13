@@ -38,10 +38,15 @@ NS = "/scopio/"                   # the gateway reports full ROS names
 # the cached telemetry snapshot, so the index costs the instruments nothing.
 INSTRUMENTS = {
     "galvo": ("awg/status",
-              "Rigol DG1022Z arbitrary-waveform generator; CH1/CH2 steer the "
-              "galvo mirrors of the optical tweezers"),
+              "Rigol DG1022Z arbitrary-waveform generator steering the optical "
+              "tweezers' galvo mirrors. CH1 = X mirror, CH2 = Y mirror. Mirror "
+              "positions are DEFLECTIONS in volts from a calibrated centre, so "
+              "0 means centred, not 0 V on the connector (see offsets())."),
     "temperature": ("temperature/status",
-                    "Wavelength TC10 LAB sample-temperature controller (TEC)"),
+                    "Wavelength TC10 LAB sample-temperature controller. Setting "
+                    "a setpoint does NOT heat or cool: the TEC output is a "
+                    "separate switch. Use the `temperature` tool, which does "
+                    "both."),
 }
 
 INSTRUCTIONS = """\
@@ -51,7 +56,17 @@ ROS 2 graph, and these tools reach it over an HTTP gateway.
 Start with describe_instrument() -- it is a live capability map, not a fixed
 menu, so it is authoritative even for hardware added after this server shipped.
 
-Three things worth knowing before you drive it:
+What this microscope does NOT have, so you do not go looking:
+  * No zoom and no magnification control. The objective is fixed. `dz` on
+    stage_move is FOCUS -- it moves the stage along the optical axis; it does
+    not make anything bigger. To see a smaller region, you crop the image.
+  * No stage readback in micrometres unless a scale is calibrated; positions
+    are Sangaboard steps.
+  * No galvo position readback from the instrument. `position()` is the last
+    commanded value, held by the node, so it does reflect what OTHER clients
+    (the web UI, another agent) have done -- but not a hand on the front panel.
+
+And three about driving it:
   * The Pi senses and effects; it never analyses. record_clip writes frames to
     YOUR working directory and you analyse them with your own code.
   * Use the MEASURED fps record_clip returns for any timing, never the
@@ -159,13 +174,17 @@ def describe_instrument(subject: Optional[str] = None) -> dict:
     name, _, query = key.partition(".")
     ns = _instrument(name)
     if ns is not None:
+        # `what` travels with the detail, not just the index: an agent that
+        # drills straight in here otherwise has to infer the axis-to-channel
+        # mapping from the method list, and none of the ~130 docstrings says it.
+        what = INSTRUMENTS[name][1]
         try:
             methods = ns.methods()
         except ScopioError as exc:
-            return {"instrument": name, "error": str(exc)}
+            return {"instrument": name, "what": what, "error": str(exc)}
         if query:
             methods = [m for m in methods if query.lower() in m["name"].lower()]
-        return {"instrument": name, "methods": methods,
+        return {"instrument": name, "what": what, "methods": methods,
                 "call_with": f"instrument_call('{name}', '<method>', args=[...])"}
 
     for kind in ("services", "topics", "actions"):
@@ -207,7 +226,12 @@ def send_goal(action: str, goal: Optional[dict] = None,
 def stage_move(dx: int = 0, dy: int = 0, dz: int = 0,
                absolute: bool = False) -> dict:
     """Move the stage, in Sangaboard steps. Relative by default; with
-    absolute=True, dx/dy/dz are the target coordinates."""
+    absolute=True, dx/dy/dz are the target coordinates.
+
+    dx/dy pan across the sample; dz is FOCUS -- it moves along the optical axis.
+    There is no zoom or magnification control on this microscope, so dz is not
+    a substitute for one: it changes what is sharp, never how big it is. To
+    focus without hunting by hand, use send_goal('camera/autofocus')."""
     st = scope().stage
     return st.move_abs(dx, dy, dz) if absolute else st.jog(dx, dy, dz)
 
@@ -279,6 +303,39 @@ def instrument_call(instrument: str, method: str, args: Optional[list] = None,
     if ns is None:
         raise ValueError("instrument must be 'galvo' or 'temperature'")
     return ns.call(method, *(args or []), **(kwargs or {}))
+
+
+@mcp.tool()
+def temperature(celsius: Optional[float] = None,
+                enable: Optional[bool] = None) -> dict:
+    """Read the sample temperature, or drive it to a setpoint.
+
+    The instrument splits this in two -- a setpoint is only a stored number, and
+    the TEC heats or cools nothing until its output is switched on. This tool
+    does NOT split it: `temperature(celsius=20)` sets the setpoint AND enables
+    the output, because "set the sample to 20 C" means make it be 20 C. Pass
+    enable=False to stage a setpoint without driving it, or call
+    temperature(enable=False) alone to stop driving and leave the setpoint.
+
+    With no arguments it only reads, from cached telemetry -- free, and safe to
+    poll. Reaching a setpoint takes minutes, and the sample lags the sensor:
+    watch `in_tolerance`, then dwell before you trust the number.
+    """
+    tc = scope().temperature
+    if celsius is not None:
+        tc.setpoint(float(celsius))
+    if enable is None:
+        enable = celsius is not None        # asking for a temperature means drive it
+    if celsius is not None or enable is False:
+        tc.output(bool(enable))
+    state = tc.status() or {}
+    return {"temperature": state.get("temperature"),
+            "setpoint": state.get("setpoint"),
+            "output_on": state.get("output"),
+            "in_tolerance": state.get("in_tolerance"),
+            "faults": state.get("faults") or [],
+            "note": "status is cached telemetry and lags a write by up to a "
+                    "second; poll again rather than re-writing."}
 
 
 @mcp.tool()
