@@ -3,7 +3,10 @@
         const statusEl = $('status');
         const mobileStatus = $('mobileStatus');
         const msg = t => { messageDiv.textContent = t; };
-        const NATIVE_W = 640, NATIVE_H = 480;
+        // The frame the camera is actually delivering. NOT a constant: switching
+        // sensor mode changes it, and every overlay coordinate and the whole
+        // measurement scale are expressed in these pixels.
+        let NATIVE_W = 640, NATIVE_H = 480;
 
         async function request(path, options = {}) {
             const response = await fetch(path, { cache: 'no-store', ...options });
@@ -215,7 +218,6 @@
                 $('posX').textContent = d.position.x;
                 $('posY').textContent = d.position.y;
                 $('posZ').textContent = d.position.z;
-                $('fpsVal').textContent = d.fps ? d.fps.toFixed(1) : '—';
             } catch (e) {}
         }
         setInterval(pollTelemetry, 1000); pollTelemetry();
@@ -266,7 +268,7 @@
         const streamImg = $('stream'), toolBanner = $('toolBanner');
         const calibrateBtn = $('calibrateBtn'), measureBtn = $('measureBtn');
         const scaleReadout = $('scaleReadout'), measureResult = $('measureResult');
-        let calibration = { um_per_px: null };
+        let calibration = { um_per_px: null, um_per_px_width: 0 };
         let tool = null;            // 'calibrate' | 'measure' | 'review' | null
         let points = [];            // native-pixel coords {x,y}
         let frozenCanvas = null;
@@ -297,11 +299,20 @@
             const nf = f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10;
             return nf * Math.pow(10, exp);
         }
+        // Micrometres per pixel OF THE FRAME WE HAVE NOW. The stored scale
+        // belongs to the resolution it was measured at, so switching sensor mode
+        // changes it by exactly the width ratio -- same slide, fewer/more pixels.
+        function umPerPx() {
+            if (!calibration.um_per_px) return null;
+            const at = calibration.um_per_px_width || NATIVE_W;
+            return calibration.um_per_px * at / NATIVE_W;
+        }
         function drawScaleBar(rect) {
+            const upp = umPerPx();
             const targetDisp = rect.cw * 0.18;
-            const targetUm = (targetDisp / rect.scale) * calibration.um_per_px;
+            const targetUm = (targetDisp / rect.scale) * upp;
             const um = niceNumber(targetUm);
-            const dispLen = (um / calibration.um_per_px) * rect.scale;
+            const dispLen = (um / upp) * rect.scale;
             const x0 = rect.ox + 16, y0 = rect.oy + rect.ch - 18;
             octx.strokeStyle = '#fff'; octx.fillStyle = '#fff'; octx.lineWidth = 3;
             octx.beginPath();
@@ -331,16 +342,23 @@
                 octx.fillStyle = 'rgba(6,14,10,.28)';
                 octx.fillRect(rect.ox, rect.oy, rect.cw, rect.ch);
             }
-            if (calibration.um_per_px) drawScaleBar(rect);
+            if (umPerPx()) drawScaleBar(rect);
             if (points.length) drawMeasure(rect);
         }
 
-        function freezeFrame() {
-            frozenCanvas = document.createElement('canvas');
-            frozenCanvas.width = NATIVE_W; frozenCanvas.height = NATIVE_H;
-            try { frozenCanvas.getContext('2d').drawImage(streamImg, 0, 0, NATIVE_W, NATIVE_H); }
-            catch (e) { frozenCanvas = null; }
+        // The newest frame as a canvas: the frozen still if the view is held,
+        // otherwise the live <img>. Everything that needs pixels -- the measuring
+        // tools' dimmed backdrop, the screenshot -- goes through here, so they
+        // all capture the SAME frame the operator is looking at.
+        function currentFrame() {
+            const src = held ? heldCanvas : streamImg;
+            const c = document.createElement('canvas');
+            c.width = NATIVE_W; c.height = NATIVE_H;
+            try { c.getContext('2d').drawImage(src, 0, 0, NATIVE_W, NATIVE_H); }
+            catch (e) { return null; }
+            return c;
         }
+        function freezeFrame() { frozenCanvas = currentFrame(); }
         function setBanner(text) { toolBanner.textContent = text; toolBanner.classList.toggle('show', !!text); }
 
         function startTool(which) {
@@ -381,8 +399,9 @@
                 $('calibUm').focus();
             } else {
                 let txt = `${px.toFixed(1)} px`;
-                if (calibration.um_per_px) {
-                    const um = px * calibration.um_per_px;
+                const upp = umPerPx();
+                if (upp) {
+                    const um = px * upp;
                     txt += um >= 1000 ? ` · ${(um / 1000).toFixed(3)} mm` : ` · ${um.toFixed(2)} µm`;
                 } else {
                     txt += ' · (not calibrated)';
@@ -401,7 +420,10 @@
             const um = parseFloat($('calibUm').value);
             if (!(um > 0)) { $('calibUm').focus(); return; }
             try {
-                const rec = await (await postJSON('/set_calibration', { pixels: pendingCalibPx, micrometres: um })).json();
+                // The width travels WITH the scale -- without it the number is
+                // unconvertible the moment the sensor mode changes.
+                const rec = await (await postJSON('/set_calibration',
+                    { pixels: pendingCalibPx, micrometres: um, width: NATIVE_W })).json();
                 if (rec.error) throw new Error(rec.error);
                 calibration = rec;
                 updateScaleReadout();
@@ -413,12 +435,10 @@
         $('calibUm').addEventListener('keydown', e => { if (e.key === 'Enter') $('calibSave').click(); });
 
         function updateScaleReadout() {
-            if (calibration.um_per_px) {
-                scaleReadout.textContent = `Scale: ${calibration.um_per_px.toFixed(4)} µm/px`
-                    + (calibration.ref_micrometres ? `  (${calibration.ref_micrometres} µm = ${calibration.ref_pixels.toFixed(0)} px)` : '');
-            } else {
-                scaleReadout.textContent = 'Not calibrated';
-            }
+            const upp = umPerPx();
+            scaleReadout.textContent = upp
+                ? `Scale: ${upp.toFixed(4)} µm/px  at ${NATIVE_W}×${NATIVE_H}`
+                : 'Not calibrated';
             drawOverlay();
         }
 
@@ -436,6 +456,83 @@
         streamImg.addEventListener('load', resizeOverlay);
         loadCalibration();
         resizeOverlay();
+
+        // ============================================================
+        //  Freeze / screenshot
+        // ============================================================
+        // Freeze is a VIEWING hold, not a capture control: the stream keeps
+        // arriving and recording keeps writing every frame. It just stops the
+        // picture moving so you can measure something on it.
+        const freezeBtn = $('freezeBtn'), shotBtn = $('shotBtn');
+        const heldCanvas = $('heldFrame'), heldCtx = heldCanvas.getContext('2d');
+        let held = false;
+
+        function setHeld(on) {
+            if (on) {
+                heldCanvas.width = NATIVE_W; heldCanvas.height = NATIVE_H;
+                try { heldCtx.drawImage(streamImg, 0, 0, NATIVE_W, NATIVE_H); }
+                catch (e) { msg('No frame to freeze yet.'); return; }
+            }
+            held = on;
+            heldCanvas.classList.toggle('show', held);
+            freezeBtn.classList.toggle('armed', held);
+            freezeBtn.textContent = held ? 'Live' : 'Freeze';
+            setBanner(held ? 'Frame held — press Live to resume' : '');
+        }
+        freezeBtn.addEventListener('click', () => setHeld(!held));
+
+        shotBtn.addEventListener('click', async () => {
+            const frame = currentFrame();
+            if (!frame) { msg('No frame to save yet.'); return; }
+            // Burn the overlay in: a screenshot with its own scale bar and
+            // measurement on it is a lab record; one without is just a picture.
+            try { frame.getContext('2d').drawImage(overlay, 0, 0, NATIVE_W, NATIVE_H); }
+            catch (e) {}
+            shotBtn.disabled = true;
+            try {
+                const blob = await new Promise(r => frame.toBlob(r, 'image/jpeg', 0.95));
+                const d = await (await request('/screenshot', {
+                    method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob
+                })).json();
+                msg('Saved ' + d.filename);
+            } catch (e) { msg('Screenshot failed: ' + e.message); }
+            finally { shotBtn.disabled = false; }
+        });
+
+        // ============================================================
+        //  Sensor mode (resolution vs frame rate)
+        // ============================================================
+        const modeReadout = $('modeReadout');
+        const modeBtns = [...document.querySelectorAll('.mode-btn')];
+
+        function paintMode(d) {
+            const spec = (d.modes || {})[d.mode] || {};
+            modeBtns.forEach(b => {
+                b.classList.toggle('active', b.dataset.mode === d.mode);
+                b.disabled = !(d.modes || {})[b.dataset.mode];
+            });
+            if (d.width) {
+                // Every overlay coordinate is in these pixels, and so is the
+                // scale, so the change has to reach both before the next draw.
+                NATIVE_W = d.width; NATIVE_H = d.height;
+                resizeOverlay(); updateScaleReadout();
+            }
+            modeReadout.textContent = d.width
+                ? `${d.width}×${d.height} · ${spec.fps || '?'} fps`
+                  + (spec.full_fov === false ? ' · cropped' : '')
+                : '—';
+        }
+        modeBtns.forEach(btn => btn.addEventListener('click', async () => {
+            if (btn.classList.contains('active')) return;
+            modeBtns.forEach(b => b.disabled = true);
+            msg('Switching sensor mode…');
+            try {
+                paintMode(await (await postJSON('/camera/mode', { mode: btn.dataset.mode })).json());
+                msg('Sensor mode: ' + btn.dataset.mode);
+            } catch (e) { msg('Mode switch failed: ' + e.message); }
+            finally { modeBtns.forEach(b => b.disabled = false); }
+        }));
+        request('/camera/mode').then(r => r.json()).then(paintMode).catch(() => {});
 
         // ============================================================
         //  Galvo laser  (X = CH1, Y = CH2)

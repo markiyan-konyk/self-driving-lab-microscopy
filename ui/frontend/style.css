@@ -214,6 +214,14 @@ main {
     background: var(--bg); border-radius: 10px; overflow: hidden;
 }
 .video-frame img { width: 100%; height: 100%; object-fit: contain; display: block; }
+/* The held still, laid exactly over the live <img> (same object-fit box), so
+   freezing is instant and the stream underneath keeps running -- recording must
+   not stop just because someone is measuring something. */
+.held {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: contain; display: none; pointer-events: none;
+}
+.held.show { display: block; }
 .overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .overlay.active { pointer-events: auto; cursor: crosshair; }
 
@@ -228,8 +236,6 @@ main {
 .hud-item { display: flex; justify-content: space-between; gap: 14px; }
 .hud-item span { color: var(--muted); }
 .hud-item b { color: var(--text); font-weight: 700; }
-.hud-item.fps { margin-top: 3px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,.08); }
-.hud-item.fps b { color: var(--accent-bright); }
 
 .tool-banner {
     position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
@@ -311,10 +317,29 @@ button:active, button.active { background: var(--accent-bright); border-color: v
 
 .ctrl-unit { color: var(--muted); font-size: 11px; }
 
+/* Sensor mode — a segmented pair: one choice, two states, never both. */
+.mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.mode-btn {
+    min-height: 34px; font-size: 12.5px; font-weight: 700; color: var(--muted);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 0;
+}
+.mode-btn:first-child { border-radius: 9px 0 0 9px; }
+.mode-btn:last-child { border-radius: 0 9px 9px 0; border-left: none; }
+.mode-btn.active {
+    background: var(--panel); border-color: var(--accent-deep); color: var(--accent-bright);
+    box-shadow: inset 0 0 0 1px var(--accent-deep);
+}
+.mode-btn:disabled { opacity: .4; cursor: not-allowed; }
+.mode-readout {
+    color: var(--muted); font-family: var(--mono); font-size: 11px;
+    text-align: center; margin-top: -2px;
+}
+
 /* Measurements */
 .measure-section { display: flex; flex-direction: column; gap: 8px; }
 .measure-btn { min-height: 44px; font-size: 14px; font-weight: 700; }
 .measure-btn.armed { background: var(--accent); border-color: var(--accent); color: #06140e; }
+.measure-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .measure-readout { color: var(--muted); font-family: var(--mono); font-size: 12px; padding: 2px 2px; }
 .measure-readout.result { color: var(--accent-bright); min-height: 16px; }
 

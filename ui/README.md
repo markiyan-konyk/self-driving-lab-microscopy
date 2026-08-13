@@ -18,6 +18,17 @@ backend (Pi: ros2_ws + gateway)  ──HTTP/WS──►  this UI  ──HTTP/MJP
 - **Controls** are SDK calls (`scope.stage.jog`, `scope.calibration.set`,
   `scope.galvo.call`, `scope.temperature.setpoint`, `scope.laser.set`...).
 - **Autofocus** runs on the backend (`camera/autofocus` action).
+- **Detail / Fast** switches the sensor between its full-field high-resolution
+  mode and its high-frame-rate mode. The readout under the toggle gives the real
+  size and rate, which is why there is no jittery measured-fps number any more.
+- **Freeze** holds the picture so you can measure on it; the stream keeps
+  arriving underneath and recording is unaffected. **Screenshot** saves what you
+  are looking at — held frame, scale bar and measurement burnt in — as a JPEG in
+  the clip folder.
+- **Measuring**: *Set Scale* on a known distance, then *Measure*. The scale is
+  stored with the frame width it was measured at, so switching sensor mode
+  rescales it instead of invalidating it — the readout always states the
+  resolution the number applies to.
 - **Recording happens here**, on the machine running this program — pick the
   folder in the left column (**Save Clips To**). The Pi takes no recording load,
   and since the browser may be on a different machine entirely, that panel names
@@ -82,11 +93,13 @@ over a file the first is still closing.
 
 ## Notes / current limitations
 
-- The galvo voltages shown are what *this* UI commanded — the AWG publishes no
-  position readback, so with two clients driving it the last writer wins.
-- No camera panel. Exposure, gains and frame rate are set once per sample and
-  then left alone, and a wall of sliders crowded out the controls an operator
-  actually touches. Anything that needs them goes to the gateway directly
+- The galvo voltages shown are the node's own bookkeeping, so an agent or a
+  second UI moving the mirrors does show up here. The AWG itself has no position
+  readback, so a hand on its front panel is the one thing nothing can see.
+- No per-control camera panel. Exposure, gains and white balance are set once
+  per sample and then left alone, and a wall of sliders crowded out the controls
+  an operator actually touches; the sensor MODE is the one camera choice worth a
+  button, and it has one. Anything else goes to the gateway directly
   (`scope.camera.set_controls(...)`, or the `camera_controls` MCP tool).
 - If several UIs jog the stage at the same time they interleave safely at the
   hardware level, but can obviously fight each other logically — coordinate

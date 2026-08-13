@@ -199,6 +199,16 @@ class _Camera:
     def set_framerate(self, fps):
         return self.set_controls(framerate=float(fps))
 
+    def set_mode(self, mode):
+        """'detail' (full field of view, most pixels) or 'fast' (highest frame
+        rate, cropped field). get_controls()['modes'] lists what this camera
+        module offers, with each one's size and fps. Reconfiguring the sensor
+        interrupts the video for a moment, and CHANGES um_per_px -- see
+        Calibration.um_per_px_width."""
+        return self._s._request("POST", "/api/v1/camera/mode",
+                                json_body={"mode": mode},
+                                timeout=self._s.timeout + 10.0)
+
     def white_balance(self):
         """One-shot AWB; blocks ~1.5 s while the camera converges."""
         return self._s._request("POST", "/api/v1/camera/white_balance",
@@ -337,7 +347,8 @@ class _Laser:
 
 
 class _Calibration:
-    FIELDS = ("um_per_px", "steps_per_um_x", "steps_per_um_y", "steps_per_um_z")
+    FIELDS = ("um_per_px", "um_per_px_width",
+              "steps_per_um_x", "steps_per_um_y", "steps_per_um_z")
 
     def __init__(self, scope):
         self._s = scope
@@ -345,11 +356,34 @@ class _Calibration:
     def get(self):
         return self._s.telemetry("calibration")
 
+    def um_per_px(self, width=None):
+        """The image scale for a frame `width` pixels wide, or None if uncalibrated.
+
+        A scale is only meaningful next to the resolution it was measured at:
+        switch the camera to another sensor mode and the same slide lands on a
+        different number of pixels. Pass the width you actually have (from
+        camera.get_controls()['width']) and this converts. Omit it to get the
+        stored value unconverted.
+        """
+        cal = self.get() or {}
+        if not cal.get("has_um_per_px"):
+            return None
+        scale = float(cal["um_per_px"])
+        measured_at = int(cal.get("um_per_px_width") or 0)
+        if width and measured_at:
+            return scale * measured_at / float(width)
+        return scale
+
     def set(self, **values):
         """Partial update -- unspecified fields are pre-filled with null
-        (-> NaN -> 'leave unchanged') so nothing gets clobbered."""
+        (-> NaN -> 'leave unchanged') so nothing gets clobbered.
+
+        Send um_per_px_width (the frame width you measured at) with any
+        um_per_px, or the scale cannot be converted for another sensor mode."""
         body = {f: values.get(f) for f in self.FIELDS}
         unknown = set(values) - set(self.FIELDS)
         if unknown:
             raise ScopioError(f"unknown calibration fields: {sorted(unknown)}")
+        # int field: no NaN sentinel, and 0 already means "leave unchanged".
+        body["um_per_px_width"] = int(values.get("um_per_px_width") or 0)
         return self._s.call_service("calibration/set", body)

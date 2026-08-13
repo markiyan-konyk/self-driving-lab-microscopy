@@ -528,6 +528,52 @@ class MonoCamera:
         return {}
 
 
+# Real sensor_modes tables, abbreviated to the fields pick_modes reads.
+# crop_limits is (x, y, w, h) of the sensor rectangle the mode reads: equal
+# rectangles see the same field of view, a smaller one is a centre crop.
+IMX219 = [   # Camera Module 2
+    {"size": (640, 480), "fps": 206.65, "crop_limits": (1000, 752, 1280, 960)},
+    {"size": (1640, 1232), "fps": 41.85, "crop_limits": (0, 0, 3280, 2464)},
+    {"size": (1920, 1080), "fps": 47.57, "crop_limits": (680, 692, 1920, 1080)},
+    {"size": (3280, 2464), "fps": 21.19, "crop_limits": (0, 0, 3280, 2464)},
+]
+IMX708 = [   # Camera Module 3
+    {"size": (1536, 864), "fps": 120.13, "crop_limits": (768, 432, 3072, 1728)},
+    {"size": (2304, 1296), "fps": 56.03, "crop_limits": (0, 0, 4608, 2592)},
+    {"size": (4608, 2592), "fps": 14.35, "crop_limits": (0, 0, 4608, 2592)},
+]
+
+
+def test_detail_mode_keeps_the_whole_field_of_view():
+    """The trap this avoids: '1080p' sounds like the high-resolution choice and
+    on an IMX219 it is a CENTRE CROP -- more pixels over less slide. The detail
+    mode must come from a full-frame rectangle even when a cropped mode offers
+    a bigger number."""
+    cs = _camera_server()
+
+    modes = cs.pick_modes(IMX219, max_detail_w=1640)
+    assert modes["detail"]["sensor"] == [1640, 1232], modes["detail"]
+    assert modes["detail"]["full_fov"] is True
+    assert modes["detail"]["fps"] == 41.9
+    # 3280x2464 is bigger but half the rate, and gets scaled for the network
+    # anyway -- it buys nothing over the binned full-frame mode.
+    assert modes["fast"]["sensor"] == [640, 480]
+    assert modes["fast"]["fps"] == 206.7
+    assert modes["fast"]["full_fov"] is False, "the fast mode IS a crop; say so"
+
+    # A different module must get its own best two, with no code change.
+    m3 = cs.pick_modes(IMX708, max_detail_w=1640)
+    assert m3["detail"]["sensor"] == [2304, 1296] and m3["detail"]["full_fov"]
+    assert m3["fast"]["sensor"] == [1536, 864]
+
+    # The detail STREAM is capped for the network while the SENSOR mode is not,
+    # so the field of view survives the cap; aspect ratio has to survive it too.
+    capped = cs.pick_modes(IMX708, max_detail_w=1152)
+    assert capped["detail"]["sensor"] == [2304, 1296], "cap must not change the mode"
+    assert capped["detail"]["size"] == [1152, 648]
+    assert cs.pick_modes([]) == {}
+
+
 def test_mono_sensor_does_not_reject_the_whole_request():
     """The bug: one unsupported control (AwbEnable on a mono sensor) raised out
     of the handler, so NOTHING was applied, the socket hung up, and the caller

@@ -132,6 +132,40 @@ def test_the_recording_folder_is_validated():
         assert run_ui.recordings_dir == target
 
 
+def test_a_screenshot_lands_in_the_clip_folder():
+    """The browser sends the pixels, so what is saved is exactly what was on
+    screen -- frozen frame and burnt-in scale bar included."""
+    app = run_ui.app.test_client()
+    with app.session_transaction() as s:
+        s["authed"] = True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run_ui.recordings_dir = tmp
+        shot = app.post("/screenshot", data=_jpeg(), content_type="image/jpeg")
+        assert shot.status_code == 200
+        name = shot.get_json()["filename"]
+        assert name.endswith(".jpg") and os.path.exists(os.path.join(tmp, name))
+        # Two in the same second must not overwrite each other.
+        second = app.post("/screenshot", data=_jpeg(), content_type="image/jpeg")
+        assert second.get_json()["filename"] != name
+        assert len(os.listdir(tmp)) == 2
+        # Anything that is not a JPEG is refused rather than written.
+        assert app.post("/screenshot", data=b"<html>",
+                        content_type="image/jpeg").status_code == 400
+
+
+def test_a_scale_is_refused_without_the_width_it_was_measured_at():
+    """um_per_px alone is unconvertible: switch sensor mode and the same slide
+    lands on a different number of pixels. The width has to travel with it."""
+    app = run_ui.app.test_client()
+    with app.session_transaction() as s:
+        s["authed"] = True
+    body = {"pixels": 320, "micrometres": 100}
+    assert app.post("/set_calibration", json=body).status_code == 400
+    assert app.post("/set_calibration", json={**body, "width": 0}).status_code == 400
+    assert app.post("/set_calibration", json={"width": 640}).status_code == 400
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

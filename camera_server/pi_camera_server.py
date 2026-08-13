@@ -11,7 +11,16 @@ of the sensor -- and everything else consumes it over loopback HTTP:
   GET  /controls      -> current camera settings (incl. live exposure/gain)
   POST /controls      -> set framerate/exposure/gain/colour/contrast/... (JSON)
   POST /white_balance -> one-shot auto white balance; locks the measured gains
+  POST /mode          -> switch sensor mode: {"mode": "detail" | "fast"}
   GET  /focus         -> a focus metric (JPEG size)
+
+TWO SENSOR MODES, chosen from what the attached module advertises (pick_modes):
+  detail -- the most pixels over the sensor's FULL field of view
+  fast   -- the highest frame rate it offers, at whatever field that mode reads
+You cannot have both: more pixels per frame means fewer frames per second. The
+sizes are NOT hard-coded -- on a Camera Module 2 this lands on 1640x1232 @ 42
+and 640x480 @ 207. Note that its 1920x1080 mode is a CENTRE CROP and so is
+never the detail mode, however good "1080p" sounds.
 
 Consumers (both on 127.0.0.1 -- this server is deliberately loopback-only):
   * the API gateway (scopio_gateway) proxies /stream.mjpg and the controls to
@@ -25,7 +34,11 @@ HOW IT RUNS (pick one; identical HTTP surface either way):
   * as a systemd unit on the Pi host if libcamera misbehaves in-container:
         camera_server/install_systemd.sh
 
-Env: CAM_HOST (127.0.0.1), CAM_PORT (8081), CAM_W (640), CAM_H (480).
+Env: CAM_HOST (127.0.0.1), CAM_PORT (8081), CAM_MODE (detail),
+     CAM_DETAIL_MAX_W (1640, how wide the detail stream may get before the ISP
+     scales it -- the SENSOR mode is unaffected, so the field of view survives),
+     CAM_W/CAM_H (placeholders reported until the sensor opens; the running
+     size comes from the mode, not from these).
 Requires: python3-picamera2 (Raspberry Pi OS Bookworm / the RPi apt archive).
 """
 
@@ -55,13 +68,75 @@ picam2 = None
 # visible to this process).
 camera_error = "camera not opened yet"
 camera_list = []
+_mode_lock = threading.Lock()      # one reconfigure at a time
+
+# How wide the DETAIL stream may get. The sensor will happily give more (8 MP on
+# an IMX219) and MJPEG of that over a LAN will not keep up, so the ISP scales
+# the full-FOV sensor mode down to this. Raise it if you are on wired gigabit.
+DETAIL_MAX_W = int(os.environ.get("CAM_DETAIL_MAX_W", 1640))
 
 # Last-commanded settings, echoed back by GET /controls (merged with live metadata).
 state = {
     "framerate": 30.0, "exposure": 20000, "analogue_gain": 1.0,
     "red_gain": 2.4, "blue_gain": 2.5, "green_gain": 1.0, "colour_gain": 1.0,
     "contrast": 1.0, "saturation": 1.0, "brightness": 0.0, "sharpness": 1.0,
+    # Which of the two sensor modes is running, and what it is delivering.
+    "mode": os.environ.get("CAM_MODE", "detail"), "width": SIZE[0], "height": SIZE[1],
 }
+# Filled in when the sensor opens: {"detail": {...}, "fast": {...}}, so a client
+# can show what this particular camera module actually offers.
+available_modes = {}
+
+
+def pick_modes(sensor_modes, max_detail_w=None):
+    """Choose the two useful ways to run THIS sensor, from what it advertises.
+
+    You cannot have resolution and frame rate at once, so the microscope offers
+    one of each:
+
+      detail -- the most pixels available over the sensor's FULL field of view.
+      fast   -- the highest frame rate it has, for motion (Brownian tracking).
+
+    Nothing here is hard-coded to a sensor. picamera2 reports `crop_limits` per
+    mode: the sensor rectangle that mode reads. Modes sharing the LARGEST
+    rectangle see the whole slide; a smaller one is a centre crop, which on a
+    microscope means silently throwing field of view away. That distinction is
+    why "1080p" is not the detail mode on an IMX219 -- its 1920x1080 mode is a
+    crop, while 1640x1232 is the full frame binned, and faster besides.
+
+    Returns {"detail": spec, "fast": spec}, spec = {sensor, size, fps, full_fov}.
+    """
+    modes = [m for m in (sensor_modes or []) if m.get("size")]
+    if not modes:
+        return {}
+
+    def area(size):
+        return size[0] * size[1]
+
+    def window(m):
+        crop = m.get("crop_limits")
+        return area(m["size"]) if not crop else crop[2] * crop[3]
+
+    def fps(m):
+        return float(m.get("fps") or 0.0)
+
+    widest = max(window(m) for m in modes)
+    full_fov = [m for m in modes if window(m) == widest]
+
+    def spec(m, cap=None):
+        w, h = m["size"]
+        if cap and w > cap:                     # scale down, keep the aspect
+            w, h = cap, max(1, round(h * cap / m["size"][0]))
+        return {"sensor": list(m["size"]), "size": [w, h], "fps": round(fps(m), 1),
+                "full_fov": window(m) == widest}
+
+    # Detail: of the full-frame modes, the one that streams fastest. The biggest
+    # is not automatically the best -- 3280x2464 tops out near 21 fps and has to
+    # be scaled down for the network anyway, so it buys nothing over the binned
+    # full-frame mode that runs at twice the rate.
+    detail = max(full_fov, key=lambda m: (fps(m), area(m["size"])))
+    fastest = max(modes, key=lambda m: (fps(m), -area(m["size"])))
+    return {"detail": spec(detail, max_detail_w), "fast": spec(fastest)}
 
 
 _warned_unsupported = set()
@@ -102,7 +177,12 @@ def apply_controls(d):
     c = {}
     fps = _num(d.get("framerate"))
     if fps:
-        fps = max(1.0, min(120.0, fps))
+        # Ceiling is the RUNNING mode's own, not a constant: the fast mode may
+        # offer 200 fps and the detail mode 41, and asking for more than the
+        # sensor mode can give is clamped silently by libcamera -- after which
+        # state["framerate"] describes a rate that is never delivered.
+        ceiling = (available_modes.get(state["mode"], {}).get("fps") or 120.0)
+        fps = max(1.0, min(float(ceiling), fps))
         dur = int(1_000_000 / fps)
         c["FrameDurationLimits"] = (dur, dur)
         state["framerate"] = fps
@@ -169,6 +249,45 @@ def do_white_balance():
     return {"red_gain": r, "blue_gain": b}
 
 
+def _configure(cam, name):
+    """Put `cam` into one of pick_modes()'s two modes and start MJPEG recording.
+
+    Called both to open the camera and to switch modes later. picamera2 cannot
+    reconfigure while recording, so a switch is stop -> configure -> start; every
+    open MJPEG connection sees a short gap, which is why this is a deliberate
+    button and not something that happens on its own.
+    """
+    spec = available_modes.get(name) or available_modes["detail"]
+    fps = spec["fps"] or state["framerate"]
+    cam.configure(cam.create_video_configuration(
+        sensor={"output_size": tuple(spec["sensor"])},
+        main={"size": tuple(spec["size"]), "format": "RGB888"},
+        controls={"FrameRate": fps},
+    ))
+    cam.start_recording(MJPEGEncoder(), FileOutput(output))
+    state.update(mode=name, width=spec["size"][0], height=spec["size"][1],
+                 framerate=fps)
+    print(f"Camera mode {name}: {spec['size'][0]}x{spec['size'][1]} @ {fps:g} fps "
+          f"from sensor {spec['sensor'][0]}x{spec['sensor'][1]}"
+          f"{'' if spec['full_fov'] else '  (CROPPED -- narrower field of view)'}",
+          flush=True)
+
+
+def set_mode(name):
+    """Switch sensor mode. Returns the new controls, or {'error': ...}."""
+    if name not in available_modes:
+        return {"error": f"mode must be one of {sorted(available_modes)}"}
+    with _mode_lock:
+        if picam2 is None:
+            return {"error": camera_error or "camera not open"}
+        if name == state["mode"]:
+            return get_controls()
+        picam2.stop_recording()
+        _configure(picam2, name)
+        apply_controls({})      # re-assert exposure/gains onto the new config
+    return get_controls()
+
+
 def get_controls():
     """Current settings, merging commanded state with live camera metadata.
 
@@ -178,6 +297,7 @@ def get_controls():
     and the cause is here or in the camera.
     """
     out = dict(state)
+    out["modes"] = available_modes
     out["frames"] = output.frames
     out["frame_age_s"] = (round(time.monotonic() - output.at, 2)
                           if output.at else None)
@@ -262,7 +382,7 @@ class Handler(server.BaseHTTPRequestHandler):
             self._stream()
 
     def do_POST(self):
-        if self.path not in ("/controls", "/white_balance"):
+        if self.path not in ("/controls", "/white_balance", "/mode"):
             self.send_error(404)
             self.end_headers()
             return
@@ -277,6 +397,8 @@ class Handler(server.BaseHTTPRequestHandler):
             d = {}
         if self.path == "/controls":
             self._guard(lambda: self._json(apply_controls(d)))
+        elif self.path == "/mode":
+            self._guard(lambda: self._json(set_mode(str(d.get("mode", "")))))
         else:
             self._guard(lambda: self._json(do_white_balance()))
 
@@ -357,53 +479,28 @@ def open_camera_forever():
     and a camera that appears late (replug, or the systemd unit releasing it)
     heals with no restart.
     """
-    global picam2, camera_error, camera_list
+    global picam2, camera_error, camera_list, available_modes
     delay = 2.0
     while True:
         cam = None
         try:
             cam = Picamera2()
-            # Full field of view = the mode covering the most sensor area, which
-            # is then scaled down to SIZE. Chosen by area, NOT by a fixed index:
-            # sensors expose different numbers of modes (IMX219/IMX477 have 3-4),
-            # so sensor_modes[k] is an IndexError on the next camera module -- and
-            # one swallowed by the retry below, where it looks like absent hardware.
-            #
-            # NOTE: this changes the microscope's FOV, so um_per_px from a run
-            # before it is WRONG. Re-run the calibration after changing SIZE or
-            # this selection; nothing downstream can detect a stale value.
-            mode = max(cam.sensor_modes, key=lambda m: m["size"][0] * m["size"][1])
-            # The mode's own ceiling, never above it. A full-resolution mode does
-            # not do 30 fps (IMX708 4608x2592 tops out near 14); libcamera clamps
-            # silently, and then state["framerate"] -- which apply_controls uses
-            # for its exposure-vs-frame-duration budget -- describes a rate the
-            # sensor never delivers.
-            fps = min(state["framerate"], float(mode.get("fps") or state["framerate"]))
-            cam.configure(cam.create_video_configuration(
-                sensor={"output_size": mode["size"], "bit_depth": mode["bit_depth"]},
-                main={"size": SIZE, "format": "RGB888"},
-                controls={"FrameRate": fps},
-            ))
-            cam.start_recording(MJPEGEncoder(), FileOutput(output))
+            available_modes = pick_modes(cam.sensor_modes, DETAIL_MAX_W)
+            if not available_modes:
+                raise RuntimeError("sensor advertises no usable modes")
+            _configure(cam, state["mode"])
             picam2 = cam
-            state["framerate"] = fps
             camera_error, camera_list = None, []
+            print(f"Modes offered: {available_modes}", flush=True)
             # Print what this sensor actually offers: it is the fastest answer to
             # "why did that control not take" and it says mono vs colour outright.
-            print(f"Camera open {SIZE[0]}x{SIZE[1]} from sensor mode "
-                  f"{mode['size'][0]}x{mode['size'][1]} @ {fps:g} fps "
-                  f"(re-run the calibration if this FOV changed); "
-                  f"controls advertised: {sorted(cam.camera_controls)}", flush=True)
+            print(f"Controls advertised: {sorted(cam.camera_controls)}", flush=True)
             if "AwbEnable" not in cam.camera_controls:
                 print("  NOTE: no AwbEnable/ColourGains -- monochrome sensor. "
                       "Colour gains and /white_balance do nothing on this camera.",
                       flush=True)
             return
         except Exception as exc:
-            # Close whatever opened. Everything after Picamera2() can throw, and a
-            # leaked instance still OWNS the sensor: the next attempt then fails
-            # with "already in use" for good, turning one transient fault
-            # permanent and blaming a stray process in the diagnosis below.
             if cam is not None:
                 try:
                     cam.close()

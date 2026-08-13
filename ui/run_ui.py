@@ -236,6 +236,7 @@ def _frame_ingest_loop():
 # ========== Flask app ==========
 app = Flask(__name__)
 app.secret_key = os.environ.get("SCOPIO_UI_SESSION_SECRET") or secrets.token_hex(16)
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024   # screenshot upload ceiling
 
 
 # ---- auth ----
@@ -425,6 +426,58 @@ def set_step(axis, value):
     return str(steps[axis]), 200
 
 
+# ---- sensor mode: resolution vs frame rate ----
+@app.route("/camera/mode", methods=["GET", "POST"])
+@login_required
+def camera_mode():
+    """Read the running sensor mode, or switch it.
+
+    The two modes have DIFFERENT frame widths, which is why every reply carries
+    width/height: the measurement scale is micrometres per pixel, so it only
+    means anything alongside the resolution it was measured at.
+    """
+    try:
+        if request.method == "POST":
+            want = str((request.get_json(silent=True) or {}).get("mode", ""))
+            data = scope.camera.set_mode(want)
+        else:
+            data = scope.camera.get_controls()
+    except ScopioError as e:
+        return jsonify({"error": str(e)}), 503
+    if data.get("error"):
+        return jsonify({"error": data["error"]}), 400
+    return jsonify({"mode": data.get("mode"), "modes": data.get("modes") or {},
+                    "width": data.get("width"), "height": data.get("height"),
+                    "framerate": data.get("framerate")})
+
+
+# ---- screenshot ----
+# The BROWSER sends the pixels, not this server: what gets saved is then exactly
+# what the operator was looking at, frozen frame and burnt-in scale bar included.
+# Grabbing state.jpeg here instead would quietly save a different, later frame
+# than the one they just measured on.
+@app.route("/screenshot", methods=["POST"])
+@login_required
+def screenshot():
+    data = request.get_data()
+    if not data.startswith(b"\xff\xd8"):
+        return jsonify({"error": "expected a JPEG body"}), 400
+    try:
+        folder = _ensure_dir(recordings_dir)
+    except OSError as e:
+        return jsonify({"error": f"Cannot write to {recordings_dir}: {e}"}), 400
+    stem = time.strftime("shot_%Y%m%d_%H%M%S")
+    name, n = stem + ".jpg", 1
+    while os.path.exists(os.path.join(folder, name)):   # same-second collisions
+        n += 1
+        name = f"{stem}_{n}.jpg"
+    path = os.path.join(folder, name)
+    with open(path, "wb") as f:
+        f.write(data)
+    log.info(f"saved {path}  ({len(data)} bytes)")
+    return jsonify({"filename": name, "path": path})
+
+
 # ---- camera calibration (autofocus + one-shot white balance) ----
 # The per-control camera sliders are deliberately NOT here: exposure, gains and
 # frame rate are set once for a sample and then left alone, and a panel of them
@@ -491,8 +544,11 @@ def get_calibration():
     with state.lock:
         c = state.calibration
     if c is None or not c.get("has_um_per_px"):
-        return jsonify({"um_per_px": None})
-    return jsonify({"um_per_px": c.get("um_per_px")})
+        return jsonify({"um_per_px": None, "um_per_px_width": 0})
+    # Both halves, always: micrometres-per-pixel without the width it was
+    # measured at cannot be converted when the camera changes sensor mode.
+    return jsonify({"um_per_px": c.get("um_per_px"),
+                    "um_per_px_width": int(c.get("um_per_px_width") or 0)})
 
 
 @app.route("/set_calibration", methods=["POST"])
@@ -505,11 +561,15 @@ def set_calibration():
         return jsonify({"error": "Need 'pixels' and 'micrometres'"}), 400
     if px <= 0 or um <= 0:
         return jsonify({"error": "Values must be positive"}), 400
+    width = int(d.get("width") or 0)
+    if width <= 0:
+        return jsonify({"error": "Need the frame 'width' the line was drawn on"}), 400
     try:
-        scope.calibration.set(um_per_px=um / px)
+        scope.calibration.set(um_per_px=um / px, um_per_px_width=width)
     except ScopioError as e:
         return jsonify({"error": str(e)}), 503
-    return jsonify({"um_per_px": um / px, "ref_pixels": px, "ref_micrometres": um})
+    return jsonify({"um_per_px": um / px, "um_per_px_width": width,
+                    "ref_pixels": px, "ref_micrometres": um})
 
 
 # ---- galvo laser (X = CH1, Y = CH2 on the Rigol DG1022Z) ----

@@ -104,12 +104,12 @@ __STYLE__
 
             <div class="video-frame" id="videoFrame">
                 <img src="/video_feed" alt="Microscope camera stream" id="stream">
+                <canvas class="held" id="heldFrame"></canvas>
                 <canvas class="overlay" id="overlay"></canvas>
                 <div class="hud" id="hud">
                     <div class="hud-item"><span>X</span><b id="posX">—</b></div>
                     <div class="hud-item"><span>Y</span><b id="posY">—</b></div>
                     <div class="hud-item"><span>Z</span><b id="posZ">—</b></div>
-                    <div class="hud-item fps"><span>FPS</span><b id="fpsVal">—</b></div>
                 </div>
                 <div class="tool-banner" id="toolBanner"></div>
             </div>
@@ -127,6 +127,13 @@ __STYLE__
                     <button id="whiteBalanceBtn" class="action-btn">White&nbsp;Balance</button>
                     <button id="autofocusBtn" class="action-btn">Autofocus</button>
                 </div>
+                <div class="mode-switch" role="group" aria-label="Sensor mode">
+                    <button class="mode-btn" id="modeDetail" data-mode="detail"
+                            title="Most pixels, full field of view">Detail</button>
+                    <button class="mode-btn" id="modeFast" data-mode="fast"
+                            title="Highest frame rate, cropped field of view">Fast</button>
+                </div>
+                <div class="mode-readout" id="modeReadout">—</div>
             </div>
 
             <section class="move-section">
@@ -180,6 +187,10 @@ __STYLE__
             <!-- Measurements -->
             <section class="measure-section">
                 <p class="section-title">Measurements</p>
+                <div class="measure-row">
+                    <button id="freezeBtn" class="measure-btn">Freeze</button>
+                    <button id="shotBtn" class="measure-btn">Screenshot</button>
+                </div>
                 <button id="calibrateBtn" class="measure-btn">Set Scale</button>
                 <button id="measureBtn" class="measure-btn">Measure</button>
                 <div class="measure-readout" id="scaleReadout">Not calibrated</div>

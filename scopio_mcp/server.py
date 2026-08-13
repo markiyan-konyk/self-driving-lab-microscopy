@@ -247,6 +247,30 @@ def camera_controls(settings: Optional[dict] = None) -> dict:
 
 
 @mcp.tool()
+def camera_mode(mode: Optional[str] = None) -> dict:
+    """Read the sensor mode, or switch it. The sensor cannot do both at once:
+
+      'detail'  the most pixels over the FULL field of view -- for looking at
+                structure, counting, and measuring.
+      'fast'    the highest frame rate the sensor offers, at a CROPPED field of
+                view -- for motion: Brownian tracking, flow, anything where the
+                time between frames is the measurement.
+
+    Switching reconfigures the sensor, so the video drops for a moment, and the
+    frame size changes -- which changes micrometres per pixel. The calibration
+    records the width it was measured at, so convert rather than re-measure:
+    um_per_px_now = um_per_px * um_per_px_width / width_now.
+    """
+    cam = scope().camera
+    data = cam.set_mode(mode) if mode else cam.get_controls()
+    if data.get("error"):
+        raise ValueError(data["error"])
+    return {"mode": data.get("mode"), "width": data.get("width"),
+            "height": data.get("height"), "framerate": data.get("framerate"),
+            "modes": data.get("modes") or {}}
+
+
+@mcp.tool()
 def grab_frame(max_width: int = 800) -> Image:
     """Capture one frame from the live camera and return it as an image to look
     at. Use it to check focus, illumination and what is in the field of view."""

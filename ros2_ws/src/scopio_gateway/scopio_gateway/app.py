@@ -121,6 +121,14 @@ async def set_camera_controls(body: dict = Body(default={})):
     return await camera_proxy.forward("POST", "/controls", json_body=body)
 
 
+@app.post("/api/v1/camera/mode", dependencies=[Depends(require_api_key)])
+async def set_camera_mode(body: dict = Body(default={})):
+    """Switch the sensor between 'detail' (full field of view, most pixels) and
+    'fast' (highest frame rate, cropped). GET /camera/controls lists what this
+    camera module actually offers under `modes`, and says which is running."""
+    return await camera_proxy.forward("POST", "/mode", json_body=body)
+
+
 @app.post("/api/v1/camera/white_balance", dependencies=[Depends(require_api_key)])
 async def white_balance():
     return await camera_proxy.forward("POST", "/white_balance", json_body={})

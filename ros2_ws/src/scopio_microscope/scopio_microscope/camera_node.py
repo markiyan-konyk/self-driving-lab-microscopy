@@ -131,6 +131,7 @@ class CameraNode(Node):
             self._start_bridge()
         self._pushed_controls = False   # see _sync_bridge_controls
         self._push_retry_at = 0.0
+        self._geometry_at = 0.0         # see _refresh_bridge_geometry
 
         publish_fps = max(1.0, float(self.get_parameter("publish_fps").value))
         self.create_timer(1.0 / publish_fps, self._publish_frame, callback_group=cb)
@@ -377,8 +378,35 @@ class CameraNode(Node):
             self.get_logger().warning(f"could not push camera settings ({exc}); "
                                       "retrying in 10 s", throttle_duration_sec=30.0)
 
+    def _refresh_bridge_geometry(self):
+        """Pick up a sensor-mode change made through the camera server.
+
+        The frame size is not a parameter any more -- camera/mode switches the
+        sensor between its full-frame and its high-rate mode, and those have
+        different sizes. Publishing the startup values after that would report a
+        resolution the graph is not producing, and every client's micrometres-
+        per-pixel is computed against exactly that number. Slow poll: one
+        loopback GET every 5 s, gated so a hung camera server cannot stack
+        blocking calls on the 2 Hz state timer.
+        """
+        if self.bridge_url is None or time.monotonic() < self._geometry_at:
+            return
+        self._geometry_at = time.monotonic() + 5.0
+        try:
+            info = self._bridge_http("GET", "/controls", timeout=2.0)
+        except Exception:
+            return
+        width, height = int(info.get("width") or 0), int(info.get("height") or 0)
+        if width and height and (width, height) != (self.width, self.height):
+            self.get_logger().info(
+                f"camera geometry now {width}x{height} (mode {info.get('mode')})")
+            self.width, self.height = width, height
+        if info.get("framerate"):
+            self.cam["framerate"] = float(info["framerate"])
+
     def _publish_state(self):
         self._sync_bridge_controls()
+        self._refresh_bridge_geometry()
         msg = CameraState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.connected = self.connected

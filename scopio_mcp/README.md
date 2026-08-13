@@ -83,18 +83,19 @@ Want the microscope to run an experiment on its own overnight?
 | `send_goal` | Long actions: `camera/autofocus`, `stage/move_path`, `scan_region`. |
 | `stage_move` | Relative or absolute stage moves, in steps. |
 | `camera_controls` | Read or partially write camera settings. |
+| `camera_mode` | `detail` (most pixels, full field) vs `fast` (highest rate, cropped). |
 | `grab_frame` | One frame, downscaled, returned as an image Claude can *see*. |
 | `white_balance` | One-shot AWB, then locked. Run it when the light changes. |
 | `focus_metric` | Cheap sharpness number for focus sweeps. |
 | `record_clip` | Record N seconds to `recordings/<name>/00000.jpg…` + measured fps. |
 | `instrument_call` | Any driver method on `galvo` or `temperature`. |
+| `temperature` | Read the sample temperature, or drive it to a setpoint. |
 | `laser` | Switch the laser relay, or read it back. |
 | `galvo_scpi` | One raw SCPI command to the AWG (`?` ⇒ query). |
 
 ## Discovery
 
-Nothing in this server hard-codes what the microscope can do. Twelve of the
-thirteen tools are transport; `describe_instrument` is the map, and it is built
+Nothing in this server hard-codes what the microscope can do. All but one of the tools are transport; `describe_instrument` is the map, and it is built
 from the **live** ROS graph and the **live** driver classes on every call. Add a
 node on the Pi or a method to a driver, and an agent can use it the same
 minute — no change here, no change to the gateway, no change to the SDK.

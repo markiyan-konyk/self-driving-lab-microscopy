@@ -42,6 +42,9 @@ class CalibrationNode(Node):
 
         self.data = {
             "um_per_px": None,
+            # The frame width um_per_px was measured at. Without it the scale is
+            # unconvertible the moment the camera changes sensor mode.
+            "um_per_px_width": 0,
             "steps_per_um": {"x": 1.0, "y": 1.0, "z": 1.0},
         }
         self._load()
@@ -72,6 +75,7 @@ class CalibrationNode(Node):
         try:
             if d.get("um_per_px") is not None:
                 self.data["um_per_px"] = float(d["um_per_px"])
+                self.data["um_per_px_width"] = int(d.get("um_per_px_width") or 0)
             spu = d.get("steps_per_um") or {}
             for ax in ("x", "y", "z"):
                 if ax in spu:
@@ -105,6 +109,7 @@ class CalibrationNode(Node):
         upp = self.data["um_per_px"]
         msg.has_um_per_px = upp is not None
         msg.um_per_px = float(upp) if upp is not None else 0.0
+        msg.um_per_px_width = int(self.data["um_per_px_width"])
         msg.steps_per_um_x = float(self.data["steps_per_um"]["x"])
         msg.steps_per_um_y = float(self.data["steps_per_um"]["y"])
         msg.steps_per_um_z = float(self.data["steps_per_um"]["z"])
@@ -131,6 +136,11 @@ class CalibrationNode(Node):
 
         if "um_per_px" in given:
             self.data["um_per_px"] = given["um_per_px"]
+            # Travels WITH the scale: a new scale measured at a new resolution
+            # must not inherit the old resolution. 0 keeps whatever we had, for
+            # a client too old to send it.
+            if request.um_per_px_width > 0:
+                self.data["um_per_px_width"] = int(request.um_per_px_width)
         for ax in ("x", "y", "z"):
             if ax in given:
                 self.data["steps_per_um"][ax] = given[ax]

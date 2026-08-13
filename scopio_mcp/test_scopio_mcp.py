@@ -24,6 +24,7 @@ EXPECTED_TOOLS = {
     "describe_instrument", "status", "call_service", "send_goal", "stage_move",
     "camera_controls", "grab_frame", "white_balance", "focus_metric",
     "record_clip", "instrument_call", "temperature", "laser", "galvo_scpi",
+    "camera_mode",
 }
 
 
@@ -97,6 +98,15 @@ def test_tools():
     assert server.camera_controls({"contrast": 1.3})["contrast"] == 1.3
     assert server.camera_controls()["contrast"] == 1.3
     assert server.white_balance()["red_gain"] == 1.8
+
+    # -- sensor mode: detail (full field of view) vs fast (cropped, high rate)
+    assert server.camera_mode()["mode"] == "detail"
+    assert server.camera_mode("fast")["width"] == 640
+    try:
+        server.camera_mode("4k")
+        raise AssertionError("an unknown mode must raise")
+    except ValueError:
+        pass
     assert server.focus_metric() == {"focus": 123.4}
 
     img = server.grab_frame(max_width=200)

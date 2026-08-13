@@ -29,7 +29,15 @@ app = FastAPI()
 # "jpeg" is swappable so scopio_mcp's test can serve a real, decodable image.
 state = {"drop_ws_after_message": False, "reject_ws": False,
          "controls": {"contrast": 1.0}, "jpeg": JPEG,
-         "temperature_calls": []}
+         "temperature_calls": [],
+         # Sensor modes are reported separately from `controls` so the partial-
+         # update assertions above stay exact.
+         "camera_mode": {"mode": "detail", "width": 1640, "height": 1232,
+                         "framerate": 41.9,
+                         "modes": {"detail": {"size": [1640, 1232], "fps": 41.9,
+                                              "full_fov": True},
+                                   "fast": {"size": [640, 480], "fps": 206.7,
+                                            "full_fov": False}}}}
 
 
 def _auth(request):
@@ -87,7 +95,7 @@ async def service(path: str, request: Request, body: dict = Body(default={})):
 @app.get("/api/v1/camera/controls")
 async def get_controls(request: Request):
     _auth(request)
-    return state["controls"]
+    return {**state["controls"], **state["camera_mode"]}
 
 
 @app.post("/api/v1/camera/controls")
@@ -95,6 +103,18 @@ async def set_controls(request: Request, body: dict = Body(default={})):
     _auth(request)
     state["controls"].update(body)           # partial update, like the real one
     return state["controls"]
+
+
+@app.post("/api/v1/camera/mode")
+async def camera_mode(request: Request, body: dict = Body(default={})):
+    _auth(request)
+    want = body.get("mode")
+    if want not in state["camera_mode"]["modes"]:
+        return {"error": f"mode must be one of {sorted(state['camera_mode']['modes'])}"}
+    spec = state["camera_mode"]["modes"][want]
+    state["camera_mode"].update(mode=want, width=spec["size"][0],
+                                height=spec["size"][1], framerate=spec["fps"])
+    return state["camera_mode"]
 
 
 @app.post("/api/v1/camera/white_balance")
@@ -240,16 +260,24 @@ def test_against_mock_gateway():
 
         # -- camera: partial update leaves the other fields alone
         scope.camera.set_controls(contrast=1.7)
-        assert scope.camera.get_controls() == {"contrast": 1.7}
+        assert scope.camera.get_controls()["contrast"] == 1.7
         scope.camera.set_framerate(30)
-        assert scope.camera.get_controls() == {"contrast": 1.7, "framerate": 30.0}
+        # The partial update is the point: framerate arrives, contrast survives.
+        assert state["controls"] == {"contrast": 1.7, "framerate": 30.0}
         assert scope.camera.white_balance()["red_gain"] == 1.8
+
+        # -- sensor mode: the two ways to run the camera, and a refusal
+        assert scope.camera.set_mode("fast")["width"] == 640
+        assert "must be one of" in scope.camera.set_mode("4k")["error"]
         assert scope.camera.focus_metric() == {"focus": 123.4}
 
         # -- calibration: unnamed fields are sent as null (== "leave unchanged")
-        echo = scope.calibration.set(um_per_px=0.42)["echo"]
-        assert echo == {"um_per_px": 0.42, "steps_per_um_x": None,
-                        "steps_per_um_y": None, "steps_per_um_z": None}
+        echo = scope.calibration.set(um_per_px=0.42, um_per_px_width=1640)["echo"]
+        assert echo == {"um_per_px": 0.42, "um_per_px_width": 1640,
+                        "steps_per_um_x": None, "steps_per_um_y": None,
+                        "steps_per_um_z": None}
+        # An int field has no NaN, so "not given" has to travel as 0.
+        assert scope.calibration.set(um_per_px=0.42)["echo"]["um_per_px_width"] == 0
         try:
             scope.calibration.set(nonsense=1)
             raise AssertionError("an unknown calibration field must raise")
