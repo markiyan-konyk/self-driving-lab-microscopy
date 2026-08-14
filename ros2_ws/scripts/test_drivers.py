@@ -561,6 +561,15 @@ def test_detail_mode_keeps_the_whole_field_of_view():
     assert modes["fast"]["fps"] == 206.7
     assert modes["fast"]["full_fov"] is False, "the fast mode IS a crop; say so"
 
+    # The sensor WINDOW travels with each mode, because micrometres per pixel
+    # depends on window/size, not on size. Both modes here are 2x binned, so
+    # their scales are IDENTICAL while their widths differ by 2.56x -- convert
+    # by width alone and every measurement in fast mode is wrong by that much.
+    assert modes["detail"]["window"] == [3280, 2464]
+    assert modes["fast"]["window"] == [1280, 960]
+    binning = lambda m: m["window"][0] / m["size"][0]
+    assert binning(modes["detail"]) == binning(modes["fast"]) == 2.0
+
     # A different module must get its own best two, with no code change.
     m3 = cs.pick_modes(IMX708, max_detail_w=1640)
     assert m3["detail"]["sensor"] == [2304, 1296] and m3["detail"]["full_fov"]

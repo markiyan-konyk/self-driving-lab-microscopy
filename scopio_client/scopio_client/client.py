@@ -346,8 +346,32 @@ class _Laser:
         return self.set(False)
 
 
+def convert_um_per_px(um_per_px, measured_width, measured_window, width, window):
+    """Carry a scale from the sensor mode it was measured in to another one.
+
+    THE reference implementation of the conversion in Calibration.msg. What the
+    scale tracks is SENSOR PIXELS PER IMAGE PIXEL -- window / width. A mode can
+    change that two independent ways and only one of them moves the scale:
+
+      binning   two sensor pixels into one image pixel     -> scale doubles
+      cropping  reads a smaller window into the same image -> scale UNCHANGED,
+                                                              you just see less
+
+    Scaling by image width alone conflates them, and on a Camera Module 2 that
+    is wrong by 2.56x between the two modes -- both are 2x binned, so their
+    micrometres per pixel are identical while their widths are not.
+
+    Any missing/zero argument means "no basis to convert", and the scale is
+    returned untouched rather than guessed at.
+    """
+    have = all(v and v > 0 for v in (measured_width, measured_window, width, window))
+    if not have:
+        return um_per_px
+    return um_per_px * (window / float(width)) / (measured_window / float(measured_width))
+
+
 class _Calibration:
-    FIELDS = ("um_per_px", "um_per_px_width",
+    FIELDS = ("um_per_px", "um_per_px_width", "um_per_px_window",
               "steps_per_um_x", "steps_per_um_y", "steps_per_um_z")
 
     def __init__(self, scope):
@@ -356,34 +380,33 @@ class _Calibration:
     def get(self):
         return self._s.telemetry("calibration")
 
-    def um_per_px(self, width=None):
-        """The image scale for a frame `width` pixels wide, or None if uncalibrated.
+    def um_per_px(self, width=None, window=None):
+        """The image scale for the frame you actually have, or None if uncalibrated.
 
-        A scale is only meaningful next to the resolution it was measured at:
-        switch the camera to another sensor mode and the same slide lands on a
-        different number of pixels. Pass the width you actually have (from
-        camera.get_controls()['width']) and this converts. Omit it to get the
-        stored value unconverted.
+        Pass width and window from camera.get_controls() ('width' and 'window')
+        and the stored scale is converted from the mode it was measured in.
+        Omit them to get the stored value unconverted.
         """
         cal = self.get() or {}
         if not cal.get("has_um_per_px"):
             return None
-        scale = float(cal["um_per_px"])
-        measured_at = int(cal.get("um_per_px_width") or 0)
-        if width and measured_at:
-            return scale * measured_at / float(width)
-        return scale
+        return convert_um_per_px(float(cal["um_per_px"]),
+                                 int(cal.get("um_per_px_width") or 0),
+                                 int(cal.get("um_per_px_window") or 0),
+                                 width, window)
 
     def set(self, **values):
         """Partial update -- unspecified fields are pre-filled with null
         (-> NaN -> 'leave unchanged') so nothing gets clobbered.
 
-        Send um_per_px_width (the frame width you measured at) with any
-        um_per_px, or the scale cannot be converted for another sensor mode."""
+        Send um_per_px_width AND um_per_px_window (the frame width, and the
+        sensor window width behind it) with any um_per_px, or the scale cannot
+        be converted for another sensor mode."""
         body = {f: values.get(f) for f in self.FIELDS}
         unknown = set(values) - set(self.FIELDS)
         if unknown:
             raise ScopioError(f"unknown calibration fields: {sorted(unknown)}")
-        # int field: no NaN sentinel, and 0 already means "leave unchanged".
-        body["um_per_px_width"] = int(values.get("um_per_px_width") or 0)
+        # int fields: no NaN sentinel, and 0 already means "leave unchanged".
+        for f in ("um_per_px_width", "um_per_px_window"):
+            body[f] = int(values.get(f) or 0)
         return self._s.call_service("calibration/set", body)

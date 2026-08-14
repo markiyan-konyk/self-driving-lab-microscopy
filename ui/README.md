@@ -26,9 +26,11 @@ backend (Pi: ros2_ws + gateway)  ──HTTP/WS──►  this UI  ──HTTP/MJP
   are looking at — held frame, scale bar and measurement burnt in — as a JPEG in
   the clip folder.
 - **Measuring**: *Set Scale* on a known distance, then *Measure*. The scale is
-  stored with the frame width it was measured at, so switching sensor mode
-  rescales it instead of invalidating it — the readout always states the
-  resolution the number applies to.
+  stored with the frame width **and the sensor window** it was measured through,
+  so switching sensor mode converts it instead of invalidating it. Those are two
+  different things: binning changes how much slide one pixel covers, cropping
+  changes only how much you see. On a Camera Module 2 both modes are 2× binned,
+  so µm/px is identical in Detail and Fast — Fast just shows 15% of the field.
 - **Recording happens here**, on the machine running this program — pick the
   folder in the left column (**Save Clips To**). The Pi takes no recording load,
   and since the browser may be on a different machine entirely, that panel names

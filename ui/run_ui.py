@@ -448,6 +448,10 @@ def camera_mode():
         return jsonify({"error": data["error"]}), 400
     return jsonify({"mode": data.get("mode"), "modes": data.get("modes") or {},
                     "width": data.get("width"), "height": data.get("height"),
+                    # Sensor pixels across the frame. The measurement scale
+                    # depends on window/width, not on width -- a cropped mode
+                    # shows less slide at exactly the same micrometres per pixel.
+                    "window": data.get("window"),
                     "framerate": data.get("framerate")})
 
 
@@ -544,11 +548,12 @@ def get_calibration():
     with state.lock:
         c = state.calibration
     if c is None or not c.get("has_um_per_px"):
-        return jsonify({"um_per_px": None, "um_per_px_width": 0})
-    # Both halves, always: micrometres-per-pixel without the width it was
-    # measured at cannot be converted when the camera changes sensor mode.
+        return jsonify({"um_per_px": None, "um_per_px_width": 0, "um_per_px_window": 0})
+    # All three, always: micrometres-per-pixel is unconvertible without BOTH the
+    # frame width and the sensor window it was measured through.
     return jsonify({"um_per_px": c.get("um_per_px"),
-                    "um_per_px_width": int(c.get("um_per_px_width") or 0)})
+                    "um_per_px_width": int(c.get("um_per_px_width") or 0),
+                    "um_per_px_window": int(c.get("um_per_px_window") or 0)})
 
 
 @app.route("/set_calibration", methods=["POST"])
@@ -561,14 +566,17 @@ def set_calibration():
         return jsonify({"error": "Need 'pixels' and 'micrometres'"}), 400
     if px <= 0 or um <= 0:
         return jsonify({"error": "Values must be positive"}), 400
-    width = int(d.get("width") or 0)
-    if width <= 0:
-        return jsonify({"error": "Need the frame 'width' the line was drawn on"}), 400
+    width, window = int(d.get("width") or 0), int(d.get("window") or 0)
+    if width <= 0 or window <= 0:
+        return jsonify({"error": "Need the frame 'width' the line was drawn on "
+                                 "and the sensor 'window' behind it"}), 400
     try:
-        scope.calibration.set(um_per_px=um / px, um_per_px_width=width)
+        scope.calibration.set(um_per_px=um / px, um_per_px_width=width,
+                              um_per_px_window=window)
     except ScopioError as e:
         return jsonify({"error": str(e)}), 503
     return jsonify({"um_per_px": um / px, "um_per_px_width": width,
+                    "um_per_px_window": window,
                     "ref_pixels": px, "ref_micrometres": um})
 
 

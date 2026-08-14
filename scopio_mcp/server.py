@@ -256,10 +256,17 @@ def camera_mode(mode: Optional[str] = None) -> dict:
                 view -- for motion: Brownian tracking, flow, anything where the
                 time between frames is the measurement.
 
-    Switching reconfigures the sensor, so the video drops for a moment, and the
-    frame size changes -- which changes micrometres per pixel. The calibration
-    records the width it was measured at, so convert rather than re-measure:
-    um_per_px_now = um_per_px * um_per_px_width / width_now.
+    Switching reconfigures the sensor, so the video drops for a moment. It may
+    also change micrometres per pixel -- but not the way the frame size suggests.
+    What matters is SENSOR pixels per image pixel: binning moves the scale,
+    cropping only shrinks what you see. The calibration stores both numbers it
+    was measured with, so convert rather than re-measure:
+
+      um_per_px_now = um_per_px * (window_now / width_now)
+                                / (um_per_px_window / um_per_px_width)
+
+    On a Camera Module 2 both modes are 2x binned, so this comes out at 1.0 --
+    the scale is the SAME in detail and fast, you just see 15% as much slide.
     """
     cam = scope().camera
     data = cam.set_mode(mode) if mode else cam.get_controls()

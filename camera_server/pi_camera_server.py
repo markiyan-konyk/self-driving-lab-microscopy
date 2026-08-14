@@ -82,6 +82,7 @@ state = {
     "contrast": 1.0, "saturation": 1.0, "brightness": 0.0, "sharpness": 1.0,
     # Which of the two sensor modes is running, and what it is delivering.
     "mode": os.environ.get("CAM_MODE", "detail"), "width": SIZE[0], "height": SIZE[1],
+    "window": SIZE[0],   # sensor pixels across the frame; see pick_modes
 }
 # Filled in when the sensor opens: {"detail": {...}, "fast": {...}}, so a client
 # can show what this particular camera module actually offers.
@@ -127,8 +128,14 @@ def pick_modes(sensor_modes, max_detail_w=None):
         w, h = m["size"]
         if cap and w > cap:                     # scale down, keep the aspect
             w, h = cap, max(1, round(h * cap / m["size"][0]))
+        crop = m.get("crop_limits")
         return {"sensor": list(m["size"]), "size": [w, h], "fps": round(fps(m), 1),
-                "full_fov": window(m) == widest}
+                "full_fov": window(m) == widest,
+                # The sensor rectangle this mode reads. Micrometres per pixel
+                # depends on window/size -- how many SENSOR pixels land in one
+                # image pixel -- not on size alone: a cropped mode shows less of
+                # the slide at exactly the same scale.
+                "window": [crop[2], crop[3]] if crop else [m["size"][0], m["size"][1]]}
 
     # Detail: of the full-frame modes, the one that streams fastest. The biggest
     # is not automatically the best -- 3280x2464 tops out near 21 fps and has to
@@ -266,7 +273,7 @@ def _configure(cam, name):
     ))
     cam.start_recording(MJPEGEncoder(), FileOutput(output))
     state.update(mode=name, width=spec["size"][0], height=spec["size"][1],
-                 framerate=fps)
+                 window=spec["window"][0], framerate=fps)
     print(f"Camera mode {name}: {spec['size'][0]}x{spec['size'][1]} @ {fps:g} fps "
           f"from sensor {spec['sensor'][0]}x{spec['sensor'][1]}"
           f"{'' if spec['full_fov'] else '  (CROPPED -- narrower field of view)'}",

@@ -154,16 +154,21 @@ def test_a_screenshot_lands_in_the_clip_folder():
                         content_type="image/jpeg").status_code == 400
 
 
-def test_a_scale_is_refused_without_the_width_it_was_measured_at():
-    """um_per_px alone is unconvertible: switch sensor mode and the same slide
-    lands on a different number of pixels. The width has to travel with it."""
+def test_a_scale_is_refused_without_the_geometry_it_was_measured_in():
+    """um_per_px alone is unconvertible. It needs the frame width AND the sensor
+    window behind it: binning changes the scale, cropping changes only how much
+    you see, and width alone cannot tell those apart."""
     app = run_ui.app.test_client()
     with app.session_transaction() as s:
         s["authed"] = True
     body = {"pixels": 320, "micrometres": 100}
-    assert app.post("/set_calibration", json=body).status_code == 400
-    assert app.post("/set_calibration", json={**body, "width": 0}).status_code == 400
-    assert app.post("/set_calibration", json={"width": 640}).status_code == 400
+    for missing in [body,
+                    {**body, "width": 1640},                  # no window
+                    {**body, "window": 3280},                 # no width
+                    {**body, "width": 0, "window": 3280},
+                    {**body, "width": 1640, "window": 0},
+                    {"width": 1640, "window": 3280}]:         # no measurement
+        assert app.post("/set_calibration", json=missing).status_code == 400, missing
 
 
 def main():

@@ -19,6 +19,7 @@ from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketD
 from fastapi.responses import StreamingResponse
 
 from scopio_client import Scopio, ScopioError
+from scopio_client.client import convert_um_per_px
 from scopio_client.stream import iter_jpegs
 
 KEY = "testkey"
@@ -33,11 +34,13 @@ state = {"drop_ws_after_message": False, "reject_ws": False,
          # Sensor modes are reported separately from `controls` so the partial-
          # update assertions above stay exact.
          "camera_mode": {"mode": "detail", "width": 1640, "height": 1232,
-                         "framerate": 41.9,
+                         "window": 3280, "framerate": 41.9,
                          "modes": {"detail": {"size": [1640, 1232], "fps": 41.9,
-                                              "full_fov": True},
+                                              "full_fov": True,
+                                              "window": [3280, 2464]},
                                    "fast": {"size": [640, 480], "fps": 206.7,
-                                            "full_fov": False}}}}
+                                            "full_fov": False,
+                                            "window": [1280, 960]}}}}
 
 
 def _auth(request):
@@ -113,7 +116,8 @@ async def camera_mode(request: Request, body: dict = Body(default={})):
         return {"error": f"mode must be one of {sorted(state['camera_mode']['modes'])}"}
     spec = state["camera_mode"]["modes"][want]
     state["camera_mode"].update(mode=want, width=spec["size"][0],
-                                height=spec["size"][1], framerate=spec["fps"])
+                                height=spec["size"][1], window=spec["window"][0],
+                                framerate=spec["fps"])
     return state["camera_mode"]
 
 
@@ -238,6 +242,32 @@ def test_offline_bits():
     assert r.closed, "iter_jpegs must close the response when abandoned early"
 
 
+def test_a_scale_survives_a_sensor_mode_change():
+    """Cropping and binning move micrometres-per-pixel in different ways, and
+    only one of them moves it at all. Scaling by image width alone -- which is
+    the obvious thing to do and what this once did -- is wrong by 2.56x between
+    a Camera Module 2's two modes, because BOTH are 2x binned: they differ in
+    how much slide you see, not in how big a pixel is."""
+    # detail: 1640 image px across a 3280 px sensor window (2x binned)
+    # fast:    640 image px across a 1280 px sensor window (2x binned, cropped)
+    assert convert_um_per_px(0.5, 1640, 3280, 640, 1280) == 0.5
+
+    # An UNBINNED mode really does halve the scale: 1920 image px straight off
+    # a 1920 px window is one sensor pixel each.
+    assert convert_um_per_px(0.5, 1640, 3280, 1920, 1920) == 0.25
+    # ...and back again.
+    assert convert_um_per_px(0.25, 1920, 1920, 1640, 3280) == 0.5
+
+    # A pure downscale with no crop doubles it, as the naive width rule expects.
+    assert convert_um_per_px(0.5, 1640, 3280, 820, 3280) == 1.0
+
+    # Nothing to convert from (a calibration taken before this existed, or an
+    # unknown current mode) returns the stored value rather than a guess.
+    for args in [(0, 3280, 640, 1280), (1640, 0, 640, 1280),
+                 (1640, 3280, None, None), (1640, 3280, 640, 0)]:
+        assert convert_um_per_px(0.5, *args) == 0.5
+
+
 def test_against_mock_gateway():
     port = _free_port()
     _serve(port)
@@ -268,14 +298,16 @@ def test_against_mock_gateway():
 
         # -- sensor mode: the two ways to run the camera, and a refusal
         assert scope.camera.set_mode("fast")["width"] == 640
+        assert scope.camera.get_controls()["window"] == 1280
         assert "must be one of" in scope.camera.set_mode("4k")["error"]
         assert scope.camera.focus_metric() == {"focus": 123.4}
 
         # -- calibration: unnamed fields are sent as null (== "leave unchanged")
-        echo = scope.calibration.set(um_per_px=0.42, um_per_px_width=1640)["echo"]
+        echo = scope.calibration.set(um_per_px=0.42, um_per_px_width=1640,
+                                     um_per_px_window=3280)["echo"]
         assert echo == {"um_per_px": 0.42, "um_per_px_width": 1640,
-                        "steps_per_um_x": None, "steps_per_um_y": None,
-                        "steps_per_um_z": None}
+                        "um_per_px_window": 3280, "steps_per_um_x": None,
+                        "steps_per_um_y": None, "steps_per_um_z": None}
         # An int field has no NaN, so "not given" has to travel as 0.
         assert scope.calibration.set(um_per_px=0.42)["echo"]["um_per_px_width"] == 0
         try:
@@ -336,4 +368,5 @@ def test_against_mock_gateway():
 
 if __name__ == "__main__":
     test_offline_bits()
+    test_a_scale_survives_a_sensor_mode_change()
     test_against_mock_gateway()

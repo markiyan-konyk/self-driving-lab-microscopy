@@ -268,7 +268,10 @@
         const streamImg = $('stream'), toolBanner = $('toolBanner');
         const calibrateBtn = $('calibrateBtn'), measureBtn = $('measureBtn');
         const scaleReadout = $('scaleReadout'), measureResult = $('measureResult');
-        let calibration = { um_per_px: null, um_per_px_width: 0 };
+        let calibration = { um_per_px: null, um_per_px_width: 0, um_per_px_window: 0 };
+        // Sensor pixels across the frame, from the running mode. Together with
+        // NATIVE_W this is what the scale actually depends on.
+        let NATIVE_WINDOW = 0;
         let tool = null;            // 'calibrate' | 'measure' | 'review' | null
         let points = [];            // native-pixel coords {x,y}
         let frozenCanvas = null;
@@ -299,13 +302,16 @@
             const nf = f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10;
             return nf * Math.pow(10, exp);
         }
-        // Micrometres per pixel OF THE FRAME WE HAVE NOW. The stored scale
-        // belongs to the resolution it was measured at, so switching sensor mode
-        // changes it by exactly the width ratio -- same slide, fewer/more pixels.
+        // Micrometres per pixel OF THE FRAME WE HAVE NOW. What the scale tracks
+        // is SENSOR pixels per image pixel (window / width): binning moves it,
+        // cropping does not -- a cropped mode shows less slide at the same
+        // scale. Mirrors convert_um_per_px() in scopio_client (Calibration.msg
+        // has the derivation). With anything missing, do not guess: leave it.
         function umPerPx() {
             if (!calibration.um_per_px) return null;
-            const at = calibration.um_per_px_width || NATIVE_W;
-            return calibration.um_per_px * at / NATIVE_W;
+            const calW = calibration.um_per_px_width, calWin = calibration.um_per_px_window;
+            if (!calW || !calWin || !NATIVE_W || !NATIVE_WINDOW) return calibration.um_per_px;
+            return calibration.um_per_px * (NATIVE_WINDOW / NATIVE_W) / (calWin / calW);
         }
         function drawScaleBar(rect) {
             const upp = umPerPx();
@@ -423,7 +429,8 @@
                 // The width travels WITH the scale -- without it the number is
                 // unconvertible the moment the sensor mode changes.
                 const rec = await (await postJSON('/set_calibration',
-                    { pixels: pendingCalibPx, micrometres: um, width: NATIVE_W })).json();
+                    { pixels: pendingCalibPx, micrometres: um,
+                      width: NATIVE_W, window: NATIVE_WINDOW })).json();
                 if (rec.error) throw new Error(rec.error);
                 calibration = rec;
                 updateScaleReadout();
@@ -515,6 +522,7 @@
                 // Every overlay coordinate is in these pixels, and so is the
                 // scale, so the change has to reach both before the next draw.
                 NATIVE_W = d.width; NATIVE_H = d.height;
+                NATIVE_WINDOW = d.window || 0;
                 resizeOverlay(); updateScaleReadout();
             }
             modeReadout.textContent = d.width
