@@ -1,29 +1,31 @@
-"""camera_node - the graph's camera surface (native picamera2 OR bridge mode).
+"""camera_node - the graph's camera surface, backed by the camera server.
 
 A PURE SENSOR + control surface. It publishes the live view as a
 CompressedImage and exposes the camera's manual controls, the single
 frame-rate knob (which auto-derives exposure/gain), and a one-shot hardware
 white balance.
 
-TWO MODES (picked automatically at startup):
+It does not own the sensor. picamera2/libcamera ship from Raspberry Pi OS, not
+Ubuntu, so they cannot run in this container: the camera belongs to the
+loopback camera server (camera_server/, its own compose service or systemd
+unit), and this node is that server's client in the graph. It
+  * ingests the server's MJPEG stream (CAMERA_URL, default
+    http://127.0.0.1:8081) and republishes the JPEG frames on image/compressed
+    -- no re-encode -- but ONLY while something wants them (a subscriber, or a
+    running autofocus). Nothing subscribes by default (the gateway serves video
+    as MJPEG, never over this topic), and scanning every frame of a 200 fps
+    stream for nobody was pure Pi CPU;
+  * forwards the camera services to the server's HTTP API, keeping the
+    exposure-budget math here;
+  * reads the server's live settings back every couple of seconds, so
+    camera/state stays true when a client changes them through the gateway's
+    /camera/controls instead of the ROS services (both paths exist, and the
+    server is the truth);
+  * runs the Autofocus action on the ingested frames.
 
-  native  -- picamera2 is importable and a camera is present: this node owns
-             the sensor directly. (Only possible when running natively on
-             Raspberry Pi OS -- picamera2 cannot run in the Ubuntu ROS
-             container.)
-
-  bridge  -- picamera2 is unavailable (ALWAYS the case in the container): the
-             camera is owned by the loopback camera server (camera_server/,
-             its own compose service or systemd unit). This node then
-               * ingests its MJPEG stream (CAMERA_URL, default
-                 http://127.0.0.1:8081) and republishes the JPEG frames on
-                 image/compressed -- no re-encode, so every graph subscriber
-                 gets live frames;
-               * forwards the camera services to the server's HTTP API,
-                 keeping the exposure-budget math here;
-               * runs the Autofocus action on the ingested frames.
-             So the frozen /scopio camera interface works identically either
-             way, and the graph never knows the difference.
+(It used to have a second, "native" mode that opened picamera2 itself. That
+could only run outside the container, so it never ran and was never tested --
+it was removed rather than kept as a path that silently rots.)
 
 It deliberately does NOT record, and NOTHING in the backend analyses the
 frames. Both are *client* concerns: the UI (or any program) takes the video
@@ -32,15 +34,16 @@ there, so the Pi takes no extra recording, disk or CPU load. The only pixel
 work here is the autofocus sharpness metric, which is a hardware control loop,
 not scene analysis.
 
-Topics / services (under /scopio):
-  pub  image/compressed   sensor_msgs/CompressedImage      (JPEG live view)
-  pub  camera/state       scopio_interfaces/CameraState    (settings + real fps)
-  srv  camera/set_controls  scopio_interfaces/SetCameraControls
-  srv  camera/set_framerate scopio_interfaces/SetFramerate
-  srv  camera/white_balance scopio_interfaces/WhiteBalance
+Topics / services / actions (under /scopio):
+  pub     image/compressed     sensor_msgs/CompressedImage    (JPEG live view)
+  pub     camera/state         scopio_interfaces/CameraState  (settings + real fps)
+  srv     camera/set_controls  scopio_interfaces/SetCameraControls
+  srv     camera/set_framerate scopio_interfaces/SetFramerate
+  srv     camera/white_balance scopio_interfaces/WhiteBalance
+  action  camera/autofocus     scopio_interfaces/Autofocus
 
-Degrades gracefully: with no camera AND no camera server it logs a warning and
-idles, so the rest of the graph still comes up.
+Degrades gracefully: with no camera server it reports connected=false and keeps
+retrying, so the rest of the graph still comes up.
 """
 
 import json
@@ -48,6 +51,7 @@ import math
 import os
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import rclpy
@@ -63,6 +67,7 @@ from scopio_interfaces.action import Autofocus
 
 MIN_FPS, MAX_FPS = 1.0, 120.0
 AF_BACKLASH = 256          # steps; every Z approached from below by this much
+SERVER_POLL_S = 2.0        # how often camera/state re-reads the camera server
 
 SOI, EOI = b"\xff\xd8", b"\xff\xd9"   # JPEG frame markers (MJPEG splitting)
 
@@ -70,18 +75,20 @@ SOI, EOI = b"\xff\xd8", b"\xff\xd9"   # JPEG frame markers (MJPEG splitting)
 class CameraNode(Node):
     def __init__(self):
         super().__init__("camera_node")
+        # width/height are only what camera/state reports until the server
+        # answers: the real size comes from its sensor mode (_refresh_from_server).
         self.declare_parameter("width", 640)
         self.declare_parameter("height", 480)
         self.declare_parameter("framerate", 30.0)
         self.declare_parameter("publish_fps", 15.0)
-        self.declare_parameter("jpeg_quality", 70)
 
         self.width = int(self.get_parameter("width").value)
         self.height = int(self.get_parameter("height").value)
-        self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)
 
         # Live control state -- what camera/state reports and what gets pushed
-        # to picamera2 (native) or the camera server (bridge).
+        # to the camera server. green_gain is kept for the frozen interface
+        # (SetCameraControls / CameraState carry it) but has no effect: the ISP
+        # has red and blue gains only, and frames pass through unmodified.
         self.cam = {
             "red_gain": 2.4, "green_gain": 1.0, "blue_gain": 2.5,
             "framerate": float(self.get_parameter("framerate").value),
@@ -90,23 +97,24 @@ class CameraNode(Node):
         }
         # Brightness target: exposure_us * analogue_gain held constant as fps changes.
         self.exposure_budget = self.cam["exposure"] * self.cam["analogue_gain"]
-        self.measured_fps = 0.0
 
-        self._lock = threading.Lock()          # serialize picam2 access
-        self.picam2 = None
-        self._encode = None
-        self._yuv2bgr = None
         self._np = None
         self._cv2 = None
-        self._last_meta = 0.0
 
-        # Bridge mode state (camera server over loopback HTTP).
+        # Camera server (loopback HTTP) state.
         self.bridge_url = None
         self._latest_jpeg = None
         self._latest_jpeg_at = 0.0        # monotonic; also the frame's identity
         self._published_at = 0.0
         self._bridge_fps = 0.0
         self._bridge_stop = threading.Event()
+        self._af_active = False           # autofocus needs frames, subscribed or not
+        self._server_ok_at = 0.0          # monotonic time of the last good GET /controls
+        self._server_frames = None        # (encoder frame count, monotonic) at that GET
+        self._server_fps = 0.0            # encoder rate derived from successive GETs
+        self._pushed_controls = False     # see _sync_bridge_controls
+        self._push_retry_at = 0.0
+        self._refresh_at = 0.0            # see _refresh_from_server
 
         self.image_pub = self.create_publisher(CompressedImage, "image/compressed", 5)
         self.state_pub = self.create_publisher(CameraState, "camera/state", 5)
@@ -126,12 +134,7 @@ class CameraNode(Node):
             cancel_callback=lambda c: CancelResponse.ACCEPT,
             callback_group=self._af_cb)
 
-        self._start_camera()
-        if self.picam2 is None:
-            self._start_bridge()
-        self._pushed_controls = False   # see _sync_bridge_controls
-        self._push_retry_at = 0.0
-        self._geometry_at = 0.0         # see _refresh_bridge_geometry
+        self._start_bridge()
 
         publish_fps = max(1.0, float(self.get_parameter("publish_fps").value))
         self.create_timer(1.0 / publish_fps, self._publish_frame, callback_group=cb)
@@ -139,52 +142,26 @@ class CameraNode(Node):
 
     @property
     def connected(self):
-        if self.picam2 is not None:
-            return True
-        # Bridge counts as connected while frames are actually arriving.
-        return (self.bridge_url is not None
-                and (time.monotonic() - self._latest_jpeg_at) < 5.0)
+        if self.bridge_url is None:
+            return False
+        # Connected while the server answers GET /controls with a 200 (it 503s
+        # until the sensor is open), or while ingested frames arrive. Frames
+        # alone do not prove it: nothing is ingested unless wanted.
+        now = time.monotonic()
+        return (now - self._server_ok_at < 3 * SERVER_POLL_S
+                or now - self._latest_jpeg_at < 5.0)
+
+    def _want_frames(self):
+        """Ingest only while somebody will use the frames."""
+        return self._af_active or self.image_pub.get_subscription_count() > 0
 
     # ------------------------------------------------------------------ #
-    #  Camera lifecycle (native mode)
-    # ------------------------------------------------------------------ #
-    def _start_camera(self):
-        try:
-            from picamera2 import Picamera2
-            import cv2
-            import numpy as np
-            self._np = np
-            self._cv2 = cv2
-            self._yuv2bgr = lambda f: cv2.cvtColor(f, cv2.COLOR_YUV2BGR_I420)
-            try:
-                from simplejpeg import encode_jpeg
-                self._encode = lambda bgr: encode_jpeg(bgr, quality=self.jpeg_quality, colorspace="BGR")
-            except Exception:
-                self._encode = lambda bgr: cv2.imencode(
-                    ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])[1].tobytes()
-
-            picam2 = Picamera2()
-            config = picam2.create_video_configuration(
-                main={"size": (self.width, self.height), "format": "YUV420"})
-            picam2.configure(config)
-            picam2.start()
-            self.picam2 = picam2
-            time.sleep(0.5)
-            self._apply_framerate(self.cam["framerate"])
-            self._apply_controls()
-            self.get_logger().info(
-                f"Camera started {self.width}x{self.height} @ {self.cam['framerate']} fps")
-        except Exception as e:
-            self.get_logger().warning(f"picamera2 unavailable ({e}); trying bridge mode.")
-            self.picam2 = None
-
-    # ------------------------------------------------------------------ #
-    #  Camera lifecycle (bridge mode)
+    #  The camera server link
     # ------------------------------------------------------------------ #
     def _start_bridge(self):
         url = os.environ.get("CAMERA_URL", "http://127.0.0.1:8081").rstrip("/")
         if not url:
-            self.get_logger().warning("No camera and no CAMERA_URL; camera idling.")
+            self.get_logger().warning("No CAMERA_URL; camera idling.")
             return
         try:
             import cv2
@@ -196,20 +173,33 @@ class CameraNode(Node):
         self.bridge_url = url
         threading.Thread(target=self._bridge_ingest_loop, daemon=True,
                          name="camera-bridge").start()
-        self.get_logger().info(f"Camera BRIDGE mode: ingesting {url}/stream.mjpg")
+        self.get_logger().info(f"Camera server at {url}")
 
     def _bridge_ingest_loop(self):
-        """Pull the camera server's MJPEG stream forever; keep the newest JPEG.
-        Reconnects with backoff so a camera restart heals automatically."""
+        """Pull the camera server's MJPEG stream while it is wanted; keep the
+        newest JPEG. Idles (no connection at all) while nobody wants frames, and
+        reconnects with backoff so a camera restart heals automatically."""
         frames, t0 = 0, time.monotonic()
         while not self._bridge_stop.is_set():
+            if not self._want_frames():
+                self._bridge_fps = 0.0
+                self._bridge_stop.wait(0.5)
+                continue
             try:
                 # `with`: without it a reconnect loop leaks one socket per retry,
                 # and a camera that is down for a while runs the node out of fds.
                 with urllib.request.urlopen(f"{self.bridge_url}/stream.mjpg",
                                             timeout=10) as resp:
                     buf = b""
+                    frames, t0 = 0, time.monotonic()
+                    checked = t0
                     while not self._bridge_stop.is_set():
+                        # Twice a second, not per chunk: a fast stream is
+                        # hundreds of chunks/s, each an rclpy graph query.
+                        if time.monotonic() - checked >= 0.5:
+                            checked = time.monotonic()
+                            if not self._want_frames():
+                                break      # closes the stream via `with`
                         chunk = resp.read(16384)
                         if not chunk:
                             raise ConnectionError("camera stream ended")
@@ -236,7 +226,7 @@ class CameraNode(Node):
             except Exception as e:
                 self._bridge_fps = 0.0
                 self.get_logger().warning(
-                    f"camera bridge disconnected ({e}); retrying in 2 s",
+                    f"camera stream disconnected ({e}); retrying in 2 s",
                     throttle_duration_sec=30.0)
                 self._bridge_stop.wait(2.0)
 
@@ -246,36 +236,35 @@ class CameraNode(Node):
         req = urllib.request.Request(f"{self.bridge_url}{path}", data=data,
                                      headers={"Content-Type": "application/json"},
                                      method=method)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode() or "{}")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode() or "{}")
+        except urllib.error.HTTPError as exc:
+            # The server says WHY in the body ({"error": ...}); "HTTP Error
+            # 409: Conflict" on its own sends the reader to the wrong place.
+            try:
+                reason = json.loads(exc.read().decode() or "{}").get("error")
+            except Exception:
+                reason = None
+            raise RuntimeError(f"camera server {exc.code}: "
+                               f"{reason or exc.reason}") from exc
 
     # ------------------------------------------------------------------ #
     #  Control math
     # ------------------------------------------------------------------ #
     def _apply_controls(self):
+        if self.bridge_url is None:
+            return
+        # colour_gain is folded into the red/blue gains the server applies.
         cg = self.cam["colour_gain"]
-        if self.picam2 is not None:
-            with self._lock:
-                self.picam2.set_controls({
-                    "AwbEnable": False, "AeEnable": False,
-                    "ColourGains": (self.cam["red_gain"] * cg, self.cam["blue_gain"] * cg),
-                    "ExposureTime": int(self.cam["exposure"]),
-                    "AnalogueGain": self.cam["analogue_gain"],
-                    "Contrast": self.cam["contrast"], "Saturation": self.cam["saturation"],
-                    "Brightness": self.cam["brightness"], "Sharpness": self.cam["sharpness"],
-                })
-        elif self.bridge_url is not None:
-            # colour_gain is folded into the red/blue gains the server applies.
-            # (green_gain was a software per-frame tweak -- not applied in
-            # bridge mode, where frames pass through unmodified.)
-            self._bridge_http("POST", "/controls", {
-                "red_gain": self.cam["red_gain"] * cg,
-                "blue_gain": self.cam["blue_gain"] * cg,
-                "exposure": int(self.cam["exposure"]),
-                "analogue_gain": self.cam["analogue_gain"],
-                "contrast": self.cam["contrast"], "saturation": self.cam["saturation"],
-                "brightness": self.cam["brightness"], "sharpness": self.cam["sharpness"],
-            })
+        self._bridge_http("POST", "/controls", {
+            "red_gain": self.cam["red_gain"] * cg,
+            "blue_gain": self.cam["blue_gain"] * cg,
+            "exposure": int(self.cam["exposure"]),
+            "analogue_gain": self.cam["analogue_gain"],
+            "contrast": self.cam["contrast"], "saturation": self.cam["saturation"],
+            "brightness": self.cam["brightness"], "sharpness": self.cam["sharpness"],
+        })
 
     def _apply_framerate(self, fps):
         """Set capture fps and derive the exposure/gain that achieves it without
@@ -287,13 +276,7 @@ class CameraNode(Node):
         analogue_gain = max(1.0, min(16.0, self.exposure_budget / exposure_us))
         self.cam["exposure"] = exposure_us
         self.cam["analogue_gain"] = round(analogue_gain, 3)
-        if self.picam2 is not None:
-            with self._lock:
-                self.picam2.set_controls({
-                    "FrameRate": fps, "ExposureTime": exposure_us,
-                    "AnalogueGain": self.cam["analogue_gain"],
-                })
-        elif self.bridge_url is not None:
+        if self.bridge_url is not None:
             self._bridge_http("POST", "/controls", {
                 "framerate": fps, "exposure": exposure_us,
                 "analogue_gain": self.cam["analogue_gain"],
@@ -303,12 +286,9 @@ class CameraNode(Node):
     #  Publishers
     # ------------------------------------------------------------------ #
     def _publish_frame(self):
-        if self.picam2 is not None:
-            self._publish_frame_native()
-            return
-        # Bridge mode: republish the newest ingested JPEG verbatim, ONCE. This
-        # timer runs at publish_fps regardless of what the camera server manages,
-        # so without the freshness check a slow camera looks like a fast one and
+        # Republish the newest ingested JPEG verbatim, ONCE. This timer runs at
+        # publish_fps regardless of what the camera server manages, so without
+        # the freshness check a slow camera looks like a fast one and
         # subscribers get the same frame several times -- which quietly breaks
         # anything downstream that measures motion between frames.
         if self._latest_jpeg is None or self._latest_jpeg_at <= self._published_at:
@@ -321,43 +301,15 @@ class CameraNode(Node):
         msg.data = bytes(self._latest_jpeg)
         self.image_pub.publish(msg)
 
-    def _publish_frame_native(self):
-        try:
-            with self._lock:
-                frame_yuv = self.picam2.capture_array("main")
-                if time.time() - self._last_meta >= 0.5:
-                    self._last_meta = time.time()
-                    try:
-                        dur = self.picam2.capture_metadata().get("FrameDuration")
-                        if dur:
-                            self.measured_fps = round(1_000_000.0 / dur, 1)
-                    except Exception:
-                        pass
-            bgr = self._yuv2bgr(frame_yuv)
-            gg = self.cam["green_gain"]
-            if abs(gg - 1.0) > 0.005 and self._np is not None:
-                green = bgr[:, :, 1].astype(self._np.float32)
-                green *= gg
-                bgr[:, :, 1] = green.clip(0, 255).astype(self._np.uint8)
-            jpeg = self._encode(bgr)
-            msg = CompressedImage()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = "camera"
-            msg.format = "jpeg"
-            msg.data = bytes(jpeg)
-            self.image_pub.publish(msg)
-        except Exception as e:
-            self.get_logger().warning(f"capture/publish failed: {e}")
-
     def _sync_bridge_controls(self):
-        """Push this node's settings to the camera server the first time frames
-        arrive, so `camera/state` and the camera cannot disagree about what the
-        camera is doing.
+        """Push this node's settings to the camera server the first time it
+        answers, so `camera/state` and the camera cannot disagree about what
+        the camera is doing.
 
         On the CONNECT EDGE, not at startup: the camera server comes up before
         the sensor does (it serves 503 while retrying), so a one-shot push in
         __init__ just fails once and leaves the two permanently out of sync.
-        The flag resets when frames stop, so a camera restart re-syncs."""
+        The flag resets when the server goes away, so a camera restart re-syncs."""
         if self.bridge_url is None:
             return
         if not self.connected:
@@ -378,41 +330,85 @@ class CameraNode(Node):
             self.get_logger().warning(f"could not push camera settings ({exc}); "
                                       "retrying in 10 s", throttle_duration_sec=30.0)
 
-    def _refresh_bridge_geometry(self):
-        """Pick up a sensor-mode change made through the camera server.
+    # Server /controls key -> this node's self.cam key, for the read-back.
+    _SERVER_FIELDS = ("exposure", "analogue_gain", "contrast", "saturation",
+                      "brightness", "sharpness")
 
-        The frame size is not a parameter any more -- camera/mode switches the
-        sensor between its full-frame and its high-rate mode, and those have
-        different sizes. Publishing the startup values after that would report a
-        resolution the graph is not producing, and every client's micrometres-
-        per-pixel is computed against exactly that number. Slow poll: one
-        loopback GET every 5 s, gated so a hung camera server cannot stack
+    def _refresh_from_server(self):
+        """Adopt what the camera server is ACTUALLY doing.
+
+        The server is the camera's only owner, and there are two ways to change
+        it: the ROS services here, and the gateway's /camera/controls and
+        /camera/mode, which go straight to the server (the SDK and the MCP tools
+        use those). Reading back only the geometry left camera/state reporting
+        this node's last push while the camera ran on whatever a client set
+        through the other door. So every SERVER_POLL_S this adopts:
+
+          * geometry -- camera/mode switches between sensor modes of different
+            size, and every client's micrometres-per-pixel is computed against
+            the width reported here;
+          * frame rate, exposure, gain, colour gains and the image controls --
+            and re-derives the exposure budget from them, so the next
+            set_framerate keeps the brightness the camera really has;
+          * the measured fps, from the server's encoder frame counter (the one
+            number that is right whether or not this node is ingesting).
+
+        One loopback GET per poll, gated so a hung camera server cannot stack
         blocking calls on the 2 Hz state timer.
         """
-        if self.bridge_url is None or time.monotonic() < self._geometry_at:
+        if self.bridge_url is None or time.monotonic() < self._refresh_at:
             return
-        self._geometry_at = time.monotonic() + 5.0
+        self._refresh_at = time.monotonic() + SERVER_POLL_S
         try:
             info = self._bridge_http("GET", "/controls", timeout=2.0)
         except Exception:
+            self._server_fps = 0.0
             return
+        now = time.monotonic()
+        self._server_ok_at = now
+
+        frames = info.get("frames")
+        if isinstance(frames, int):
+            prev = self._server_frames
+            if prev is not None and frames >= prev[0] and now > prev[1]:
+                self._server_fps = round((frames - prev[0]) / (now - prev[1]), 1)
+            self._server_frames = (frames, now)
+
         width, height = int(info.get("width") or 0), int(info.get("height") or 0)
         if width and height and (width, height) != (self.width, self.height):
             self.get_logger().info(
                 f"camera geometry now {width}x{height} (mode {info.get('mode')})")
             self.width, self.height = width, height
+        # Settings are adopted only once THIS connection has had our push (see
+        # _sync_bridge_controls). A restarted server comes back on defaults;
+        # adopting those first would wipe the settings the push is there to
+        # restore.
+        if not self._pushed_controls:
+            return
         if info.get("framerate"):
             self.cam["framerate"] = float(info["framerate"])
+        for key in self._SERVER_FIELDS:
+            val = info.get(key)
+            if isinstance(val, (int, float)) and math.isfinite(val):
+                self.cam[key] = val
+        # The server applies red/blue * colour_gain (see _apply_controls), so
+        # undo the fold to keep colour_gain meaningful.
+        cg = self.cam["colour_gain"] or 1.0
+        for key in ("red_gain", "blue_gain"):
+            val = info.get(key)
+            if isinstance(val, (int, float)) and math.isfinite(val) and val > 0:
+                self.cam[key] = round(val / cg, 3)
+        if self.cam["exposure"] > 0 and self.cam["analogue_gain"] > 0:
+            self.exposure_budget = self.cam["exposure"] * self.cam["analogue_gain"]
 
     def _publish_state(self):
+        self._refresh_from_server()
         self._sync_bridge_controls()
-        self._refresh_bridge_geometry()
         msg = CameraState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.connected = self.connected
         msg.target_fps = float(self.cam["framerate"])
-        msg.measured_fps = float(self.measured_fps if self.picam2 is not None
-                                 else self._bridge_fps)
+        msg.measured_fps = float(self._server_fps or self._bridge_fps)
         msg.exposure_us = int(self.cam["exposure"])
         msg.analogue_gain = float(self.cam["analogue_gain"])
         msg.red_gain = float(self.cam["red_gain"])
@@ -481,51 +477,21 @@ class CameraNode(Node):
         return response
 
     def _on_white_balance(self, request, response):
-        """One-shot hardware AWB: enable AWB, let it settle, read the gains it
-        chose, freeze them."""
+        """One-shot hardware AWB, run by the camera server: it enables AWB, lets
+        it settle, reads the gains it chose and freezes them."""
         if not self.connected:
             response.success = False
             response.message = "Camera unavailable"
             return response
-        if self.picam2 is None:
-            # Bridge mode: the camera server runs the AWB routine itself.
-            try:
-                out = self._bridge_http("POST", "/white_balance", {}, timeout=15.0)
-                if "error" in out:
-                    response.success = False
-                    response.message = str(out["error"])
-                    return response
-                self.cam["red_gain"] = round(float(out["red_gain"]), 2)
-                self.cam["blue_gain"] = round(float(out["blue_gain"]), 2)
-                self.cam["colour_gain"] = 1.0
-                response.success = True
-                response.red_gain = self.cam["red_gain"]
-                response.blue_gain = self.cam["blue_gain"]
-                response.message = "ok"
-            except Exception as e:
-                response.success = False
-                response.message = str(e)
-            return response
         try:
-            with self._lock:
-                self.picam2.set_controls({"AwbEnable": True, "AwbMode": 0})
-                gains = None
-                deadline = time.time() + 8.0
-                for _ in range(40):
-                    if time.time() > deadline:
-                        break
-                    g = self.picam2.capture_metadata().get("ColourGains")
-                    if g is not None:
-                        gains = g
-                self.picam2.set_controls({"AwbEnable": False})
-            if gains is None:
+            out = self._bridge_http("POST", "/white_balance", {}, timeout=15.0)
+            if "error" in out:
                 response.success = False
-                response.message = "camera did not report colour gains"
+                response.message = str(out["error"])
                 return response
-            self.cam["red_gain"] = round(float(gains[0]), 2)
-            self.cam["blue_gain"] = round(float(gains[1]), 2)
+            self.cam["red_gain"] = round(float(out["red_gain"]), 2)
+            self.cam["blue_gain"] = round(float(out["blue_gain"]), 2)
             self.cam["colour_gain"] = 1.0
-            self._apply_controls()
             response.success = True
             response.red_gain = self.cam["red_gain"]
             response.blue_gain = self.cam["blue_gain"]
@@ -554,30 +520,33 @@ class CameraNode(Node):
             raise RuntimeError(res.message or "jog failed")
         return res
 
-    def _focus_score(self, flush=2):
-        """Sharpness of a fresh frame (variance of the Laplacian); higher =
-        sharper. Native: capture directly (flushing in-flight frames). Bridge:
-        wait for a frame newer than 'now' from the ingest thread."""
-        if self.picam2 is not None:
-            with self._lock:
-                for _ in range(flush):
-                    self.picam2.capture_array("main")
-                frame_yuv = self.picam2.capture_array("main")
-            bgr = self._yuv2bgr(frame_yuv)
-        else:
-            asked = time.monotonic()          # same clock as _latest_jpeg_at
-            while self._latest_jpeg_at <= asked:
-                if time.monotonic() - asked > 5.0:
-                    raise RuntimeError("no fresh frame from camera server")
-                time.sleep(0.01)
-            arr = self._np.frombuffer(self._latest_jpeg, dtype=self._np.uint8)
-            bgr = self._cv2.imdecode(arr, self._cv2.IMREAD_COLOR)
-            if bgr is None:
-                raise RuntimeError("could not decode camera frame")
+    def _focus_score(self):
+        """Sharpness of a FRESH frame (variance of the Laplacian); higher =
+        sharper. Waits for a frame newer than 'now' from the ingest thread, so
+        a frame captured before the stage finished moving is never scored."""
+        asked = time.monotonic()          # same clock as _latest_jpeg_at
+        while self._latest_jpeg_at <= asked:
+            # 8 s, not 5: the first score of a run also waits for the idle
+            # ingest thread to notice (<= 0.5 s) and open the stream.
+            if time.monotonic() - asked > 8.0:
+                raise RuntimeError("no fresh frame from camera server")
+            time.sleep(0.01)
+        arr = self._np.frombuffer(self._latest_jpeg, dtype=self._np.uint8)
+        bgr = self._cv2.imdecode(arr, self._cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise RuntimeError("could not decode camera frame")
         gray = self._cv2.cvtColor(bgr, self._cv2.COLOR_BGR2GRAY)
         return float(self._cv2.Laplacian(gray, self._cv2.CV_64F).var())
 
     def _execute_autofocus(self, goal_handle):
+        # The node only ingests while frames are wanted; this run wants them.
+        self._af_active = True
+        try:
+            return self._autofocus(goal_handle)
+        finally:
+            self._af_active = False
+
+    def _autofocus(self, goal_handle):
         req = goal_handle.request
         result = Autofocus.Result()
         if not self.connected:
@@ -635,11 +604,6 @@ class CameraNode(Node):
 
     def destroy_node(self):
         self._bridge_stop.set()
-        try:
-            if self.picam2 is not None:
-                self.picam2.stop()
-        except Exception:
-            pass
         super().destroy_node()
 
 

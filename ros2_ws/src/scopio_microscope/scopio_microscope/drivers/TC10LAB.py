@@ -7,16 +7,18 @@ command() and query() are the only two methods the rest of the class uses, and
 they hold _lock -- the node serves temperature/call on a reentrant callback
 group while a timer polls status(), so two threads are regularly inside here.
 
-TWO TRANSPORTS, chosen by what TCLAB_RESOURCE looks like:
+TWO TRANSPORTS, chosen by WHO OWNS THE DEVICE (see _open), not by the form of
+TCLAB_RESOURCE -- leave it empty and every case below is found:
 
-  VISA         a resource string ("USB0::0x1A45::...", "TCPIP::10.0.0.5::INSTR"),
-               or empty to discover the first Wavelength box on USB.
-  kernel tmc   a path ("/dev/usbtmc0"). Use this when the kernel's usbtmc driver
-               has claimed the instrument: pyvisa-py then has to detach that
-               driver to reach it over libusb, and on some kernels the result is
-               a device that enumerates fine and answers nothing -- every query
-               times out. Reading and writing the char device the kernel already
-               owns sidesteps the fight. The udev rule ships 0666 on it.
+  kernel tmc   /dev/usbtmcN, when the kernel's usbtmc driver has claimed the
+               box (it does at plug-in on this Pi). pyvisa-py would have to
+               detach that driver to reach it over libusb, and that open hangs
+               or leaves a device that answers nothing. The char device the
+               kernel already owns sidesteps the fight.
+  VISA         pyvisa-py over libusb, when nobody owns it (found by vendor id),
+               or for an Ethernet unit ("TCPIP::10.0.0.5::INSTR", must be named).
+
+Every session is CLEARed and must answer *IDN? as a TC10 before it is used.
 
 Command reference: COMMAND SET, LAB Series Instruments (COMMAND-00400 rev H).
 Temperatures follow set_units() -- Celsius by default.
@@ -26,6 +28,7 @@ import glob
 import os
 import re
 import threading
+import time
 
 import pyvisa
 
@@ -70,6 +73,48 @@ def is_tc10(idn):
     return "TC10" in (idn or "").upper() or "WAVELENGTH" in (idn or "").upper()
 
 
+# --------------------------------------------------------------------------
+# Asking the KERNEL what is plugged in (sysfs; standard library only)
+# --------------------------------------------------------------------------
+SYSFS_USBMISC = "/sys/class/usbmisc"     # where the usbtmcN char devices live
+SYSFS_USB = "/sys/bus/usb/devices"
+
+
+def usbtmc_vid(path):
+    """Vendor id of the instrument behind a /dev/usbtmcN node, read from sysfs.
+
+    It tells the TC10's node from the Rigol's WITHOUT writing to either --
+    probing the AWG with *CLS/*IDN? from this node puts a second client on the
+    galvo's instrument. None when sysfs cannot say (a test machine, an unusual
+    kernel); the caller then has to probe that node to find out."""
+    try:
+        iface = os.path.realpath(os.path.join(SYSFS_USBMISC,
+                                              os.path.basename(path), "device"))
+        with open(os.path.join(os.path.dirname(iface), "idVendor"),
+                  encoding="ascii") as f:
+            return int(f.read().strip(), 16)
+    except (OSError, ValueError):
+        return None
+
+
+def usb_present(vid):
+    """sysfs names ('1-1.3') of every USB device with this vendor id.
+
+    Asks the kernel, not libusb or VISA, so it answers the first question of
+    any "not found": is the box on the bus AT ALL? Empty means cable, power
+    switch or hub -- no software setting will help. Non-empty means it is there
+    and the problem is how it is being opened."""
+    found = []
+    for id_file in glob.glob(os.path.join(SYSFS_USB, "*", "idVendor")):
+        try:
+            with open(id_file, encoding="ascii") as f:
+                if int(f.read().strip(), 16) == vid:
+                    found.append(os.path.basename(os.path.dirname(id_file)))
+        except (OSError, ValueError):
+            continue
+    return sorted(found)
+
+
 class UsbtmcDevice:
     """The kernel's usbtmc character device, with the slice of the pyvisa
     resource API this driver uses. The kernel driver applies its own read
@@ -83,10 +128,25 @@ class UsbtmcDevice:
     # USBTMC_IOCTL_CLEAR = _IO('[', 2). The kernel driver's name for the same
     # USB-TMC CLEAR request pyvisa exposes as .clear(): flush both buffers.
     IOCTL_CLEAR = 0x5B02
+    # USBTMC_IOCTL_SET_TIMEOUT = _IOW('[', 10, __u32), in milliseconds.
+    IOCTL_SET_TIMEOUT = 0x40045B0A
 
-    def __init__(self, path):
+    def __init__(self, path, timeout_ms=None):
         self.path = path
         self._fd = os.open(path, os.O_RDWR)
+        if timeout_ms:
+            self._set_timeout(int(timeout_ms))
+
+    def _set_timeout(self, ms):
+        """Apply the node's timeout_ms. Without this the kernel's own default
+        (5 s) applied whatever the node had been configured with."""
+        try:
+            import fcntl
+            import struct
+            fcntl.ioctl(self._fd, self.IOCTL_SET_TIMEOUT,
+                        struct.pack("I", max(100, ms)))   # kernel minimum: 100
+        except (ImportError, OSError):
+            pass          # an old kernel without the ioctl keeps its default
 
     def clear(self):
         import fcntl      # Linux-only; imported here so this module still loads
@@ -113,93 +173,187 @@ class UsbtmcDevice:
 
 
 class TC10LAB:
+    # Minimum gap between two I/Os on the wire. Like the DG1022Z, this box has
+    # a tiny input buffer and lags badly past ~60 commands/s; the lock only
+    # serializes callers, this spaces them. status() is five queries, so it
+    # costs ~0.1 s -- far inside the 1 Hz poll.
+    MIN_INTERVAL_S = 1.0 / 50
+
     def __init__(self, resource="", timeout_ms=5000):
         self.resource = resource
         self.timeout_ms = timeout_ms
         self._lock = threading.RLock()
+        self._last_io = 0.0     # monotonic end of the previous I/O
         self.rm = None
         self.device = None
         self.units = ""       # cached by set_units()/get_units(); see status()
-        self.probe_note = ""  # set when _open_usbtmc had to work around the config
+        self.identity = ""    # *IDN? reply, verified on connect
+        self.probe_note = ""  # set when _open had to work around the config
+        self._rejected = []   # usbtmc nodes tried and why they were refused
         self._desynced = False  # a query failed; drain before trusting the next
 
+    # ======================================================================
+    # Connecting
+    # ======================================================================
     def _open(self):
-        if self.resource.startswith("/dev/"):
-            self._open_usbtmc()
-            self._resync()
-            return
-        self._open_visa()
-        # BOTH transports resync. This used to run on the usbtmc path only, and
-        # the VISA path is if anything more exposed: a connect attempt that
-        # times out (VI_ERROR_TMO) has already sent a query whose reply nobody
-        # read, so the very next session starts one answer behind.
-        self._resync()
+        """Open a session, choosing the TRANSPORT by who owns the instrument.
 
-    def _open_visa(self):
+        A USB TC10 is owned either by the kernel's usbtmc driver (it binds at
+        plug-in and creates /dev/usbtmcN) or by nobody. That -- not the form of
+        TCLAB_RESOURCE -- decides how to reach it:
+
+          kernel owns it  -> its /dev/usbtmcN char device, and NEVER VISA.
+                             pyvisa-py would have to detach the kernel driver,
+                             and on this Pi that open HANGS (tc10_read.py). The
+                             detach also deletes /dev/usbtmcN until a replug, so
+                             one bad attempt changed what the NEXT attempt saw:
+                             "sometimes it works, sometimes it doesn't".
+          nobody owns it  -> VISA over libusb (pyvisa-py), found by vendor id.
+          Ethernet        -> VISA, named (pyvisa-py cannot scan a LAN).
+
+        An empty TCLAB_RESOURCE is the robust setting: every case above is found.
+        Anything configured is honoured where it can work (tried first) and
+        overridden where it cannot, with probe_note saying so. Either way the
+        session is then cleared and must answer *IDN? as a TC10.
+        """
+        res = self.resource.strip()
+        if res and not res.startswith("/dev/") and not res.upper().startswith("USB"):
+            self._open_visa(res)                  # TCPIP::... -- VISA or nothing
+        else:
+            owned, unknown = self._usbtmc_candidates(res)
+            if owned:
+                self._open_usbtmc(owned, required=True)
+            elif not (unknown and self._open_usbtmc(unknown, required=False)):
+                if res.startswith("/dev/"):
+                    self.probe_note = (
+                        f"{res!r}: no usbtmc node belongs to a TC10 (the kernel "
+                        "driver is not bound -- a VISA session detaches it until "
+                        "the box is replugged); reaching it over VISA instead")
+                self._open_visa(res if res.upper().startswith("USB") else "")
+        # Both transports resync: a connect attempt that timed out has already
+        # sent a query whose reply nobody read, so a fresh session can start
+        # one answer behind.
+        self._resync()
+        self._verify()
+
+    def _usbtmc_candidates(self, res):
+        """(/dev/usbtmcN the kernel says are Wavelength boxes, nodes it cannot
+        identify). Nodes it identifies as anything else -- the Rigol AWG is
+        USB-TMC too -- are left alone. A configured path is tried first."""
+        named = sorted(glob.glob(res)) if res.startswith("/dev/") else []
+        nodes = named + [p for p in sorted(glob.glob(USBTMC_GLOB)) if p not in named]
+        if res.startswith("/dev/") and not named and nodes:
+            self.probe_note = (f"{res!r} matched nothing -- fix it in "
+                               f"ros2_ws/.env; probing {nodes} instead")
+        owned, unknown = [], []
+        for path in nodes:
+            vid = usbtmc_vid(path)
+            if vid == WAVELENGTH_VID:
+                owned.append(path)
+            elif vid is None:
+                unknown.append(path)
+        if owned and res.upper().startswith("USB"):
+            self.probe_note = (
+                f"{res!r} is a VISA address, but the kernel usbtmc driver owns "
+                f"the TC10 ({', '.join(owned)}); using that -- VISA would have to "
+                "detach the driver, which hangs on this Pi")
+        return owned, unknown
+
+    def _open_usbtmc(self, paths, required):
+        """Open the first of `paths` that answers *IDN? as a TC10.
+
+        Returns False when none does and required is False (the caller then
+        tries VISA). required=True is for nodes the kernel has identified as the
+        TC10: falling back to VISA there is exactly the fight that hangs."""
+        for path in paths:
+            try:
+                dev = UsbtmcDevice(path, self.timeout_ms)
+            except OSError as exc:
+                self._rejected.append(f"{path}: {exc}")
+                continue
+            try:
+                idn = self._probe_idn(dev)
+                if is_tc10(idn):
+                    self.device, self.resource = dev, path
+                    return True
+                self._rejected.append(f"{path}: not a TC10 ({idn!r})")
+            except Exception as exc:
+                self._rejected.append(f"{path}: {type(exc).__name__}: {exc}")
+            try:
+                dev.close()
+            except OSError:
+                pass
+        if required:
+            raise RuntimeError(
+                "the kernel usbtmc driver owns the TC10 but it did not answer as "
+                "one: " + "; ".join(self._rejected) + ". Power-cycle the TC10; if "
+                "it persists, `echo '*IDN?' > /dev/usbtmcN && head -c 200 "
+                "/dev/usbtmcN` on the host tells the kernel side from this node.")
+        return False
+
+    @staticmethod
+    def _probe_idn(dev):
+        """*IDN? on a device nobody has cleared yet.
+
+        CLEAR FIRST. A reply left queued by a session that died mid-query (a
+        node restart, a Ctrl-C'd bench script) is otherwise read back AS the
+        identity -- "25.0" -- and the real TC10 was rejected as "not a TC10".
+        Asked a second time if the answer is not an identity at all, for the
+        same reason."""
+        idn = ""
+        for _ in range(2):
+            try:
+                dev.clear()
+            except Exception:
+                pass
+            dev.write("*CLS")
+            idn = dev.query("*IDN?").strip()
+            if is_tc10(idn) or "," in idn:        # an identity, ours or not
+                break
+        return idn
+
+    def _open_visa(self, res):
         self.rm = pyvisa.ResourceManager("@py")
-        if not self.resource:
+        if not res:
             # Match the vendor id in the resource string so we never open
             # another instrument just to ask what it is.
-            usb = [r for r in self.rm.list_resources("USB?*INSTR")
-                   if usb_vid(r) == WAVELENGTH_VID]
+            listed = list(self.rm.list_resources("USB?*INSTR"))
+            usb = [r for r in listed if usb_vid(r) == WAVELENGTH_VID]
             if not usb:
-                raise RuntimeError(
-                    "no TC10 LAB on USB. Set TCLAB_RESOURCE: an Ethernet unit "
-                    "must be named (pyvisa-py cannot scan the LAN), and "
-                    "/dev/usbtmc0 works when the kernel driver holds the box.")
-            self.resource = usb[0]
-        self.device = self.rm.open_resource(self.resource)
+                raise RuntimeError(self._not_found(listed))
+            res = usb[0]
+        self.device = self.rm.open_resource(res)
+        self.resource = res
         self.device.read_termination = "\n"
         self.device.write_termination = "\n"
         self.device.timeout = self.timeout_ms
 
-    def _open_usbtmc(self):
-        """Open a kernel usbtmc char device, VERIFYING it is this instrument.
+    def _not_found(self, listed):
+        """Why neither transport found a TC10 -- starting from whether the
+        kernel sees one on the bus at all, which splits hardware from software."""
+        bus = usb_present(WAVELENGTH_VID)
+        if not bus:
+            return ("no TC10 LAB on the USB bus: the kernel reports no 1a45 "
+                    "device. Check the cable, the rear power switch and any hub. "
+                    "An Ethernet unit must be named: "
+                    "TCLAB_RESOURCE=TCPIP::<ip>::INSTR.")
+        tried = f" usbtmc nodes tried: {'; '.join(self._rejected)}." if self._rejected else ""
+        return (f"a TC10 LAB IS on the USB bus ({', '.join(bus)}), but no "
+                "transport reached it. It has no /dev/usbtmc node (the kernel "
+                "driver is not bound -- replug to rebind it), and VISA listed "
+                f"{len(listed)} USB instrument(s), none of them it: libusb could "
+                "not read its descriptors -- device permissions (ros2_ws/udev) "
+                "or another process holding it." + tried)
 
-        A /dev/... resource selects the TRANSPORT, not the node. The exact path
-        was never load-bearing: /dev/usbtmc0 is not reliably the TC10 (the Rigol
-        AWG is USB-TMC too, and the kernel numbers them in enumeration order, so
-        a hard-coded node can point this node at the function generator -- two
-        nodes on one instrument, which reads as a flapping link). So every
-        /dev/usbtmc* is a candidate, each is asked *IDN?, and only a Wavelength
-        box is accepted. Whatever was configured is tried FIRST, to honour an
-        explicit choice; a pattern that matches nothing is a typo, not a reason
-        to ignore an instrument that is plainly present.
-        """
-        named = sorted(glob.glob(self.resource))
-        candidates = named + [p for p in sorted(glob.glob(USBTMC_GLOB))
-                              if p not in named]
-        if not candidates:
-            raise FileNotFoundError(
-                f"no usbtmc device matches {self.resource!r}, and no "
-                f"{USBTMC_GLOB} exists in THIS process's /dev. In a container, "
-                "compare with the host: if the host has the node and the "
-                "container does not, recreate the container (its /dev is "
-                "populated at creation) and check the /dev:/dev mount. If the "
-                "HOST has none either, the kernel usbtmc driver is not bound: "
-                "set TCLAB_RESOURCE to a VISA address instead.")
-        if not named:
-            self.probe_note = (f"{self.resource!r} matched nothing -- fix it in "
-                               f"ros2_ws/.env; probing {candidates} instead")
-        rejected = []
-        for path in candidates:
-            try:
-                dev = UsbtmcDevice(path)
-            except OSError as exc:
-                rejected.append(f"{path}: {exc}")
-                continue
-            try:
-                dev.write("*CLS")           # clear status + error queue
-                idn = dev.query("*IDN?").strip()
-                if is_tc10(idn):
-                    self.device = dev
-                    self.resource = path
-                    return
-                rejected.append(f"{path}: not a TC10 ({idn!r})")
-            except Exception as exc:
-                rejected.append(f"{path}: {type(exc).__name__}: {exc}")
-            dev.close()
-        raise RuntimeError("no Wavelength TC10 answered on " + ", ".join(rejected))
+    def _verify(self):
+        """The session must answer *IDN? as a TC10. A VISA address typed for the
+        wrong instrument otherwise hands this node the AWG -- two nodes on one
+        instrument, which reads as both of them flapping."""
+        idn = self.query("*IDN?")
+        if not is_tc10(idn):
+            raise RuntimeError(f"{self.resource} answered *IDN? with {idn!r} -- "
+                               "that is not a Wavelength TC10 LAB")
+        self.identity = idn
 
     def _resync(self):
         """Throw away any reply still queued in the instrument.
@@ -224,11 +378,33 @@ class TC10LAB:
         try:
             self.device.clear()      # USB-TMC CLEAR: flush both buffers
         except Exception:
-            pass
+            self._drain()            # transport without CLEAR: read it away
         try:
             self.command("*CLS")     # then the status + error queues
         except Exception:
             pass
+
+    def _drain(self):
+        """Fallback when the transport has no CLEAR (some pyvisa-py versions
+        raise on it): READ, never write, until nothing is queued. Reads remove
+        replies without adding any -- unlike a *STB? loop, which adds one per
+        one it removes."""
+        read = getattr(self.device, "read", None)
+        if read is None:
+            return
+        old = getattr(self.device, "timeout", None)
+        try:
+            self.device.timeout = 200
+            for _ in range(16):
+                read()
+        except Exception:
+            pass                     # the timeout IS "nothing left"
+        finally:
+            if old is not None:
+                try:
+                    self.device.timeout = old
+                except Exception:
+                    pass
 
     def _close(self):
         """Drop the session. Safe to call twice, and on an already-dead link."""
@@ -241,12 +417,23 @@ class TC10LAB:
                     pass
             self.device = self.rm = None
 
+    def _pace(self):
+        """Wait out MIN_INTERVAL_S since the previous I/O finished. Call with
+        _lock held, so the gap holds across every thread using the session."""
+        wait = self._last_io + self.MIN_INTERVAL_S - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+
     def command(self, cmd):
         """Write a raw SCPI command."""
         with self._lock:
             if self.device is None:
                 raise ConnectionError("TC10 LAB session is closed")
-            self.device.write(cmd)
+            self._pace()
+            try:
+                self.device.write(cmd)
+            finally:
+                self._last_io = time.monotonic()
 
     def query(self, cmd):
         """Write a raw SCPI query and return the reply, stripped."""
@@ -255,6 +442,7 @@ class TC10LAB:
                 raise ConnectionError("TC10 LAB session is closed")
             if self._desynced:
                 self._resync()
+            self._pace()
             try:
                 return self.device.query(cmd).strip()
             except Exception:
@@ -267,6 +455,8 @@ class TC10LAB:
                 # temperature. Drain before the next query instead.
                 self._desynced = True
                 raise
+            finally:
+                self._last_io = time.monotonic()
 
     def query_float(self, cmd):
         """float() of a reply, tolerating a decoration the firmware may add.

@@ -11,7 +11,6 @@
     height: 480
     framerate: 30.0          # capture fps (drives exposure/gain budget)
     publish_fps: 15.0        # rate of the compressed image topic
-    jpeg_quality: 70
     # NOTE: the camera node no longer records. Recording is a client concern
     # (the UI saves the subscribed stream to its own local folder).
 
@@ -42,10 +41,11 @@
 
 /scopio/temperature_node:
   ros__parameters:
-    # Address of the TC10 LAB. Empty => auto-discover the first WAVELENGTH-vendor
-    # USB device. TCLAB_RESOURCE in ros2_ws/.env wins over this, and must be set
-    # for an Ethernet unit (pyvisa-py cannot scan the LAN) or to use the kernel
-    # usbtmc device (TCLAB_RESOURCE=/dev/usbtmc0).
+    # Address of the TC10 LAB. Empty (recommended for USB) => the node finds it
+    # through whichever transport owns it: the kernel usbtmc driver's
+    # /dev/usbtmcN, or VISA by vendor id when the kernel has not claimed it.
+    # TCLAB_RESOURCE in ros2_ws/.env wins over this; it must be set only for an
+    # Ethernet unit (pyvisa-py cannot scan the LAN).
     resource: ""
     units: "C"               # forced on connect; "" reads them instead
     # 1 Hz costs FIVE USB-TMC round trips per second (see TC10LAB.status()).
@@ -73,6 +73,6 @@
 /scopio/calibration_node:
   ros__parameters:
     # Persisted spatial calibration. Relative to the process working directory,
-    # which compose sets to /workspace -- the bind-mounted repo root on the Pi,
+    # which compose sets to /data -- ros2_ws/data on the Pi (gitignored),
     # so it survives `docker compose down`. The node logs the absolute path.
     calibration_file: "calibration.json"

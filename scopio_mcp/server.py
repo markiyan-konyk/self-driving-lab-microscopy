@@ -269,7 +269,12 @@ def camera_mode(mode: Optional[str] = None) -> dict:
     the scale is the SAME in detail and fast, you just see 15% as much slide.
     """
     cam = scope().camera
-    data = cam.set_mode(mode) if mode else cam.get_controls()
+    try:
+        data = cam.set_mode(mode) if mode else cam.get_controls()
+    except ScopioError as exc:
+        if exc.status == 400:               # a refused mode, not a dead link
+            raise ValueError(str(exc)) from exc
+        raise
     if data.get("error"):
         raise ValueError(data["error"])
     return {"mode": data.get("mode"), "width": data.get("width"),
@@ -281,7 +286,13 @@ def camera_mode(mode: Optional[str] = None) -> dict:
 def grab_frame(max_width: int = 800) -> Image:
     """Capture one frame from the live camera and return it as an image to look
     at. Use it to check focus, illumination and what is in the field of view."""
-    jpeg = next(_frames(count=1))
+    # Explicit close: a bare next() leaves the generator -- and the Pi's MJPEG
+    # connection behind it -- open until the garbage collector gets round to it.
+    frames = _frames(count=1)
+    try:
+        jpeg = next(frames)
+    finally:
+        frames.close()
     img = PILImage.open(io.BytesIO(jpeg)).convert("RGB")
     img.thumbnail((max_width, max_width))
     buf = io.BytesIO()
@@ -310,7 +321,12 @@ def record_clip(seconds: float = 10.0, name: Optional[str] = None) -> dict:
     so you can read the frames back with your own tools. Returns that path, the
     frame count and the measured fps -- use the MEASURED fps for any timing
     calculation, never the requested one."""
-    rel = RECORDINGS / (name or time.strftime("clip_%Y%m%d_%H%M%S"))
+    # Only the final path component: "../../somewhere" must not escape
+    # recordings/ (the name comes from the agent, not from a person).
+    safe = Path(name).name if name else ""
+    if safe in ("", ".", ".."):
+        safe = time.strftime("clip_%Y%m%d_%H%M%S")
+    rel = RECORDINGS / safe
     out = Path.cwd() / rel
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()

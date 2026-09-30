@@ -114,7 +114,14 @@ def _handle_subscribe(conn, req):
                     "stream GET /api/v1/stream.mjpg instead")
 
     rate_hz = req.get("rate_hz")
-    min_interval = (1.0 / float(rate_hz)) if rate_hz else 0.0
+    try:
+        rate_hz = float(rate_hz) if rate_hz else 0.0
+    except (TypeError, ValueError):
+        rate_hz = -1.0
+    if rate_hz < 0:
+        return _err(conn, msg_id, "bad_request",
+                    "rate_hz must be a positive number (or omitted for every message)")
+    min_interval = (1.0 / rate_hz) if rate_hz else 0.0
     last_sent = [0.0]
 
     def _cb(jsonable):  # executor thread
@@ -249,6 +256,22 @@ async def _handle_action_cancel(conn, req):
         _err(conn, msg_id, "timeout", "cancel not acknowledged")
 
 
+async def _dispatch(conn, req):
+    op = req.get("op")
+    if op == "subscribe":
+        _handle_subscribe(conn, req)
+    elif op == "unsubscribe":
+        _handle_unsubscribe(conn, req)
+    elif op == "publish":
+        _handle_publish(conn, req)
+    elif op == "action_send_goal":
+        await _handle_action_send_goal(conn, req)
+    elif op == "action_cancel":
+        await _handle_action_cancel(conn, req)
+    else:
+        _err(conn, req.get("id"), "bad_request", f"unknown op '{op}'")
+
+
 async def websocket_endpoint(websocket: WebSocket):
     presented = (websocket.query_params.get("api_key")
                  or websocket.headers.get("x-api-key"))
@@ -272,22 +295,20 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 req = await websocket.receive_json()
             except ValueError:
+                req = None
+            if not isinstance(req, dict):
                 conn.push({"op": "error", "id": None, "code": "bad_request",
                            "detail": "frames must be JSON objects"})
                 continue
-            op = req.get("op")
-            if op == "subscribe":
-                _handle_subscribe(conn, req)
-            elif op == "unsubscribe":
-                _handle_unsubscribe(conn, req)
-            elif op == "publish":
-                _handle_publish(conn, req)
-            elif op == "action_send_goal":
-                await _handle_action_send_goal(conn, req)
-            elif op == "action_cancel":
-                await _handle_action_cancel(conn, req)
-            else:
-                _err(conn, req.get("id"), "bad_request", f"unknown op '{op}'")
+            # One bad request must cost ONE error envelope, not the connection:
+            # anything escaping here used to end the socket, and with it every
+            # other subscription and goal the client had on it -- a typo'd
+            # rate_hz or an unknown publish type took the whole UI offline.
+            try:
+                await _dispatch(conn, req)
+            except Exception as exc:
+                _err(conn, req.get("id"), "bad_request",
+                     f"{type(exc).__name__}: {exc}")
     except WebSocketDisconnect:
         pass
     finally:

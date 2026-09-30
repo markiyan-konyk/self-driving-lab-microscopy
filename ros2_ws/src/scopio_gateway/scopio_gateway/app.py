@@ -20,6 +20,7 @@ Route map (auth = X-API-Key header or ?api_key= unless noted):
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 
@@ -29,7 +30,19 @@ from .introspection import interfaces_payload
 from .ros_bridge import UnknownInterface, bridge
 from .ws import websocket_endpoint
 
+
+@asynccontextmanager
+async def _lifespan(_app):
+    # The rclpy executor thread needs a handle on this loop to hand results
+    # and telemetry back to request handlers / websocket queues. (A lifespan,
+    # not @app.on_event("startup"): that is deprecated, and with the image's
+    # FastAPI unpinned a future rebuild could drop it.)
+    bridge.loop = asyncio.get_running_loop()
+    yield
+
+
 app = FastAPI(
+    lifespan=_lifespan,
     title="SCOPIO Microscope API",
     version="1.0",
     description=(
@@ -39,13 +52,6 @@ app = FastAPI(
         "and GET /api/v1/interfaces for live discovery."
     ),
 )
-
-
-@app.on_event("startup")
-async def _capture_loop():
-    # The rclpy executor thread needs a handle on this loop to hand results
-    # and telemetry back to request handlers / websocket queues.
-    bridge.loop = asyncio.get_running_loop()
 
 
 @app.get("/api/v1/health")

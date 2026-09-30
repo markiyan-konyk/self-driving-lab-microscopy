@@ -107,6 +107,56 @@ def test_move_honours_the_offset_and_starting_position():
     assert offsets(gen.device.writes, ":SOURce1") == [1.75, 2.0, 2.25, 2.5]
 
 
+class TimedDevice(FakeDevice):
+    """FakeDevice that also records WHEN each I/O reached the wire."""
+
+    def __init__(self, replies=None):
+        super().__init__(replies)
+        self.at = []
+
+    def write(self, cmd):
+        import time
+        self.at.append(time.monotonic())
+        super().write(cmd)
+
+    def query(self, cmd):
+        import time
+        self.at.append(time.monotonic())
+        return super().query(cmd)
+
+
+def test_both_instruments_are_paced_below_60_per_second():
+    """The DG1022Z and TC10 LAB lag for seconds once flooded past ~60 commands/s.
+    The lock alone lets queued callers go back-to-back, so the drivers space
+    every I/O -- writes AND queries, from any thread -- themselves."""
+    import threading
+    for inst in (awg(), TC10LAB("TCPIP::fake::INSTR")):
+        inst.device = TimedDevice()
+        threads = [threading.Thread(target=lambda: [inst.command("*CLS"),
+                                                    inst.query("*IDN?")])
+                   for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        gaps = [b - a for a, b in zip(inst.device.at, inst.device.at[1:])]
+        assert len(inst.device.at) == 8
+        # A hair of slack for the sleep granularity of the OS timer.
+        assert min(gaps) >= inst.MIN_INTERVAL_S * 0.9, \
+            f"{type(inst).__name__}: {1 / min(gaps):.0f} I/Os per second"
+        assert inst.MIN_INTERVAL_S >= 1 / 60
+
+
+def test_a_short_ramp_is_not_a_flood():
+    """move(ch, v, t=0.1, steps=60) used to mean 600 commands/s. Steps are capped
+    to what the pacing allows in t, so the ramp still lands where it was asked."""
+    gen = awg()
+    gen.move(1, 1.0, t=0.1, steps=60)
+    written = offsets(gen.device.writes, ":SOURce1")
+    assert len(written) == int(0.1 / gen.MIN_INTERVAL_S), len(written)
+    assert abs(written[-1] - 1.0) < 1e-9
+
+
 def test_dcinit_zeroes_the_remembered_position():
     """dcinit writes the offsets, so the position it leaves behind IS zero --
     otherwise the next update() jumps by a stale amount."""
@@ -147,7 +197,10 @@ def test_every_scpi_call_goes_through_the_lock():
     source = inspect.getsource(dg1022z)
     allowed = ("self.device.read_termination", "self.device.write_termination",
                "self.device.timeout", "self.device.close()",
-               "self.device.write(cmd)", "self.device.query(cmd)")
+               "self.device.write(cmd)", "self.device.query(cmd)",
+               # _resync: the protocol CLEAR and its read-drain fallback, both
+               # inside `with self._lock` -- flushing, not SCPI.
+               "self.device.clear()", "self.device.read()")
     for lineno, line in enumerate(source.splitlines(), 1):
         if "self.device." in line and not any(a in line for a in allowed):
             raise AssertionError(f"dg1022z.py:{lineno} bypasses command()/query(): "
@@ -305,17 +358,428 @@ def test_status_costs_five_round_trips():
     assert "TEC:UNITS?" not in asked      # cached by set_units()/get_units()
 
 
-def test_dev_path_uses_the_kernel_usbtmc_transport():
-    """TCLAB_RESOURCE=/dev/usbtmc0 must not be handed to pyvisa (which cannot
-    parse it) -- that silently looked like 'the instrument is not there'."""
-    tc = TC10LAB("/dev/usbtmc-does-not-exist")
+# ------------------------------------------------ TC10 LAB: finding the box
+class FakeRM:
+    """pyvisa.ResourceManager('@py') stand-in: lists `listed`, opens a device
+    whose *IDN? is `idn`, and records every resource string it was handed."""
+
+    listed, idn, opened = [], "", []
+
+    def __init__(self, backend):
+        pass
+
+    def list_resources(self, query="?*::INSTR"):
+        return list(FakeRM.listed)
+
+    def open_resource(self, res):
+        FakeRM.opened.append(res)
+        dev = FakeDevice({"*IDN?": FakeRM.idn})
+        dev.clear = lambda: None
+        return dev
+
+    def close(self):
+        pass
+
+
+class FakeTmc:
+    """A /dev/usbtmcN. `queued` is a reply left behind by a session that died
+    mid-query: it comes back from the next read unless CLEAR flushed it."""
+
+    replies, queued, opened, closed = {}, {}, [], []
+
+    def __init__(self, path, timeout_ms=None):
+        self.path, self.sent = path, []
+        FakeTmc.opened.append(path)
+
+    def write(self, cmd):
+        self.sent.append(cmd)
+
+    def query(self, cmd):
+        self.sent.append(cmd)
+        stale = FakeTmc.queued.pop(self.path, None)
+        if stale is not None:
+            return stale
+        return FakeTmc.replies.get(self.path, {}).get(cmd, "0")
+
+    def clear(self):
+        self.sent.append("cleared")
+        FakeTmc.queued.pop(self.path, None)
+
+    def close(self):
+        FakeTmc.closed.append(self.path)
+
+
+RIGOL_IDN = "Rigol Technologies,DG1022Z,DG1ZA,00.02"
+TC10_IDN = "Wavelength Electronics,TC10 LAB,123,1.0"
+
+
+def _usb_world(nodes, sysfs_vids=None, bus_vids=(), listed=(), visa_idn=TC10_IDN):
+    """Stand the TC10 driver up in a fake machine and return the module.
+
+    nodes       {"/dev/usbtmcN": "*IDN? reply"}      what exists in /dev
+    sysfs_vids  {"/dev/usbtmcN": vendor id}          what the kernel says owns it
+                (None -> sysfs unreadable, as on a test box)
+    bus_vids    vendor ids the kernel reports on the USB bus
+    listed      what VISA's list_resources returns
+    """
+    import tempfile
+    from scopio_microscope.drivers import TC10LAB as mod
+
+    root = tempfile.mkdtemp()
+    usbmisc, bus = os.path.join(root, "usbmisc"), os.path.join(root, "bus")
+    for path, vid in (sysfs_vids or {}).items():
+        # dirname(realpath(<usbmisc>/usbtmcN/device)) must hold idVendor. A
+        # plain directory stands in for the kernel's symlink.
+        node = os.path.join(usbmisc, os.path.basename(path))
+        os.makedirs(os.path.join(node, "device"))
+        with open(os.path.join(node, "idVendor"), "w") as f:
+            f.write(f"{vid:04x}\n")
+    for i, vid in enumerate(bus_vids):
+        dev = os.path.join(bus, f"1-1.{i + 1}")
+        os.makedirs(dev)
+        with open(os.path.join(dev, "idVendor"), "w") as f:
+            f.write(f"{vid:04x}\n")
+
+    real_glob = _usb_world.real_glob
+
+    def fake_glob(pattern):
+        if pattern.startswith("/dev/"):
+            import fnmatch
+            return [p for p in nodes if fnmatch.fnmatch(p, pattern)]
+        return real_glob(pattern)
+
+    mod.glob.glob = fake_glob
+    mod.SYSFS_USBMISC, mod.SYSFS_USB = usbmisc, bus
+    mod.UsbtmcDevice = FakeTmc
+    FakeTmc.replies = {p: {"*IDN?": idn} for p, idn in nodes.items()}
+    FakeTmc.queued, FakeTmc.opened, FakeTmc.closed = {}, [], []
+    mod.pyvisa.ResourceManager = FakeRM
+    FakeRM.listed, FakeRM.idn, FakeRM.opened = list(listed), visa_idn, []
+    return mod
+
+
+def _restore_usb_world():
+    from scopio_microscope.drivers import TC10LAB as mod
+    mod.glob.glob = _usb_world.real_glob
+    mod.SYSFS_USBMISC, mod.SYSFS_USB = "/sys/class/usbmisc", "/sys/bus/usb/devices"
+    mod.UsbtmcDevice = _usb_world.real_dev
+    if hasattr(mod.pyvisa, "ResourceManager"):
+        del mod.pyvisa.ResourceManager
+
+
+def _init_usb_world():
+    import glob as _glob
+    from scopio_microscope.drivers import TC10LAB as mod
+    _usb_world.real_glob = _glob.glob
+    _usb_world.real_dev = mod.UsbtmcDevice
+
+
+_init_usb_world()
+TC10_USB = "USB0::6725::12545::SN123::0::INSTR"   # pyvisa-py writes ids in decimal
+
+
+def test_when_the_kernel_owns_the_tc10_visa_is_never_touched():
+    """THE instability. On this Pi the kernel's usbtmc driver claims the TC10 at
+    boot, and a VISA open then has to detach it -- which hangs. The detach also
+    deletes /dev/usbtmcN until a replug, so a hang on one attempt changed what
+    the next attempt saw: "sometimes it works". Ownership now picks the
+    transport, whatever TCLAB_RESOURCE says."""
     try:
+        for configured in ("", "/dev/usbtmc0", TC10_USB):
+            _usb_world({"/dev/usbtmc0": RIGOL_IDN, "/dev/usbtmc1": TC10_IDN},
+                       sysfs_vids={"/dev/usbtmc0": 0x1AB1, "/dev/usbtmc1": 0x1A45},
+                       listed=[TC10_USB])
+            tc = TC10LAB(configured)
+            tc._open()
+            assert tc.resource == "/dev/usbtmc1", (configured, tc.resource)
+            assert FakeRM.opened == [], f"{configured!r}: VISA opened {FakeRM.opened}"
+            # The Rigol's node belongs to the galvo node: never written to.
+            assert "/dev/usbtmc0" not in FakeTmc.opened, (configured, FakeTmc.opened)
+            assert tc.identity == TC10_IDN
+            if configured == TC10_USB:
+                assert "owns the TC10" in tc.probe_note, tc.probe_note
+    finally:
+        _restore_usb_world()
+
+
+def test_a_stale_reply_cannot_make_the_tc10_reject_itself():
+    """A session that died mid-query leaves its reply queued in the instrument.
+    Asked *IDN? without a CLEAR first, the real TC10 answered "25.0" and was
+    thrown out as "not a TC10"."""
+    try:
+        _usb_world({"/dev/usbtmc0": TC10_IDN}, sysfs_vids={"/dev/usbtmc0": 0x1A45})
+        FakeTmc.queued = {"/dev/usbtmc0": "25.0"}
+        tc = TC10LAB("")
         tc._open()
-    except OSError:
-        pass                              # reached the char device, as intended
+        assert tc.resource == "/dev/usbtmc0"
+        sent = tc.device.sent
+        assert sent.index("cleared") < sent.index("*IDN?"), sent
+    finally:
+        _restore_usb_world()
+
+
+def test_a_configured_dev_path_with_no_node_falls_back_to_visa():
+    """Any VISA session detaches the kernel driver, and /dev/usbtmcN is gone
+    until the box is replugged. TCLAB_RESOURCE=/dev/usbtmc* then failed forever
+    with the TC10 sitting right there on VISA."""
+    try:
+        _usb_world({}, listed=["USB0::6833::1602::DG1ZA::0::INSTR", TC10_USB])
+        tc = TC10LAB("/dev/usbtmc*")
+        tc._open()
+        assert tc.resource == TC10_USB, tc.resource
+        assert FakeRM.opened == [TC10_USB], "only the Wavelength box, by vendor id"
+        assert "not bound" in tc.probe_note, tc.probe_note
+        assert not any(r.startswith("/dev/") for r in FakeRM.opened), \
+            "a /dev path must never be handed to pyvisa"
+    finally:
+        _restore_usb_world()
+
+
+def test_sysfs_unreadable_still_finds_it_by_asking():
+    """Where sysfs cannot say who owns a node, every node is asked -- and a
+    node that is not the TC10 is released again."""
+    try:
+        _usb_world({"/dev/usbtmc0": RIGOL_IDN, "/dev/usbtmc1": TC10_IDN})
+        tc = TC10LAB("")
+        tc._open()
+        assert tc.resource == "/dev/usbtmc1"
+        assert FakeTmc.closed == ["/dev/usbtmc0"]
+        assert FakeRM.opened == []
+    finally:
+        _restore_usb_world()
+
+
+def test_not_found_says_whether_the_box_is_on_the_bus():
+    """The first question of any "not found" is hardware or software. The
+    kernel knows, so the error says which."""
+    try:
+        _usb_world({}, bus_vids=())
+        try:
+            TC10LAB("")._open()
+        except RuntimeError as exc:
+            assert "no TC10 LAB on the USB bus" in str(exc), exc
+        else:
+            raise AssertionError("nothing plugged in must raise")
+
+        _usb_world({}, bus_vids=(0x1A45,), listed=[])
+        try:
+            TC10LAB("")._open()
+        except RuntimeError as exc:
+            assert "IS on the USB bus" in str(exc) and "permissions" in str(exc), exc
+        else:
+            raise AssertionError("an unlisted box must raise")
+    finally:
+        _restore_usb_world()
+
+
+def test_the_wrong_instrument_is_refused_by_identity():
+    """A VISA address typed for the AWG must not hand this node the AWG: two
+    nodes on one instrument reads as both of them flapping."""
+    try:
+        _usb_world({}, visa_idn=RIGOL_IDN)
+        try:
+            TC10LAB("TCPIP::10.0.0.9::INSTR")._open()
+        except RuntimeError as exc:
+            assert "not a Wavelength TC10" in str(exc), exc
+        else:
+            raise AssertionError("a Rigol answering *IDN? must be refused")
+    finally:
+        _restore_usb_world()
+
+
+def test_the_kernel_owns_it_but_it_is_silent_does_not_fight_for_it():
+    """If the kernel's node for the TC10 does not answer, going to VISA would
+    detach the driver -- the hang. It must fail, and say what to try."""
+    try:
+        _usb_world({"/dev/usbtmc0": ""}, sysfs_vids={"/dev/usbtmc0": 0x1A45},
+                   listed=[TC10_USB])
+        try:
+            TC10LAB("")._open()
+        except RuntimeError as exc:
+            assert "owns the TC10" in str(exc), exc
+        else:
+            raise AssertionError("a silent kernel-owned TC10 must raise")
+        assert FakeRM.opened == []
+    finally:
+        _restore_usb_world()
+
+
+def test_a_hung_connect_is_abandoned_not_waited_on_forever():
+    """pyvisa-py can hang INSIDE the open, where no VISA timeout reaches. The
+    node's connect ran on its executor thread, so one hang froze the node for
+    good: no retries, no status, no reason given."""
+    import threading
+    import time as _time
+    from scopio_microscope.connect_guard import ConnectGuard, ConnectHung
+
+    guard = ConnectGuard(0.3)
+    release, discarded = threading.Event(), []
+
+    t0 = _time.monotonic()
+    try:
+        guard.run(lambda: release.wait() and "session", discarded.append)
+    except ConnectHung as exc:
+        assert "USB stack" in str(exc)
     else:
-        raise AssertionError("expected an OSError from the missing device node")
-    assert tc.rm is None, "pyvisa must not be involved for a /dev path"
+        raise AssertionError("a hung attempt must raise ConnectHung")
+    assert _time.monotonic() - t0 < 1.0, "the deadline must actually bound it"
+
+    # While the first is still stuck, no second session on the same device.
+    try:
+        guard.run(lambda: "second", discarded.append)
+    except ConnectHung as exc:
+        assert "still stuck" in str(exc)
+    else:
+        raise AssertionError("a second attempt must not start while one is stuck")
+
+    # It comes back late after all: what it opened is closed, not leaked.
+    release.set()
+    for _ in range(50):
+        if discarded:
+            break
+        _time.sleep(0.02)
+    assert discarded == ["session"], discarded
+    assert guard.run(lambda: "fresh", discarded.append) == "fresh"
+
+    # And an attempt's own failure reaches the caller unchanged.
+    def fails():
+        raise OSError("VI_ERROR_RSRC_NFOUND")
+    try:
+        guard.run(fails, discarded.append)
+    except OSError as exc:
+        assert "NFOUND" in str(exc)
+    else:
+        raise AssertionError("the attempt's exception must propagate")
+
+
+def test_the_awg_session_is_cleared_and_identified_on_connect():
+    """The DG1022Z had none of the TC10's session hygiene: a reply left queued
+    by a dead session was read as the first answer of the next, and a
+    GALVO_RESOURCE naming the wrong box was accepted."""
+    from scopio_microscope.drivers import dg1022z as mod
+
+    class Session(FakeDevice):
+        def __init__(self, idn):
+            super().__init__({"*IDN?": idn})
+            self.stale = "1000.0"            # left by a session that died
+
+        def clear(self):
+            self.writes.append("cleared")
+            self.stale = None
+
+        def query(self, cmd):
+            self.writes.append(cmd)
+            if self.stale is not None:
+                reply, self.stale = self.stale, None
+                return reply
+            return self.replies.get(cmd, "0")
+
+    for idn, ok in ((RIGOL_IDN, True), (TC10_IDN, False)):
+        session = Session(idn)
+        mod.pyvisa.ResourceManager = lambda backend: types.SimpleNamespace(
+            open_resource=lambda res: session, close=lambda: None)
+        try:
+            gen = DG1022Z("USB0::6833::1602::DG1ZA::0::INSTR")
+            gen._open()
+            assert ok, "a Wavelength box must not pass as the AWG"
+            assert gen.identity == RIGOL_IDN, gen.identity
+            assert session.writes[0] == "cleared", session.writes
+        except RuntimeError as exc:
+            assert not ok and "not a Rigol" in str(exc), exc
+        finally:
+            del mod.pyvisa.ResourceManager
+
+
+def test_a_timed_out_awg_query_does_not_leave_it_one_answer_behind():
+    gen = awg()
+    calls = {"n": 0}
+
+    def flaky(cmd):
+        gen.device.writes.append(cmd)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("VI_ERROR_TMO")
+        return "1000"
+
+    gen.device.query = flaky
+    gen.device.clear = lambda: gen.device.writes.append("cleared")
+    try:
+        gen.query(":SOURce1:FREQuency?")
+    except TimeoutError:
+        pass
+    assert gen._desynced
+    gen.device.writes.clear()
+    assert gen.query(":SOURce1:FREQuency?") == "1000"
+    assert gen.device.writes == ["cleared", "*CLS", ":SOURce1:FREQuency?"], \
+        gen.device.writes
+
+
+def _temperature_node():
+    """Import temperature_node with rclpy and the message packages stubbed."""
+    _camera_node()                       # installs the rclpy stubs
+    anything = type("Anything", (), {})
+    for name, attrs in {"scopio_interfaces.msg": {"TemperatureStatus": anything},
+                        "scopio_interfaces.srv": {"InstrumentCall": anything}}.items():
+        for k, v in attrs.items():
+            if not hasattr(sys.modules[name], k):
+                setattr(sys.modules[name], k, v)
+    from scopio_microscope import temperature_node
+    return temperature_node
+
+
+def test_the_temperature_node_survives_a_connect_that_hangs():
+    """Node level: the connect must go through the guard, report the hang in
+    last_error (the status topic carries it), and close the session the stuck
+    attempt opens if it ever comes back."""
+    import threading
+    import time as _time
+    from scopio_microscope.connect_guard import ConnectGuard
+
+    mod = _temperature_node()
+    release, closed = threading.Event(), []
+
+    class HangingTC10:
+        def __init__(self, resource, timeout_ms=5000):
+            self.resource, self.identity, self.probe_note = resource, "", ""
+
+        def _open(self):
+            release.wait()
+
+        def get_units(self):
+            return "C"
+
+        def set_units(self, units):
+            return "C"
+
+        def _close(self):
+            closed.append(self)
+
+    real = mod.TC10LAB
+    mod.TC10LAB = HangingTC10
+    try:
+        node = object.__new__(mod.TemperatureNode)
+        FakeNode.__init__(node, "temperature_node")
+        for name, value in (("resource", ""), ("timeout_ms", 5000), ("units", "C")):
+            node.declare_parameter(name, value)
+        node._lock, node.tc, node.idn, node.last_error = threading.RLock(), None, "", ""
+        node._failures, node.state = 0, {}
+        node._guard = ConnectGuard(0.3)
+
+        t0 = _time.monotonic()
+        assert node._connect() is False
+        assert _time.monotonic() - t0 < 1.5, "the node thread must get back"
+        assert "ConnectHung" in node.last_error, node.last_error
+        assert node._connect() is False and "still stuck" in node.last_error
+
+        release.set()
+        for _ in range(50):
+            if closed:
+                break
+            _time.sleep(0.02)
+        assert len(closed) == 1, "the late session must be closed, not leaked"
+        assert node.tc is None
+    finally:
+        mod.TC10LAB = real
 
 
 def test_usbtmc_picks_the_tc10_not_the_other_usbtmc_box():
@@ -327,7 +791,7 @@ def test_usbtmc_picks_the_tc10_not_the_other_usbtmc_box():
     class FakeTmc:
         opened, closed = [], []
 
-        def __init__(self, path):
+        def __init__(self, path, timeout_ms=None):
             self.path, self.sent = path, []
             FakeTmc.opened.append(path)
 
@@ -455,6 +919,88 @@ def _conversion():
     sys.modules["rosidl_runtime_py.utilities"] = utils
     from scopio_gateway import conversion
     return conversion
+
+
+def _ros_bridge():
+    """Import the gateway's ros_bridge with rclpy stubbed out."""
+    _conversion()
+    enum = lambda *names: types.SimpleNamespace(**{n: n.lower() for n in names})  # noqa: E731
+    stubs = {"rclpy": {"ok": lambda: True},
+             "rclpy.action": {},
+             "rclpy.action.graph": {"get_action_names_and_types": lambda n: []},
+             "rclpy.executors": {"MultiThreadedExecutor": object},
+             "rclpy.node": {"Node": FakeNode},
+             "rclpy.qos": {"QoSProfile": lambda **kw: types.SimpleNamespace(**kw),
+                           "DurabilityPolicy": enum("VOLATILE", "TRANSIENT_LOCAL"),
+                           "HistoryPolicy": enum("KEEP_LAST"),
+                           "ReliabilityPolicy": enum("RELIABLE", "BEST_EFFORT")}}
+    for name, attrs in stubs.items():
+        mod = sys.modules.get(name) or types.ModuleType(name)
+        for k, v in attrs.items():
+            setattr(mod, k, v)     # overwrite: other stubs may lack these
+        sys.modules[name] = mod
+        if "." in name:
+            parent, _, child = name.rpartition(".")
+            setattr(sys.modules.setdefault(parent, types.ModuleType(parent)),
+                    child, mod)
+    from scopio_gateway import ros_bridge
+    return ros_bridge
+
+
+def test_a_new_nodes_status_reaches_status_with_no_gateway_change():
+    """Adding a capability is meant to be "write a node". The /status snapshot
+    was a hand-kept list of six topics with hand-imported types, so a new
+    node's status needed a gateway edit on the Pi to show up anywhere."""
+    mod = _ros_bridge()
+    durability = sys.modules["rclpy.qos"].DurabilityPolicy
+    reliability = sys.modules["rclpy.qos"].ReliabilityPolicy
+
+    def pub(latched=False):
+        return types.SimpleNamespace(qos_profile=types.SimpleNamespace(
+            durability=durability.TRANSIENT_LOCAL if latched else durability.VOLATILE,
+            reliability=reliability.RELIABLE))
+
+    graph = {"/scopio/stage/position": ("scopio_interfaces/msg/StagePosition", [pub()]),
+             "/scopio/relay/state": ("std_msgs/msg/Bool", [pub(latched=True)]),
+             "/scopio/pressure/status": ("new_pkg/msg/Pressure", [pub()]),   # NEW node
+             "/scopio/pressure/raw": ("std_msgs/msg/Float64", [pub()]),       # not status
+             "/scopio/image/compressed": ("sensor_msgs/msg/CompressedImage", [pub()]),
+             "/scopio/vacuum/status": ("new_pkg/msg/Vacuum", []),             # no publisher yet
+             "/elsewhere/status": ("std_msgs/msg/String", [pub()])}
+    subs = {}
+
+    class Graph:
+        def get_topic_names_and_types(self):
+            return [(n, [t]) for n, (t, _) in graph.items()]
+
+        def get_publishers_info_by_topic(self, name):
+            return graph[name][1]
+
+        def create_subscription(self, cls, name, cb, qos):
+            subs[name] = (cb, qos)
+            return name
+
+    bridge = mod.RosBridge()
+    bridge.node = Graph()
+    bridge._discover_telemetry()
+    assert set(subs) == {"/scopio/stage/position", "/scopio/relay/state",
+                         "/scopio/pressure/status"}, sorted(subs)
+    # Latched publishers are joined latched -- or the relay's retained value
+    # never reaches a gateway that started after it.
+    assert subs["/scopio/relay/state"][1].durability == durability.TRANSIENT_LOCAL
+
+    subs["/scopio/pressure/status"][0]({"mbar": 1.2e-6})
+    snap = bridge.telemetry_snapshot()
+    assert snap["pressure/status"]["msg"] == {"mbar": 1.2e-6}
+    assert snap["awg/status"] is None, "fixed names stay present, null until published"
+    assert list(snap)[:6] == mod.TELEMETRY_TOPICS
+
+    # A node that starts later is found on the next scan -- once, not twice.
+    graph["/scopio/vacuum/status"] = ("new_pkg/msg/Vacuum", [pub()])
+    bridge._discover_telemetry()
+    bridge._discover_telemetry()
+    assert "/scopio/vacuum/status" in subs
+    assert len(bridge._telemetry_subs) == 4
 
 
 class FakeControls:
@@ -629,6 +1175,99 @@ def test_exposure_longer_than_the_frame_lowers_the_frame_rate():
     finally:
         cs.picam2 = None
         cs.state.update(framerate=30.0, exposure=20000)
+
+
+# ------------------------------------------------------- camera node (bridge)
+def _camera_node():
+    """Import camera_node with rclpy and the message packages stubbed out."""
+    if "scopio_microscope.camera_node" in sys.modules:
+        return sys.modules["scopio_microscope.camera_node"]
+    anything = type("Anything", (), {})
+    stubs = {"rclpy": {},
+             "rclpy.action": {"ActionServer": anything, "CancelResponse": anything,
+                              "GoalResponse": anything},
+             "rclpy.callback_groups": {"ReentrantCallbackGroup": anything},
+             "rclpy.executors": {"MultiThreadedExecutor": anything},
+             "rclpy.node": {"Node": FakeNode},
+             "sensor_msgs.msg": {"CompressedImage": anything},
+             "scopio_interfaces.msg": {"CameraState": anything},
+             "scopio_interfaces.srv": {"SetCameraControls": anything,
+                                       "SetFramerate": anything,
+                                       "WhiteBalance": anything,
+                                       "StageJog": anything},
+             "scopio_interfaces.action": {"Autofocus": anything}}
+    for name, attrs in stubs.items():
+        mod = sys.modules.get(name) or types.ModuleType(name)
+        for k, v in attrs.items():
+            if not hasattr(mod, k):
+                setattr(mod, k, v)
+        sys.modules[name] = mod
+        if "." in name:
+            parent, _, child = name.rpartition(".")
+            setattr(sys.modules.setdefault(parent, types.ModuleType(parent)),
+                    child, mod)
+    from scopio_microscope import camera_node
+    return camera_node
+
+
+def _bridge(server):
+    """A CameraNode in bridge mode whose camera server is the dict `server`."""
+    mod = _camera_node()
+    node = object.__new__(mod.CameraNode)
+    FakeNode.__init__(node, "camera_node")
+    node.bridge_url, node.picam2, node.width, node.height = "http://cam", None, 640, 480
+    node.cam = {"red_gain": 2.0, "green_gain": 1.0, "blue_gain": 2.0,
+                "framerate": 30.0, "exposure": 20000, "analogue_gain": 1.0,
+                "colour_gain": 2.0, "contrast": 1.0, "saturation": 1.0,
+                "brightness": 0.0, "sharpness": 1.0}
+    node.exposure_budget = 20000.0
+    node._latest_jpeg_at = 0.0
+    node._server_ok_at, node._server_frames, node._server_fps = 0.0, None, 0.0
+    node._refresh_at, node._pushed_controls, node._af_active = 0.0, False, False
+    node._bridge_http = lambda method, path, payload=None, timeout=12.0: dict(server)
+    return node
+
+
+def test_camera_state_follows_what_the_camera_server_is_doing():
+    """A client changing exposure through the gateway's /camera/controls goes
+    straight to the camera server, past this node. camera/state used to keep
+    reporting the node's own last push; now it reads the server back."""
+    server = {"width": 1640, "height": 1232, "mode": "detail", "framerate": 20.0,
+              "exposure": 40000, "analogue_gain": 2.0, "red_gain": 3.0,
+              "blue_gain": 5.0, "contrast": 1.5, "frames": 100}
+    node = _bridge(server)
+    assert node.connected is False
+
+    # Before this connection's push: geometry is adopted, settings are NOT --
+    # a restarted server is on defaults, and the push is there to undo that.
+    node._refresh_from_server()
+    assert node.connected is True, "a 200 from /controls is a live camera"
+    assert (node.width, node.height) == (1640, 1232)
+    assert node.cam["exposure"] == 20000
+
+    node._pushed_controls = True
+    node._refresh_at = 0.0
+    server["frames"] = 100 + 40
+    node._server_frames = (100, node._server_frames[1] - 2.0)   # 2 s ago
+    node._refresh_from_server()
+    assert node.cam["exposure"] == 40000 and node.cam["analogue_gain"] == 2.0
+    assert node.cam["contrast"] == 1.5 and node.cam["framerate"] == 20.0
+    # The server applies red*colour_gain; the node keeps them apart.
+    assert node.cam["red_gain"] == 1.5 and node.cam["blue_gain"] == 2.5
+    assert node.exposure_budget == 80000
+    assert 19.0 <= node._server_fps <= 20.5, node._server_fps
+
+
+def test_the_bridge_ingests_only_when_someone_wants_frames():
+    node = _bridge({})
+    subscribers = [0]
+    node.image_pub = types.SimpleNamespace(
+        get_subscription_count=lambda: subscribers[0])
+    assert node._want_frames() is False, "nobody subscribed: no Pi CPU spent"
+    node._af_active = True
+    assert node._want_frames() is True, "autofocus scores the frames itself"
+    node._af_active, subscribers[0] = False, 1
+    assert node._want_frames() is True
 
 
 # ------------------------------------------------------- relay node

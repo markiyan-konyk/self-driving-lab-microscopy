@@ -35,6 +35,7 @@ on the Pi with ros2_ws/scripts/generate_api_key.py. Optional: SCOPIO_UI_PORT
 import os
 import re
 import time
+import queue
 import socket
 import secrets
 import logging
@@ -132,6 +133,11 @@ class State:
         self.relay = None
         self.calibration = None     # calibration message dict (latched)
         self.connected = False      # gateway subscriptions established
+        # While recording: EVERY ingested frame, in order, for the writer. See
+        # _ingest -- sampling self.jpeg instead loses frames whenever writing
+        # one takes longer than the gap to the next.
+        self.rec_queue = None
+        self.rec_dropped = 0
 
 
 state = State()
@@ -144,6 +150,9 @@ _af_running = False
 # ---- client-side recording state ----
 _rec = {"active": False, "thread": None, "stop": threading.Event(),
         "filename": None, "started_at": None, "duration": None}
+# Frames the writer may fall behind by before it starts dropping: seconds of
+# slack even at the fast sensor mode's ~200 fps, a few tens of MB of JPEGs.
+REC_QUEUE_FRAMES = 1024
 
 
 def _read(name):
@@ -212,6 +221,22 @@ def _subscribe_loop():
         time.sleep(3)
 
 
+def _ingest(frame):
+    """Hand one frame to everything that consumes the stream: the newest-frame
+    slot (/video_feed, focus display) and, while recording, the writer's queue.
+    A full queue means the writer is hopelessly behind; the drop is counted and
+    reported rather than blocking the live view."""
+    with state.lock:
+        state.jpeg = frame
+        state.jpeg_seq += 1
+        q = state.rec_queue
+    if q is not None:
+        try:
+            q.put_nowait(frame)
+        except queue.Full:
+            state.rec_dropped += 1
+
+
 def _frame_ingest_loop():
     """Pull the live MJPEG stream through the gateway into state.jpeg -- feeds
     /video_feed, recording and the focus display. Reconnects forever."""
@@ -219,9 +244,7 @@ def _frame_ingest_loop():
     while True:
         try:
             for frame in scope.stream_frames():
-                with state.lock:
-                    state.jpeg = frame
-                    state.jpeg_seq += 1
+                _ingest(frame)
                 now = time.time()
                 dt = now - last_t
                 last_t = now
@@ -443,7 +466,9 @@ def camera_mode():
         else:
             data = scope.camera.get_controls()
     except ScopioError as e:
-        return jsonify({"error": str(e)}), 503
+        # A refused mode is the caller's 400 (the gateway passes it through);
+        # anything else is the microscope being unreachable.
+        return jsonify({"error": str(e)}), 400 if e.status == 400 else 503
     if data.get("error"):
         return jsonify({"error": data["error"]}), 400
     return jsonify({"mode": data.get("mode"), "modes": data.get("modes") or {},
@@ -709,29 +734,44 @@ def _next_index(folder):
     return (max(nums) + 1) if nums else 1
 
 
+def _release_queue(frames):
+    """Stop feeding `frames` -- only if it is still the live queue, so a writer
+    that is finishing late can never cut off the recording that followed it."""
+    with state.lock:
+        if state.rec_queue is frames:
+            state.rec_queue = None
+
+
 def _record_loop(path, fps, duration):
     """Write the ingested JPEG stream to an MP4 until stopped / duration up.
 
-    ONE written frame per INGESTED frame -- it waits on jpeg_seq, exactly like
-    /video_feed. Sampling state.jpeg on a timer instead writes the same frame
-    twice when the camera runs slower than fps and skips frames when it runs
-    faster, so the clip's timebase stops matching real time. That timebase IS
-    the measurement in any motion analysis done on the footage later.
+    ONE written frame per INGESTED frame, in order: _ingest queues every frame
+    for this thread. Sampling state.jpeg (on a timer, or on jpeg_seq) instead
+    writes the same frame twice when the camera runs slower than fps and SKIPS
+    frames whenever a write outlasts the gap to the next frame -- opening the
+    VideoWriter alone does. Either way the clip's timebase stops matching real
+    time, and that timebase IS the measurement in any motion analysis done on
+    the footage later.
     """
+    # Install the queue FIRST, so nothing that arrives while cv2 loads is lost.
+    frames = queue.Queue(maxsize=REC_QUEUE_FRAMES)
+    with state.lock:
+        state.rec_queue, state.rec_dropped = frames, 0
     import cv2
     import numpy as np
-    writer, written, last_seq = None, 0, -1
+    writer, written = None, 0
     start = time.time()
     try:
-        while not _rec["stop"].is_set():
-            if duration and time.time() - start >= duration:
-                break
-            with state.lock:
-                jpeg, seq = state.jpeg, state.jpeg_seq
-            if jpeg is None or seq == last_seq:
-                time.sleep(0.005)
+        while True:
+            if _rec["stop"].is_set() or (duration and time.time() - start >= duration):
+                # Stop accepting, then drain what had already arrived.
+                _release_queue(frames)
+                if frames.empty():
+                    break
+            try:
+                jpeg = frames.get(timeout=0.05)
+            except queue.Empty:
                 continue
-            last_seq = seq
             frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 continue
@@ -747,6 +787,10 @@ def _record_loop(path, fps, duration):
             writer.write(frame)
             written += 1
     finally:
+        _release_queue(frames)
+        if state.rec_dropped:
+            log.warning(f"recording fell behind and DROPPED {state.rec_dropped} "
+                        "frames; the clip's timebase is not trustworthy")
         if writer is not None:
             writer.release()
         _finish_recording(path, written, time.time() - start)

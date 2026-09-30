@@ -1,9 +1,9 @@
 """stage_node - owns the Sangaboard XYZ stage.
 
-Publishes the microscope's global (open-loop) position and executes long-horizon
-motion goals. It re-implements the small amount of stage logic leanly for ROS
-rather than importing the Flask app's controls.py (which carries app-global
-state).
+Publishes the microscope's global position and executes long-horizon motion
+goals. The position is OPEN-LOOP: it is counted in steps from wherever the stage
+was when this node started, and is lost when it restarts -- there is no homing
+and no encoder, so treat it as relative to the current session.
 
 Topics / services / actions (under /scopio):
   pub     stage/position    scopio_interfaces/StagePosition  (steps + micrometres)
@@ -40,6 +40,8 @@ from scopio_interfaces.action import MoveStagePath, ScanRegion
 # only way. /dev/serial0 is the Pi's alias for whichever UART is on pins 8/10.
 GPIO_UART_PORTS = ("/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0")
 
+MAX_FAILURES = 3      # consecutive failed moves before the board is re-opened
+
 
 def serial_ports():
     """Every serial port visible here. This list IS the diagnosis: empty means
@@ -74,6 +76,7 @@ class StageNode(Node):
         # from under a move in progress.
         self._lock = threading.RLock()
         self.sb = None
+        self._failures = 0                          # consecutive failed moves
         self.position = {"x": 0, "y": 0, "z": 0}   # open-loop, origin at startup
         self.steps_per_um = {"x": 1.0, "y": 1.0, "z": 1.0}  # from calibration topic
 
@@ -153,6 +156,27 @@ class StageNode(Node):
         if self.sb is None:
             self._connect()
 
+    def _note_failure(self, exc):
+        """A move that raised. Same rule as the instrument nodes: MAX_FAILURES
+        in a row drop the board so the retry timer re-opens it. Without this a
+        board that was reset or re-plugged kept a dead serial handle forever --
+        _retry_connect only runs while sb is None, and it never became None."""
+        self._failures += 1
+        if self._failures < MAX_FAILURES:
+            return
+        with self._lock:
+            sb, self.sb = self.sb, None
+            self._failures = 0
+        try:
+            if sb is not None and hasattr(sb, "close"):
+                sb.close()
+        except Exception:
+            pass
+        self.get_logger().warning(
+            f"Sangaboard dropped after {MAX_FAILURES} failed moves ({exc}); "
+            "will reconnect. Position is kept: it is only valid if the board "
+            "was not power-cycled meanwhile.")
+
     def _on_calibration(self, msg):
         self.steps_per_um = {"x": msg.steps_per_um_x or 1.0,
                              "y": msg.steps_per_um_y or 1.0,
@@ -201,17 +225,29 @@ class StageNode(Node):
 
     def _move_rel(self, dx, dy, dz):
         """Move by a relative displacement (steps) and track absolute position."""
-        if self.sb is None:
-            raise RuntimeError("Sangaboard unavailable")
         with self._lock:
-            self.sb.move_rel([int(dx), int(dy), int(dz)])
+            # Checked under the lock: a retry-connect cannot swap the board in
+            # between, and a board that is None here stays None for this move.
+            if self.sb is None:
+                raise RuntimeError("Sangaboard unavailable")
+            try:
+                self.sb.move_rel([int(dx), int(dy), int(dz)])
+            except Exception as exc:
+                self._note_failure(exc)
+                raise
+            self._failures = 0
             self.position["x"] += int(dx)
             self.position["y"] += int(dy)
             self.position["z"] += int(dz)
 
     def _move_abs(self, x, y, z):
-        self._move_rel(x - self.position["x"], y - self.position["y"],
-                       z - self.position["z"])
+        # The delta is computed INSIDE the lock (an RLock, so _move_rel can take
+        # it again). Reading position outside it let a jog from another client
+        # land between the read and the move, and the absolute target was then
+        # missed by exactly that jog -- permanently, since position is open-loop.
+        with self._lock:
+            self._move_rel(x - self.position["x"], y - self.position["y"],
+                           z - self.position["z"])
 
     # ------------------------------------------------------------------ #
     #  Action: move along a path of absolute targets

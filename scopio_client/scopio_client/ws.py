@@ -92,6 +92,10 @@ class WsManager:
             except Exception:
                 if self._closed:
                     return
+                try:
+                    ws.close()      # else every reconnect leaks the dead socket
+                except Exception:
+                    pass
                 self._ws = None
                 # Fail everyone waiting on this connection (list(): the waiting
                 # threads pop themselves out of the dict as they give up).
@@ -159,7 +163,13 @@ class WsManager:
 
     def send_goal(self, action, goal, on_feedback=None, timeout=600.0):
         """Send an action goal and BLOCK until its result. Returns
-        {"status": "succeeded|aborted|canceled", "result": {...}}."""
+        {"status": "succeeded|aborted|canceled", "result": {...}}.
+
+        Giving up CANCELS the goal: when the timeout runs out or the caller is
+        interrupted (Ctrl-C), the goal is canceled on the microscope before this
+        raises. A ROS goal otherwise outlives its caller, and a scan whose script
+        died keeps moving the stage with nobody watching. (A dropped WebSocket
+        cannot cancel: the gateway ties a goal to the connection that sent it.)"""
         goal_id = f"g{next(self._ids)}"
         q = queue.Queue()
         self._waiters[goal_id] = q
@@ -169,30 +179,44 @@ class WsManager:
             ack = self._wait(goal_id, 15.0, ("action_ack",))
             if not ack.get("accepted", False):
                 raise ScopioError(f"goal for '{action}' was rejected", payload=ack)
-            deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ScopioError(f"action '{action}' timed out after {timeout}s")
-                try:
-                    env = q.get(timeout=remaining)
-                except queue.Empty:
-                    raise ScopioError(f"action '{action}' timed out after {timeout}s")
-                op = env.get("op")
-                if op == "action_feedback":
-                    if on_feedback:
-                        try:
-                            on_feedback(env.get("feedback"))
-                        except Exception:
-                            pass
-                elif op == "action_result":
-                    return {"status": env.get("status"),
-                            "result": env.get("result")}
-                elif op == "error":
-                    raise ScopioError(env.get("detail") or env.get("code"),
-                                      payload=env)
+            try:
+                return self._await_result(q, action, on_feedback, timeout)
+            except BaseException as exc:
+                if (getattr(exc, "payload", None) or {}).get("code") != "disconnected":
+                    self._cancel_quietly(goal_id)
+                raise
         finally:
             self._waiters.pop(goal_id, None)
+
+    def _await_result(self, q, action, on_feedback, timeout):
+        """Deliver feedback until the result envelope arrives, or raise."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ScopioError(f"action '{action}' timed out after {timeout}s "
+                                  "(the goal was canceled)")
+            try:
+                env = q.get(timeout=remaining)
+            except queue.Empty:
+                continue            # loops back into the deadline check
+            op = env.get("op")
+            if op == "action_feedback":
+                if on_feedback:
+                    try:
+                        on_feedback(env.get("feedback"))
+                    except Exception:
+                        pass
+            elif op == "action_result":
+                return {"status": env.get("status"), "result": env.get("result")}
+            elif op == "error":
+                raise ScopioError(env.get("detail") or env.get("code"), payload=env)
+
+    def _cancel_quietly(self, goal_id):
+        try:
+            self._send({"op": "action_cancel", "id": goal_id})
+        except Exception:
+            pass          # best effort: already on an error path
 
     def close(self):
         self._closed = True

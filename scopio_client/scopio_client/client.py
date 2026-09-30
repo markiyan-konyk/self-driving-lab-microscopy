@@ -22,8 +22,12 @@ Instrument classes: the galvo and temperature nodes each own a driver CLASS and
 expose every one of its methods over one service. Reach anything the sugar
 above doesn't cover with .call(), and ask the instrument what it has:
     scope.temperature.call("set_pid", 1.2, i=0.4)
-    scope.galvo.call("apply_sine", 1000, 2.0, channel=2)
+    scope.galvo.call("sine", 2, freq=1000, amp=2.0)
     [m["name"] for m in scope.temperature.methods()]
+
+Both instruments are PACED by their drivers on the Pi (under 60 commands/s --
+their input buffers are tiny). Calling faster than that does not fail; each
+call just waits its turn, so a tight loop runs at the instrument's pace.
 
 NaN sentinels: calibration/set (and the ROS camera/set_controls service) treat
 NaN as "leave unchanged". The convenience methods pre-fill JSON null (-> NaN)
@@ -71,7 +75,11 @@ class Scopio:
             raise ScopioError(f"cannot reach the microscope at {url}: {exc}")
         if r.status_code >= 400:
             try:
-                detail = r.json().get("detail")
+                body = r.json()
+                # FastAPI errors are {"detail": ...}; anything else (a proxy's
+                # JSON list, a bare string) must still produce a ScopioError,
+                # not an AttributeError out of the error path itself.
+                detail = body.get("detail", body) if isinstance(body, dict) else body
             except ValueError:
                 detail = r.text[:200]
             raise ScopioError(f"{method} {path} -> {r.status_code}: {detail}",
@@ -230,7 +238,7 @@ class _Camera:
 
 class _InstrumentCall:
     """Shared plumbing for the nodes that expose a whole driver class over one
-    `InstrumentCall` service (galvo -> WaveGen, temperature -> TCLab)."""
+    `InstrumentCall` service (galvo -> DG1022Z, temperature -> TC10LAB)."""
 
     SERVICE = None      # e.g. "temperature/call"
 
@@ -239,7 +247,7 @@ class _InstrumentCall:
 
     def call(self, method, *args, timeout=None, **kwargs):
         """Call any method of the instrument's driver class. Python args map
-        straight through: call("apply_sine", 1000, 2.0, channel=2)."""
+        straight through: call("sine", 2, freq=1000, amp=2.0)."""
         resp = self._s.call_service(self.SERVICE, {
             "method": method,
             "args": json.dumps(list(args)) if args else "",

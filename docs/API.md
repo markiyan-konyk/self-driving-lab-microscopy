@@ -77,15 +77,20 @@ scope.stage.jog(dz=100)
 | Method + path | Auth | Meaning |
 |---|---|---|
 | `GET /api/v1/health` | no | `{ok, ros_ok, camera_ok, auth_configured, uptime_s}` |
-| `GET /api/v1/status` | yes | one-call snapshot: latest `stage/position`, `camera/state`, `awg/status`, `temperature/status`, `relay/state`, `calibration` + camera reachability |
+| `GET /api/v1/status` | yes | one-call snapshot: latest `stage/position`, `camera/state`, `awg/status`, `temperature/status`, `relay/state`, `calibration` (always present, `null` until published) plus every other `*/status` or `*/state` topic under `/scopio` — a new node that follows that naming shows up here with no gateway change — and camera reachability |
 | `GET /api/v1/interfaces` | yes | discovery: every service/topic/action with per-field schemas |
 | `POST /api/v1/service/{name}` | yes | **generic service call** (section 4) |
 | `GET /api/v1/stream.mjpg` | yes | live MJPEG video |
 | `GET /api/v1/camera/controls` | yes | current camera settings (live exposure/gain merged in) |
 | `POST /api/v1/camera/controls` | yes | partial update: `framerate, exposure, analogue_gain, red_gain, blue_gain, contrast, saturation, brightness, sharpness` |
-| `POST /api/v1/camera/white_balance` | yes | one-shot AWB; locks the measured gains |
+| `POST /api/v1/camera/white_balance` | yes | one-shot AWB; locks the measured gains (409 on a mono sensor) |
+| `POST /api/v1/camera/mode` | yes | `{"mode": "detail" \| "fast"}` — full field of view vs highest frame rate; 400 for an unknown mode |
 | `GET /api/v1/camera/focus` | yes | cheap focus metric |
 | `WS /api/v1/ws` | yes | topics + actions (section 5) |
+
+Camera endpoints pass the camera server's status through: `503` while the
+sensor is not open (the body says why), `400`/`409` for a refused request.
+A 2xx always means it worked.
 
 ## 4. Generic service calls
 
@@ -194,6 +199,13 @@ Request `{method, args, kwargs}` → `{success, result, error}`. `args` is a JSO
 statically typed; this is the escape hatch). `result` is the JSON-encoded return
 value.
 
+**Both instruments are paced.** Their input buffers are tiny and they lag for
+seconds past ~60 commands/s, so each driver spaces its I/O at least
+`MIN_INTERVAL_S` (1/50 s) apart, across all clients at once. Calling faster
+does not fail; calls queue and run at the instrument's pace, so keep loops
+modest or a long queue can hit the service `timeout`. A multi-command method
+costs one slot per command (`dcinit` is 4, `status()` is 5).
+
 ```bash
 # set the sample to 25 °C
 curl -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
@@ -294,6 +306,12 @@ commands should go through services.)
 
 `status` is `succeeded | aborted | canceled`. Closing the socket does NOT
 cancel a running goal (ROS semantics) — cancel explicitly if you need to.
+`scopio_client`'s `send_goal` does this for you: when its timeout runs out or
+the caller is interrupted, it sends `action_cancel` before raising.
+
+A malformed request (bad `rate_hz`, unknown `type` on publish, a frame that is
+not a JSON object) is answered with `{"op":"error","code":"bad_request"}` for
+THAT id; the connection and its other subscriptions and goals stay up.
 
 **Actions** (types in `ros2_ws/src/scopio_interfaces/action/`):
 

@@ -21,12 +21,10 @@ import run_ui  # noqa: E402
 
 
 def _feed(frames, gap=0.01):
-    """Push `frames` distinct JPEGs into the shared state, like the ingest loop."""
+    """Push `frames` distinct JPEGs through the same path the ingest loop uses."""
     jpeg = _jpeg()
     for _ in range(frames):
-        with run_ui.state.lock:
-            run_ui.state.jpeg = jpeg
-            run_ui.state.jpeg_seq += 1
+        run_ui._ingest(jpeg)
         time.sleep(gap)
 
 
@@ -69,6 +67,30 @@ def test_one_written_frame_per_ingested_frame():
         assert saved[0] != "recording_1_10fps_5s.mp4", saved[0]
 
 
+def test_a_burst_faster_than_the_writer_loses_nothing():
+    """Frames arriving back-to-back -- faster than decode+encode, and while the
+    VideoWriter is still opening -- used to be skipped: the writer only ever saw
+    the newest frame. Every one must reach the file."""
+    import cv2
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "recording_1_30fps_5s.mp4")
+        run_ui._rec["stop"].clear()
+        writer = threading.Thread(target=run_ui._record_loop, args=(path, 30, 5.0))
+        writer.start()
+        time.sleep(0.1)
+        _feed(60, gap=0)                    # one burst, no pacing at all
+        run_ui._rec["stop"].set()
+        writer.join(timeout=10)
+
+        saved = [f for f in os.listdir(tmp) if f.endswith(".mp4")]
+        cap = cv2.VideoCapture(os.path.join(tmp, saved[0]))
+        written = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        assert written == 60, f"60 frames in, {written} frames out"
+        assert run_ui.state.rec_queue is None, "queue must be released"
+
+
 def test_a_second_recording_cannot_start_over_the_first():
     """`active` goes False before the writer has closed the file, so a quick
     stop-then-start ran two writers -- and the older one, finishing later,
@@ -86,10 +108,14 @@ def test_a_second_recording_cannot_start_over_the_first():
 
         assert app.post("/start_recording").status_code == 200
         assert app.post("/start_recording").status_code == 409, "flag interlock"
+        time.sleep(0.1)          # writer installs its queue
+        _feed(3)
         app.post("/stop_recording")
         # Immediately, before the writer thread has necessarily finished.
         assert app.post("/start_recording").status_code == 200
         assert run_ui._rec["thread"].is_alive()
+        time.sleep(0.1)
+        _feed(3)
         app.post("/stop_recording")
         run_ui._rec["thread"].join(timeout=10)
         assert run_ui._rec["active"] is False

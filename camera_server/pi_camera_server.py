@@ -289,8 +289,19 @@ def set_mode(name):
             return {"error": camera_error or "camera not open"}
         if name == state["mode"]:
             return get_controls()
+        previous = state["mode"]
         picam2.stop_recording()
-        _configure(picam2, name)
+        try:
+            _configure(picam2, name)
+        except Exception as exc:
+            # The sensor is stopped at this point. Raising without restarting
+            # it left the camera dark until the container was restarted, with
+            # every client seeing a stream that silently ended.
+            print(f"mode {name} failed ({exc}); restoring {previous}", flush=True)
+            _configure(picam2, previous)
+            apply_controls({})
+            return {"error": f"could not switch to {name}: {exc}; "
+                             f"still in {previous}"}
         apply_controls({})      # re-assert exposure/gains onto the new config
     return get_controls()
 
@@ -375,10 +386,18 @@ class Handler(server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _reply(self, obj, error_code):
+        """200 with obj, or error_code when the handler refused the request.
+        The refusals (bad mode, no AWB on a mono sensor) are {'error': ...}
+        dicts; answering them 200 read as success to every HTTP client."""
+        self._json(obj, error_code if isinstance(obj, dict) and "error" in obj
+                   else 200)
+
     def do_GET(self):
+        # send_error() already ends the headers and writes the body; a second
+        # end_headers() here used to append stray bytes after the 404 page.
         if self.path not in ("/", "/stream.mjpg", "/controls", "/focus"):
             self.send_error(404)
-            self.end_headers()
         elif picam2 is None:
             self._json(unavailable(), 503)
         elif self.path == "/controls":
@@ -391,7 +410,6 @@ class Handler(server.BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/controls", "/white_balance", "/mode"):
             self.send_error(404)
-            self.end_headers()
             return
         if picam2 is None:
             self._json(unavailable(), 503)
@@ -405,9 +423,9 @@ class Handler(server.BaseHTTPRequestHandler):
         if self.path == "/controls":
             self._guard(lambda: self._json(apply_controls(d)))
         elif self.path == "/mode":
-            self._guard(lambda: self._json(set_mode(str(d.get("mode", "")))))
+            self._guard(lambda: self._reply(set_mode(str(d.get("mode", ""))), 400))
         else:
-            self._guard(lambda: self._json(do_white_balance()))
+            self._guard(lambda: self._reply(do_white_balance(), 409))
 
     def _stream(self):
         self.send_response(200)

@@ -110,14 +110,16 @@ Three design rules explain most of what looks unusual here (the *why* is in
 - **The backend never analyses a frame and never records.** Both are client
   jobs, off the Pi (`../ui`, `../viscosity`, `../viscosity_agent`).
 
-**Calibration persists.** `calibration_node` writes `calibration.json` to the
-bind-mounted repo root on the Pi's real disk, atomically, and logs the absolute
-path at startup — it survives `docker compose down`, rebuilds and reboots.
+**Calibration persists.** `calibration_node` writes `calibration.json` to
+`ros2_ws/data/` on the Pi's real disk (gitignored, mounted at `/data`),
+atomically, and logs the absolute path at startup — it survives `docker compose
+down`, rebuilds and reboots. It is the only runtime state the backend keeps;
+back that folder up with `secrets/` and `.env`.
 
 ## When something doesn't work
 
 **Step zero: confirm you are running the code you think you are.** The nodes run
-from the built image, *not* from the repo mounted at `/workspace` — so after any
+from the built image, *not* from the repo on disk — so after any
 edit or `git pull` on the Pi you need `--build`, and without it nothing changes
 and the log looks exactly like a fix that didn't work. Every launch prints the
 image's build time as its first line:
@@ -192,19 +194,27 @@ Then `docker compose down && python3 scripts/list_instruments.py` for a
 paste-ready address, and verify with
 `POST /api/v1/service/awg/query {"command": "*IDN?"}`.
 
-**Temperature (TC10 LAB).** If `list_instruments.py` finds it but every query
-times out, the kernel's `usbtmc` driver has the interface and pyvisa-py's
-detach-and-use-libusb dance is losing. Check the char device directly:
+**Temperature (TC10 LAB).** Leave `TCLAB_RESOURCE` **empty** for a USB unit.
+At plug-in the kernel's `usbtmc` driver claims the TC10 and creates
+`/dev/usbtmcN`; the node reads sysfs to see who owns the box and uses that
+char device, never VISA. (VISA would have to detach the kernel driver, and on
+this Pi that open *hangs*. The detach also deletes `/dev/usbtmcN` until a
+replug, so one bad attempt changed what the next one saw: the old "works
+sometimes" behaviour.) When nothing owns it, the node uses VISA by vendor id.
+Only an Ethernet unit has to be named (`TCPIP::<ip>::INSTR`).
 
-```bash
-echo '*IDN?' > /dev/usbtmc0 && head -c 200 /dev/usbtmc0
-```
+If it is still not found, the node's log says which case you are in:
 
-If that answers, put **`TCLAB_RESOURCE=/dev/usbtmc*`** in `.env` — note the
-glob. `/dev/usbtmc0` is not reliably this instrument: the Rigol AWG is USB-TMC
-too and the kernel numbers the nodes in enumeration order, so a hard-coded path
-can point the temperature node at the function generator. The driver probes
-every match, asks `*IDN?`, and keeps the one that answers as a Wavelength.
+| Log says | Meaning |
+|---|---|
+| `no TC10 LAB on the USB bus` | The kernel sees no 1a45 device: cable, rear power switch, hub. No setting fixes this. |
+| `the kernel usbtmc driver owns the TC10 but it did not answer` | Found, but silent on its char device. Power-cycle the TC10. Check from the host: `echo '*IDN?' > /dev/usbtmcN && head -c 200 /dev/usbtmcN`. |
+| `IS on the USB bus ... but no transport reached it` | No kernel driver bound, and libusb cannot read it: install `udev/`, replug, and stop any bench script holding it. |
+| `ConnectHung` / `still stuck inside the USB stack` | A connect hung inside libusb and was abandoned so the node keeps running. Replug the instrument (or restart the container) to free it. |
+
+Every connect has a deadline (3 x `timeout_ms` + 5 s) for that last case. The
+node used to connect on its executor thread with none, so a single hang froze
+it: no retries, no status, no reason given.
 
 Two other things that make this instrument look flaky when it isn't. A *single*
 timeout no longer drops the session (it takes three in a row), so brief stalls
@@ -253,8 +263,8 @@ python3 scripts/smoke_test_api.py --url http://127.0.0.1:8000
 Edit nodes without rebuilding the image:
 
 ```bash
-docker compose run --rm scopio bash
-cd /workspace/ros2_ws && colcon build --symlink-install && source install/setup.bash
+docker compose run --rm -v "$PWD":/src scopio bash      # from ros2_ws/
+cd /src && colcon build --symlink-install && source install/setup.bash
 ros2 launch scopio_microscope microscope.launch.py
 ```
 

@@ -113,7 +113,9 @@ async def camera_mode(request: Request, body: dict = Body(default={})):
     _auth(request)
     want = body.get("mode")
     if want not in state["camera_mode"]["modes"]:
-        return {"error": f"mode must be one of {sorted(state['camera_mode']['modes'])}"}
+        # The gateway passes the camera server's 400 through (camera_proxy).
+        raise HTTPException(
+            400, f"mode must be one of {sorted(state['camera_mode']['modes'])}")
     spec = state["camera_mode"]["modes"][want]
     state["camera_mode"].update(mode=want, width=spec["size"][0],
                                 height=spec["size"][1], window=spec["window"][0],
@@ -173,12 +175,17 @@ async def ws(sock: WebSocket):
                     return
             elif op == "unsubscribe":
                 await sock.send_json({"op": "ok", "id": mid})
+            elif op == "action_cancel":
+                state.setdefault("canceled", []).append(mid)
+                await sock.send_json({"op": "ok", "id": mid})
             elif op == "action_send_goal":
                 if req["action"] == "nope":
                     await sock.send_json({"op": "action_ack", "id": mid,
                                           "accepted": False})
                     continue
                 await sock.send_json({"op": "action_ack", "id": mid, "accepted": True})
+                if req["action"] == "slow/scan":     # never finishes on its own
+                    continue
                 await sock.send_json({"op": "action_feedback", "id": mid,
                                       "feedback": {"pct": 50}})
                 await sock.send_json({"op": "action_result", "id": mid,
@@ -299,7 +306,11 @@ def test_against_mock_gateway():
         # -- sensor mode: the two ways to run the camera, and a refusal
         assert scope.camera.set_mode("fast")["width"] == 640
         assert scope.camera.get_controls()["window"] == 1280
-        assert "must be one of" in scope.camera.set_mode("4k")["error"]
+        try:
+            scope.camera.set_mode("4k")
+            raise AssertionError("an unknown sensor mode must raise")
+        except ScopioError as exc:
+            assert exc.status == 400 and "must be one of" in str(exc)
         assert scope.camera.focus_metric() == {"focus": 123.4}
 
         # -- calibration: unnamed fields are sent as null (== "leave unchanged")
@@ -348,6 +359,16 @@ def test_against_mock_gateway():
             raise AssertionError("a rejected goal must raise")
         except ScopioError as exc:
             assert "rejected" in str(exc)
+
+        # -- a caller that gives up CANCELS its goal, rather than leaving the
+        #    stage scanning with nobody listening for the result
+        try:
+            scope.send_goal("slow/scan", timeout=0.5)
+            raise AssertionError("a goal past its timeout must raise")
+        except ScopioError as exc:
+            assert "timed out" in str(exc)
+        _wait_for(lambda: len(state.get("canceled", [])) == 1, 5.0,
+                  "action_cancel for the abandoned goal")
 
         # -- WebSocket: subscribe, then survive a drop that the server refuses
         #    to let us straight back into. The recv loop has to keep retrying

@@ -48,6 +48,7 @@ from rclpy.node import Node
 from scopio_interfaces.msg import AwgStatus
 from scopio_interfaces.srv import AwgQuery, AwgWrite, InstrumentCall
 
+from .connect_guard import ConnectGuard
 from .drivers import dispatch
 from .drivers.dg1022z import DG1022Z
 
@@ -81,6 +82,10 @@ class GalvoNode(Node):
         self.last_command = ""
         self.last_error = ""
         self._failures = 0
+        # A connect gets a hard deadline: a VISA open can hang in libusb, and
+        # without this it froze the node for good (see connect_guard.py).
+        timeout_s = int(self.get_parameter("timeout_ms").value) / 1000.0
+        self._guard = ConnectGuard(3 * timeout_s + 5.0)
 
         self._connect()
 
@@ -111,30 +116,39 @@ class GalvoNode(Node):
         resource = (os.environ.get("GALVO_RESOURCE")
                     or self.get_parameter("resource").value or "").strip()
         timeout_ms = int(self.get_parameter("timeout_ms").value)
-        with self._lock:
-            if self.gen is not None:
-                return True
-            # DG1022Z() does NOT open on construction -- the node opens it.
+        init = bool(self.get_parameter("init_on_connect").value)
+
+        def attempt():
+            # DG1022Z() does NOT open on construction -- the node opens it. On
+            # the guard's worker thread: see connect_guard.py for why.
             gen = DG1022Z(resource, timeout_ms=timeout_ms)
             try:
-                gen._open()
-                idn = gen.query("*IDN?")
-                # Put both channels in DC mode at their offsets with outputs ON,
-                # so a client's update(ch, val) positions the galvo immediately.
-                # Best-effort: a connected-but-uninitable AWG still counts as
-                # connected. (Set init_on_connect:false to skip.)
-                if self.get_parameter("init_on_connect").value:
-                    try:
-                        gen.dcinit()
-                    except Exception as exc:
-                        self.get_logger().warning(f"AWG dcinit failed ({exc}).")
-                self.gen, self.idn, self.last_error = gen, idn, ""
-                self._failures = 0
-            except Exception as exc:
+                gen._open()            # also clears the session, verifies *IDN?
+            except BaseException:
                 # A session that opened and then failed still HOLDS the USB
                 # device; leaving it claimed makes every later retry fail too.
                 gen._drop()
-                self.last_error = str(exc)
+                raise
+            # Put both channels in DC mode at their offsets with outputs ON,
+            # so a client's update(ch, val) positions the galvo immediately.
+            # Best-effort: a connected-but-uninitable AWG still counts as
+            # connected. (Set init_on_connect:false to skip.)
+            if init:
+                try:
+                    gen.dcinit()
+                except Exception as exc:
+                    self.get_logger().warning(f"AWG dcinit failed ({exc}).")
+            return gen
+
+        with self._lock:
+            if self.gen is not None:
+                return True
+            try:
+                gen = self._guard.run(attempt, discard=lambda g: g._drop())
+                self.gen, self.idn, self.last_error = gen, gen.identity, ""
+                self._failures = 0
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"
                 # ECHO THE RESOURCE. Without it "Parsing error" is unreadable:
                 # a name that fails to parse is a config bug, a name that is not
                 # found is a cable, and the message must tell them apart.
@@ -144,11 +158,11 @@ class GalvoNode(Node):
                     f"  tried:  {asked}\n"
                     f"  error:  {type(exc).__name__}: {exc}\n"
                     f"  INV_RSRC_NAME/parsing => the STRING is wrong (check "
-                    f"GALVO_RESOURCE in ros2_ws/.env); RSRC_NFOUND/no Rigol => "
-                    f"the instrument is not on the bus.",
+                    f"GALVO_RESOURCE in ros2_ws/.env); RSRC_NFOUND => the "
+                    f"address names nothing that is plugged in.",
                     throttle_duration_sec=60.0)
                 return False
-        self.get_logger().info(f"AWG connected on {gen.resource}: {idn}")
+        self.get_logger().info(f"AWG connected on {gen.resource}: {gen.identity}")
         return True
 
     def _retry_connect(self):
@@ -234,6 +248,13 @@ class GalvoNode(Node):
         except dispatch.DispatchError as exc:      # bad request: link is fine
             response.success = False
             response.error = str(exc)
+        except (ValueError, TypeError) as exc:
+            # The driver refusing an ARGUMENT (update(3, ...) -> "channel must
+            # be 1 or 2") before anything reached the wire. VISA and usbtmc
+            # failures are VisaIOError/OSError, never these -- so a client's
+            # typo no longer counts toward dropping the session for everyone.
+            response.success = False
+            response.error = f"{type(exc).__name__}: {exc}"
         except Exception as exc:                   # instrument or method fault
             self._fail(exc, response)
         return response

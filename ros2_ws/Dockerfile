@@ -47,7 +47,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # runs on the CLIENT side, off the Pi (viscosity/, viscosity_agent/). Keeping it
 # out also keeps the image off the apt-numpy-vs-pip-numpy collision entirely.
 RUN pip3 install --no-cache-dir --break-system-packages \
-        simplejpeg \
         pyvisa \
         pyvisa-py \
         pyusb \
@@ -67,10 +66,9 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 
 # Build the workspace (interfaces + nodes) into the image.
 #
-# THE NODES RUN FROM THIS IMAGE, not from the repo mounted at /workspace. The
-# mount only supplies the working directory (calibration.json). So editing a
-# node on the Pi and running `docker compose up -d` changes NOTHING -- you need
-# `--build`. That failure is silent and looks exactly like a broken fix, so the
+# THE NODES RUN FROM THIS IMAGE; the source is never mounted at run time (only
+# ./data, for calibration.json). So editing a node on the Pi and running
+# `docker compose up -d` changes NOTHING -- you need `--build`. That failure is silent and looks exactly like a broken fix, so the
 # build is stamped and the stamp is printed at launch. Docker caches this layer
 # with the COPY above it: same source, same stamp; changed source, new stamp.
 WORKDIR /ros2_ws
@@ -78,9 +76,9 @@ COPY . /ros2_ws/
 RUN date -u +'%Y-%m-%dT%H:%M:%SZ' > /ros2_ws/BUILD_STAMP
 RUN source /opt/ros/jazzy/setup.bash && colcon build --symlink-install
 
-# The nodes import nothing from outside this workspace. The repo is still
-# mounted at /workspace at runtime and used as the working directory, so
-# relative paths (calibration.json) land on the Pi's real disk.
+# The nodes import nothing from outside this workspace. At run time compose
+# mounts ros2_ws/data at /data and makes it the working directory, so relative
+# paths (calibration.json) land on the Pi's real disk, outside the image.
 ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 COPY entrypoint.sh /entrypoint.sh

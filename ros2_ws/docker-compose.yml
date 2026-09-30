@@ -38,7 +38,10 @@ services:
     ipc: host
     restart: unless-stopped
     volumes:
-      - ..:/workspace                # repo root: working dir, calibration.json
+      # Runtime STATE, not source: calibration.json lives here, on the Pi's
+      # disk, gitignored. Only this folder is mounted -- the repo itself stays
+      # out of a privileged container, and `git pull` never meets live data.
+      - ./data:/data
       - /run/udev:/run/udev:ro
       - /dev:/dev                    # hotplug -- see the note below `command:`
     environment:
@@ -57,7 +60,7 @@ services:
       # an unset factory can pick a backend that fails silently. python3-lgpio
       # is installed in the image (see Dockerfile) -- say so.
       - GPIOZERO_PIN_FACTORY=${GPIOZERO_PIN_FACTORY:-lgpio}
-    working_dir: /workspace
+    working_dir: /data
     command: ros2 launch scopio_microscope microscope.launch.py
     # HOTPLUG, and why /dev is bind-mounted even though privileged is set:
     #

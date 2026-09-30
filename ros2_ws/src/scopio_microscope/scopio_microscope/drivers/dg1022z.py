@@ -8,11 +8,19 @@ serves awg/* on a reentrant callback group, so two clients can be inside this
 driver at the same time, and two threads interleaved on one USB-TMC session
 produce garbled replies and timeouts, not an error you can trace.
 
+They also PACE the wire: consecutive I/Os are at least MIN_INTERVAL_S apart.
+The DG1022Z's input buffer is tiny, and past ~60 commands/s it lags seconds
+behind what it is being told. The lock alone serializes callers but lets them
+queue back-to-back, so without the pacing a UI, an agent and a script sharing
+the AWG could still flood it together. Pacing here covers every caller at once.
+
 The first block of methods drives the galvo mirrors and keeps its own
 xpos/ypos/offset bookkeeping. Everything after it is the plain instrument, one
 method per thing the front panel can do.
 """
 
+import glob
+import os
 import threading
 import time
 
@@ -62,11 +70,42 @@ def usb_vid(resource):
         return None
 
 
+SYSFS_USB = "/sys/bus/usb/devices"
+
+
+def usb_present(vid):
+    """sysfs names ('1-1.2') of every USB device with this vendor id -- asks the
+    KERNEL, so it separates "not on the bus" (cable, power) from "on the bus
+    but VISA cannot open it" (permissions, another process). Standard library
+    only; duplicated from TC10LAB.py so each driver stays self-contained."""
+    found = []
+    for id_file in glob.glob(os.path.join(SYSFS_USB, "*", "idVendor")):
+        try:
+            with open(id_file, encoding="ascii") as f:
+                if int(f.read().strip(), 16) == vid:
+                    found.append(os.path.basename(os.path.dirname(id_file)))
+        except (OSError, ValueError):
+            continue
+    return sorted(found)
+
+
+def is_rigol(idn):
+    return "RIGOL" in (idn or "").upper()
+
+
 class DG1022Z:
+    # Minimum gap between two I/Os on the wire: 50 per second, under the ~60/s
+    # where the instrument starts to lag. A class attribute so a bench script
+    # (or a test) can change it without touching the lock logic.
+    MIN_INTERVAL_S = 1.0 / 50
+
     def __init__(self, resource="", timeout_ms=5000):
         self.resource = resource
         self.timeout_ms = timeout_ms
         self._lock = threading.RLock()   # VISA sessions are NOT thread-safe
+        self._last_io = 0.0              # monotonic end of the previous I/O
+        self._desynced = False           # a query failed; clear before the next
+        self.identity = ""               # *IDN? reply, verified on connect
         self.rm = None
         self.device = None
 
@@ -87,16 +126,63 @@ class DG1022Z:
         what it is."""
         self.rm = pyvisa.ResourceManager("@py")
         if not self.resource:
-            usb = [r for r in self.rm.list_resources("USB?*INSTR")
-                   if usb_vid(r) == RIGOL_VID]
+            listed = list(self.rm.list_resources("USB?*INSTR"))
+            usb = [r for r in listed if usb_vid(r) == RIGOL_VID]
             if not usb:
-                raise RuntimeError("no Rigol AWG on USB; set GALVO_RESOURCE for an "
-                                   "Ethernet unit (pyvisa-py cannot scan the LAN)")
+                raise RuntimeError(self._not_found(listed))
             self.resource = usb[0]
         self.device = self.rm.open_resource(self.resource)
         self.device.read_termination = "\n"
         self.device.write_termination = "\n"
         self.device.timeout = self.timeout_ms
+        # A session that died mid-query (node restart, Ctrl-C'd bench script)
+        # can leave a reply queued in the AWG; the first query of THIS session
+        # would read it, and every one after would be one answer behind.
+        self._resync()
+        idn = self.query("*IDN?")
+        if not is_rigol(idn):
+            raise RuntimeError(f"{self.resource} answered *IDN? with {idn!r} -- "
+                               "that is not a Rigol AWG (GALVO_RESOURCE names "
+                               "another instrument?)")
+        self.identity = idn
+
+    @staticmethod
+    def _not_found(listed):
+        bus = usb_present(RIGOL_VID)
+        if not bus:
+            return ("no Rigol AWG on the USB bus: the kernel reports no 1ab1 "
+                    "device. Check the cable, the power and any hub. An Ethernet "
+                    "unit must be named in GALVO_RESOURCE (no LAN scan).")
+        return (f"a Rigol IS on the USB bus ({', '.join(bus)}) but VISA listed "
+                f"{len(listed)} USB instrument(s), none of them it: libusb could "
+                "not read its descriptors -- device permissions (ros2_ws/udev) or "
+                "another process (a bench script?) holding it.")
+
+    def _resync(self):
+        """Flush anything queued in the AWG: the USB-TMC CLEAR, or -- where the
+        transport has none -- READS until nothing is left (never queries: each
+        adds a reply for every one it removes). Then *CLS. Best effort."""
+        with self._lock:
+            self._desynced = False
+            try:
+                self.device.clear()
+            except Exception:
+                old = self.device.timeout
+                try:
+                    self.device.timeout = 200
+                    for _ in range(16):
+                        self.device.read()
+                except Exception:
+                    pass                 # the timeout IS "nothing left"
+                finally:
+                    try:
+                        self.device.timeout = old
+                    except Exception:
+                        pass
+            try:
+                self.command("*CLS")
+            except Exception:
+                pass
 
     def _close(self):
         """Outputs off, then drop the session. Safe to call twice; a dead link
@@ -107,10 +193,7 @@ class DG1022Z:
                     self.command(":OUTP1 OFF;:OUTP2 OFF")
                 except Exception:
                     pass
-                self.device.close()
-            if self.rm is not None:
-                self.rm.close()
-            self.device = self.rm = None
+            self._drop()
 
     def _drop(self):
         """Release the session WITHOUT sending SCPI -- for when the link is
@@ -127,19 +210,42 @@ class DG1022Z:
     # ------------------------------------------------------------------ #
     #  The only two methods that touch the wire. Everything else uses them.
     # ------------------------------------------------------------------ #
+    def _pace(self):
+        """Wait out MIN_INTERVAL_S since the previous I/O finished. Call with
+        _lock held, so the gap holds across every thread using the session."""
+        wait = self._last_io + self.MIN_INTERVAL_S - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+
     def command(self, cmd):
         """Write a raw SCPI command."""
         with self._lock:
             if self.device is None:
                 raise ConnectionError("AWG session is closed")
-            self.device.write(cmd)
+            self._pace()
+            try:
+                self.device.write(cmd)
+            finally:
+                self._last_io = time.monotonic()
 
     def query(self, cmd):
         """Write a raw SCPI query and return the reply, stripped."""
         with self._lock:
             if self.device is None:
                 raise ConnectionError("AWG session is closed")
-            return self.device.query(cmd).strip()
+            if self._desynced:
+                self._resync()
+            self._pace()
+            try:
+                return self.device.query(cmd).strip()
+            except Exception:
+                # A query that timed out was still SENT: its reply lands later,
+                # and without a flush every later query returns the one before
+                # it -- frequency() answering with the amplitude, silently.
+                self._desynced = True
+                raise
+            finally:
+                self._last_io = time.monotonic()
 
     # ------------------------------------------------------------------ #
     #  The galvo mirrors
@@ -195,9 +301,15 @@ class DG1022Z:
 
     def move(self, ch: int, endval: float, t: float = 1.0, steps: int = 60):
         """Ramp one mirror to a position over t seconds instead of jumping there.
-        Same axes and offset convention as update(); returns the final {x, y}."""
+        Same axes and offset convention as update(); returns the final {x, y}.
+
+        With t > 0, `steps` is capped so the ramp never outruns the pacing
+        (MIN_INTERVAL_S): asking for 60 steps in 0.1 s would otherwise be 600
+        commands/s, and the ramp would just take longer than asked for anyway."""
         start = self.xpos if ch == 1 else self.ypos
         steps = max(1, int(steps))
+        if t > 0 and self.MIN_INTERVAL_S > 0:
+            steps = max(1, min(steps, int(float(t) / self.MIN_INTERVAL_S)))
         dwell = max(0.0, float(t)) / steps
         for i in range(1, steps + 1):
             self.update(ch, start + (float(endval) - start) * i / steps)

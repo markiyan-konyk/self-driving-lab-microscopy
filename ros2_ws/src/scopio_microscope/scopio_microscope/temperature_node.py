@@ -29,6 +29,7 @@ from rclpy.node import Node
 from scopio_interfaces.msg import TemperatureStatus
 from scopio_interfaces.srv import InstrumentCall
 
+from .connect_guard import ConnectGuard
 from .drivers import dispatch
 from .drivers.TC10LAB import TC10LAB
 
@@ -61,6 +62,10 @@ class TemperatureNode(Node):
         self.last_error = ""
         self.state = {}
         self._failures = 0
+        # A connect gets a hard deadline: a VISA open can hang in libusb, and
+        # without this it froze the node for good (see connect_guard.py).
+        timeout_s = int(self.get_parameter("timeout_ms").value) / 1000.0
+        self._guard = ConnectGuard(3 * timeout_s + 5.0)
 
         self._connect()
 
@@ -83,28 +88,37 @@ class TemperatureNode(Node):
                     or self.get_parameter("resource").value or "").strip()
         timeout_ms = int(self.get_parameter("timeout_ms").value)
         units = str(self.get_parameter("units").value).strip()
+
+        def attempt():
+            # On the guard's worker thread: a VISA open can hang in libusb, and
+            # that must not take the node's executor thread with it.
+            tc = TC10LAB(resource, timeout_ms=timeout_ms)
+            try:
+                tc._open()     # picks the transport, clears, verifies *IDN?
+            except BaseException:
+                tc._close()
+                raise
+            # Units are a LABEL on the status topic. Best-effort, like the
+            # galvo's dcinit: a link that answers *IDN? is a working link, and
+            # throwing it away because one cosmetic reply came back in an
+            # unexpected format is how a connected instrument reads as absent.
+            # (This firmware answers TEC:UNITS? with 'CELSIUS'.)
+            try:
+                tc.set_units(units) if units else tc.get_units()
+            except Exception as exc:
+                self.get_logger().warning(f"TC10 LAB units unavailable ({exc}).")
+            return tc
+
         with self._lock:
             if self.tc is not None:
                 return True
-            tc = TC10LAB(resource, timeout_ms=timeout_ms)
             try:
-                tc._open()
-                idn = tc.idn()
-                # Units are a LABEL on the status topic. Best-effort, like the
-                # galvo's dcinit: a link that answers *IDN? is a working link,
-                # and throwing it away because one cosmetic reply came back in
-                # an unexpected format is how a connected instrument reads as
-                # absent. (This firmware answers TEC:UNITS? with 'CELSIUS'.)
-                try:
-                    tc.set_units(units) if units else tc.get_units()
-                except Exception as exc:
-                    self.get_logger().warning(f"TC10 LAB units unavailable ({exc}).")
-                self.tc, self.idn, self.last_error = tc, idn, ""
+                tc = self._guard.run(attempt, discard=lambda t: t._close())
+                self.tc, self.idn, self.last_error = tc, tc.identity, ""
                 self._failures = 0
             except Exception as exc:
-                tc._close()
-                self.last_error = str(exc)
-                asked = repr(resource) if resource else "<auto-discover Wavelength on USB>"
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                asked = repr(resource) if resource else "<auto: kernel usbtmc or VISA>"
                 self.get_logger().warning(
                     f"TC10 LAB unavailable; node runs, reports connected=false.\n"
                     f"  tried:  {asked}\n"
@@ -113,7 +127,7 @@ class TemperatureNode(Node):
                 return False
         if tc.probe_note:
             self.get_logger().warning(f"TCLAB_RESOURCE {tc.probe_note}")
-        self.get_logger().info(f"TC10 LAB connected on {tc.resource}: {idn}")
+        self.get_logger().info(f"TC10 LAB connected on {tc.resource}: {tc.identity}")
         return True
 
     def _retry_connect(self):
@@ -204,6 +218,12 @@ class TemperatureNode(Node):
         except dispatch.DispatchError as exc:   # bad request: the link is fine
             response.success = False
             response.error = str(exc)
+        except (ValueError, TypeError) as exc:
+            # A refused argument, or a reply that answered but did not parse
+            # (query_float) -- either way the link is alive. I/O failures are
+            # VisaIOError/OSError and still count toward MAX_FAILURES below.
+            response.success = False
+            response.error = f"{type(exc).__name__}: {exc}"
         except Exception as exc:                # instrument or method fault
             self._note_failure(exc)
             response.success = False

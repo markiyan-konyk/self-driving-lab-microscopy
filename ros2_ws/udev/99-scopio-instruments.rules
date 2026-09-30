@@ -27,8 +27,8 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="1ab1", ATTR{idProduct}=="0642", MODE="0666", 
 # libusb. On some kernels that leaves the instrument enumerating fine and
 # answering nothing -- every query times out. Sanity-check it directly:
 #     echo '*IDN?' > /dev/usbtmc0 && head -c 200 /dev/usbtmc0
-# If that answers and pyvisa times out, skip the fight: put
-#     TCLAB_RESOURCE=/dev/usbtmc0
-# in ros2_ws/.env. temperature_node reads the char device instead (see
-# TC10LAB.UsbtmcDevice). Requires this 0666 rule.
+# temperature_node uses the char device BY ITSELF whenever the kernel owns the
+# TC10 (it reads sysfs to find out), so TCLAB_RESOURCE stays empty. Inside the
+# container the nodes run as root; this 0666 rule is for bench scripts on the
+# host.
 KERNEL=="usbtmc[0-9]*", MODE="0666"

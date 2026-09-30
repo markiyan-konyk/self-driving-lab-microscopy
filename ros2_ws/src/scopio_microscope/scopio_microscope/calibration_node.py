@@ -9,9 +9,9 @@ It publishes the calibration on a LATCHED (transient-local) topic so any client
 micrometres -- gets the current value immediately on join.
 
 PERSISTENCE. The file lives on the Pi's real disk, not in the container: compose
-bind-mounts the repo at /workspace and runs the graph there, so the default
+bind-mounts ros2_ws/data at /data and runs the graph there, so the default
 relative path resolves onto the host and survives `docker compose down`, image
-rebuilds and reboots. The node logs the ABSOLUTE path it resolved at startup --
+rebuilds and reboots -- and never mixes with the git checkout. The node logs the ABSOLUTE path it resolved at startup --
 if that ever reads as a path inside the container, the mount is what broke, not
 this node. Writes are atomic (temp file + os.replace), so power going out
 mid-write cannot leave a truncated file that silently reads back as "no
@@ -128,10 +128,12 @@ class CalibrationNode(Node):
                   "z": request.steps_per_um_z}
         given = {k: float(v) for k, v in fields.items()
                  if not math.isnan(v) and v != 0.0}
-        bad = [k for k, v in given.items() if v < 0]
+        # isfinite: inf passes `v < 0`, and a scale of inf is saved, published,
+        # and turns every stage micrometre reading into 0.
+        bad = [k for k, v in given.items() if v < 0 or not math.isfinite(v)]
         if bad:
             response.success = False
-            response.message = f"must be > 0: {', '.join(sorted(bad))}"
+            response.message = f"must be finite and > 0: {', '.join(sorted(bad))}"
             return response
         if not given:
             response.success = False

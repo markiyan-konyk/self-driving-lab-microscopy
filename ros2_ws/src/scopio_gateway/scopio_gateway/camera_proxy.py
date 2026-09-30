@@ -65,9 +65,16 @@ async def forward(method, path, json_body=None):
     except httpx.HTTPError as exc:
         raise HTTPException(503, f"Camera server unreachable: {exc}") from exc
     try:
-        return r.json()
+        body = r.json()
     except ValueError:
         raise HTTPException(502, "Camera server returned non-JSON.")
+    # Pass the camera server's failure THROUGH. Returning its 503 body with a
+    # 200 made "sensor not open" and "white balance rejected" look like
+    # successes to every client that checks the status code (the SDK does).
+    if r.status_code >= 400:
+        detail = body.get("error", body) if isinstance(body, dict) else body
+        raise HTTPException(r.status_code, detail)
+    return body
 
 
 async def mjpeg_stream():
