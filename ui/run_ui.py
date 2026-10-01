@@ -144,8 +144,8 @@ state = State()
 scope = None      # set in main()
 steps = {"x": 40, "y": 40, "z": 40}     # client-side step sizes
 record_duration = 600                    # seconds, or None for infinite
-_wb_running = False
-_af_running = False
+# Autofocus / white balance: one at a time, and how the last one ended.
+_camera_job = {"lock": threading.Lock(), "running": None, "last": None}
 
 # ---- client-side recording state ----
 _rec = {"active": False, "thread": None, "stop": threading.Event(),
@@ -250,6 +250,11 @@ def _frame_ingest_loop():
                 last_t = now
                 if dt > 0:
                     state.stream_fps = 0.85 * state.stream_fps + 0.15 * (1.0 / dt)
+            # The stream ENDED cleanly (the camera server closes it after 10 s
+            # without a frame). Pause before reopening: an instant retry turns
+            # a stream that keeps closing into a loop hammering the gateway.
+            state.stream_fps = 0.0
+            time.sleep(0.5)
         except ScopioError as e:
             state.stream_fps = 0.0
             log.warning(f"camera stream unavailable ({e}); retrying in 2 s")
@@ -268,7 +273,14 @@ def login_required(view):
     def wrapped(*a, **k):
         if session.get("authed"):
             return view(*a, **k)
-        return redirect(url_for("login"))
+        # Only the PAGE redirects. Everything else is fetched by app.js, and a
+        # redirect there came back as the login page with a 200: every poll
+        # failed to parse it, and an expired session (any restart of this
+        # program mints a new session key) looked like a dead microscope. A 401
+        # is something the page can recognise and act on.
+        if request.path == "/":
+            return redirect(url_for("login"))
+        return jsonify({"error": "Session expired -- log in again"}), 401
     return wrapped
 
 
@@ -281,8 +293,9 @@ def login():
             session["authed"] = True
             return redirect(url_for("index"))
         error = "Incorrect password"
-    html = _read("login.html").replace("__LOGO__", _read("logo.svg"))
-    return render_template_string(html, error=error)
+    # Template first, assets after: see index().
+    return render_template_string(_read("login.html"), error=error).replace(
+        "__LOGO__", _read("logo.svg"))
 
 
 @app.route("/logout")
@@ -294,11 +307,13 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    document = (_read("index.html")
-                .replace("__STYLE__", _read("style.css"))
-                .replace("__SCRIPT__", _read("app.js"))
-                .replace("__LOGO__", _read("logo.svg")))
-    return render_template_string(document, steps=steps)
+    # Render the TEMPLATE, then inline the assets. The other order ran app.js
+    # and style.css through Jinja too, so a `{{`, `{%` or `{#` typed into
+    # either (a JS object literal, a CSS selector) blanked the whole page.
+    return (render_template_string(_read("index.html"), steps=steps)
+            .replace("__STYLE__", _read("style.css"))
+            .replace("__SCRIPT__", _read("app.js"))
+            .replace("__LOGO__", _read("logo.svg")))
 
 
 @app.route("/health")
@@ -353,7 +368,12 @@ def video_feed():
 def status():
     with state.lock:
         st = state.stage
+    # scope_*: whether the MICROSCOPE is reachable at all. Without it the page
+    # could only say "Controller unavailable" for a wrong API key or a Pi that
+    # is switched off, which sends the reader to the stage.
     return jsonify({"controller_connected": bool(st and st.get("connected")),
+                    "scope_reachable": state.connected,
+                    "scope_error": state.last_error,
                     "steps": steps})
 
 
@@ -362,7 +382,9 @@ def status():
 def telemetry():
     with state.lock:
         st, cs = state.stage, state.camera
-    pos = {a: (st or {}).get(a, 0) for a in ("x", "y", "z")}
+    # None, not 0, when the stage has not reported: "0, 0, 0" on the HUD reads
+    # as a real position.
+    pos = {a: (st or {}).get(a) for a in ("x", "y", "z")}
     fps = round(state.stream_fps, 1) or (cs.get("measured_fps", 0.0) if cs else 0.0)
     return jsonify({
         "position": pos,
@@ -512,58 +534,60 @@ def screenshot():
 # frame rate are set once for a sample and then left alone, and a panel of them
 # crowded out the controls an operator actually touches. Anything that needs
 # them reaches the gateway directly (scope.camera.set_controls / the MCP tool).
+def _start_camera_job(label, work):
+    """Run ONE camera job (autofocus or white balance) in the background.
+
+    The check-and-claim is under a lock: two unlocked flags let two quick
+    clicks both start. And the OUTCOME is kept for /calibration_status -- the
+    page used to announce "complete" for a sweep that had failed."""
+    with _camera_job["lock"]:
+        if _camera_job["running"]:
+            return jsonify({"error": f"{_camera_job['running']} already in progress"}), 409
+        _camera_job["running"], _camera_job["last"] = label, None
+
+    def run():
+        try:
+            outcome = {"label": label, "ok": True, "message": work() or "done"}
+        except ScopioError as e:
+            outcome = {"label": label, "ok": False, "message": str(e)}
+        log.log(logging.INFO if outcome["ok"] else logging.WARNING,
+                f"{label}: {outcome['message']}")
+        with _camera_job["lock"]:
+            _camera_job["running"], _camera_job["last"] = None, outcome
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"message": f"{label} started"})
+
+
 @app.route("/white_balance", methods=["POST"])
 @login_required
 def white_balance():
-    global _wb_running
-    if _wb_running:
-        return jsonify({"error": "Calibration already in progress"}), 409
-    _wb_running = True
-
-    def run():
-        global _wb_running
-        try:
-            res = scope.camera.white_balance()
-            log.info(f"white balance: {res}")
-        except ScopioError as e:
-            log.warning(f"white balance failed: {e}")
-        finally:
-            _wb_running = False
-
-    threading.Thread(target=run, daemon=True).start()
-    return jsonify({"message": "White balance started"})
-
-
-@app.route("/calibration_status")
-@login_required
-def calibration_status():
-    return jsonify({"running": _wb_running or _af_running})
+    def work():
+        res = scope.camera.white_balance()
+        return f"red {res.get('red_gain', 0):.2f}, blue {res.get('blue_gain', 0):.2f}"
+    return _start_camera_job("White balance", work)
 
 
 @app.route("/autofocus", methods=["POST"])
 @login_required
 def autofocus():
-    global _af_running
-    if _af_running or _wb_running:
-        return jsonify({"error": "Calibration already in progress"}), 409
-    _af_running = True
+    def work():
+        # Backend action: the camera node sweeps Z with the stage and measures
+        # sharpness on its own frames -- works for ANY client.
+        res = scope.camera.autofocus(z_range=2000, steps=15, settle_s=0.2)
+        r = res.get("result") or {}
+        if res.get("status") != "succeeded" or not r.get("success", True):
+            raise ScopioError(r.get("message") or f"autofocus {res.get('status')}")
+        return f"best Z {r['best_z']}" if r.get("best_z") is not None else "done"
+    return _start_camera_job("Autofocus", work)
 
-    def run():
-        global _af_running
-        try:
-            # Backend action: the camera node sweeps Z with the stage and
-            # measures sharpness on its own frames -- works for ANY client.
-            res = scope.camera.autofocus(z_range=2000, steps=15, settle_s=0.2)
-            r = res.get("result") or {}
-            log.info(f"autofocus {res.get('status')}: {r.get('message')} "
-                     f"(best_z={r.get('best_z')})")
-        except ScopioError as e:
-            log.warning(f"autofocus failed: {e}")
-        finally:
-            _af_running = False
 
-    threading.Thread(target=run, daemon=True).start()
-    return jsonify({"message": "Autofocus started"})
+@app.route("/calibration_status")
+@login_required
+def calibration_status():
+    with _camera_job["lock"]:
+        return jsonify({"running": bool(_camera_job["running"]),
+                        "last": _camera_job["last"]})
 
 
 # ---- calibration ----
@@ -651,12 +675,16 @@ def galvo_update():
     except (TypeError, ValueError):
         return jsonify({"error": "x and y must be numbers"}), 400
     try:
-        scope.galvo.call("update", 1, x)      # DG1022Z.update(ch=1, val=x)
-        scope.galvo.call("update", 2, y)      # DG1022Z.update(ch=2, val=y)
+        # Sequenced, not two back-to-back update()s: switching channels moves
+        # something mechanical in the AWG, and crossing +/-2 V flips a relay --
+        # move_xy sends only the axes that changed, one at a time, and waits
+        # after each (longer across 2 V). Returns once the mirrors settled.
+        moved = scope.galvo.move_xy(x=x, y=y)
     except ScopioError as e:
         return jsonify({"error": str(e)}), 503
-    _galvo["x"], _galvo["y"] = x, y
-    return jsonify({"connected": _galvo_connected(), "x": x, "y": y})
+    _galvo["x"], _galvo["y"] = moved["x"], moved["y"]
+    return jsonify({"connected": _galvo_connected(), "x": moved["x"], "y": moved["y"],
+                    "moved": moved["moved"], "range_switched": moved["range_switched"]})
 
 
 # ---- sample temperature (Wavelength TC10 LAB) ----
@@ -817,12 +845,21 @@ def _finish_recording(path, frames, elapsed):
 @login_required
 def set_recording_setting():
     global record_duration
-    d = request.get_json() or {}
-    if d.get("setting") == "duration":
-        v = d.get("value")
-        record_duration = None if not v else max(1, int(v))
-        return "OK"
-    return "Invalid setting", 400
+    d = request.get_json(silent=True) or {}
+    if d.get("setting") != "duration":
+        return jsonify({"error": "Invalid setting"}), 400
+    v = d.get("value")
+    # null is "until stopped". A number is seconds, at least 1: 0 used to mean
+    # infinite too, so clearing the h/m/s boxes silently started an endless
+    # recording while the page showed a finite one.
+    if v is None:
+        record_duration = None
+    else:
+        try:
+            record_duration = max(1, int(v))
+        except (TypeError, ValueError):
+            return jsonify({"error": "duration must be seconds or null"}), 400
+    return jsonify({"duration": record_duration})
 
 
 @app.route("/start_recording", methods=["POST"])

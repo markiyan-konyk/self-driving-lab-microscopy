@@ -75,23 +75,45 @@ Want the microscope to run an experiment on its own overnight?
 
 ## Tools
 
+Two layers. The **generic** tools reach everything the microscope can do,
+including nodes added after this server was written; the **task** tools do the
+common jobs in one call, with the hardware's rules built in.
+
 | Tool | What it does |
 |---|---|
+| **Discovery and generic** | |
 | `describe_instrument` | Live capability map. Start here — see [Discovery](#discovery). |
-| `status` | Health plus latest stage/camera/temperature/AWG/relay/calibration telemetry. |
+| `status` | Cached telemetry (free, instant): every state topic, or one (`topic=`). |
 | `call_service` | Any ROS service by path (`stage/jog`, `calibration/set`, ...). |
-| `send_goal` | Long actions: `camera/autofocus`, `stage/move_path`, `scan_region`. |
-| `stage_move` | Relative or absolute stage moves, in steps. |
+| `send_goal` | Long actions (`camera/autofocus`, `stage/move_path`, `scan_region`); `wait=False` runs it in the background. |
+| `goal` | Check, wait on, or cancel a background goal. |
+| `read_topic` | The next N live messages of any non-video topic. |
+| `publish` | Publish one message on a topic. |
+| `instrument_call` | Any driver method on any instrument node (`galvo`, `temperature`, later ones). |
+| **Motion** | |
+| `stage_move` | Relative or absolute stage moves in steps; `grab=True` also returns a frame. |
+| `autofocus` | Z sweep, park at the sharpest; interrupting it cancels the sweep. |
+| `galvo_move` | Point the tweezers: one axis at a time, waits after each, longer across ±2 V. |
+| `galvo_scpi` | One raw SCPI command to the AWG (`?` ⇒ query). |
+| **Camera and scale** | |
+| `grab_frame` | One frame Claude can *see*; `roi=` digital zoom, `save_as=` keeps the full frame. |
+| `record_clip` | Record N seconds to `recordings/<name>/00000.jpg…` + measured fps. |
 | `camera_controls` | Read or partially write camera settings. |
 | `camera_mode` | `detail` (most pixels, full field) vs `fast` (highest rate, cropped). |
-| `grab_frame` | One frame, downscaled, returned as an image Claude can *see*. |
 | `white_balance` | One-shot AWB, then locked. Run it when the light changes. |
-| `focus_metric` | Cheap sharpness number for focus sweeps. |
-| `record_clip` | Record N seconds to `recordings/<name>/00000.jpg…` + measured fps. |
-| `instrument_call` | Any driver method on `galvo` or `temperature`. |
+| `focus_metric` | Cheap sharpness number for manual focus sweeps. |
+| `calibration` | µm/px for the mode running now; store a new scale or steps/µm. |
+| **Instruments and time** | |
 | `temperature` | Read the sample temperature, or drive it to a setpoint. |
 | `laser` | Switch the laser relay, or read it back. |
-| `galvo_scpi` | One raw SCPI command to the AWG (`?` ⇒ query). |
+| `wait` | Pause (settling, temperature); interruptible. |
+
+The server's standing **instructions** (sent to the model once, at connect)
+are its operating manual: the fast path, a tool map, units and directions, and
+the hardware rules no schema can express. Among them: the instruments' 50
+commands/s pacing, moving the galvo one axis at a time with a wait between,
+and the AWG's ±2 V output-range relay. Read `INSTRUCTIONS` in `server.py`, and
+keep it current when the hardware changes.
 
 ## Discovery
 

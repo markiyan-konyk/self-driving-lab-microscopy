@@ -31,6 +31,8 @@ app = FastAPI()
 state = {"drop_ws_after_message": False, "reject_ws": False,
          "controls": {"contrast": 1.0}, "jpeg": JPEG,
          "temperature_calls": [],
+         "awg_offline": False, "awg_calls": [],
+         "galvo": {"x": 0.0, "y": 0.0, "offsets": {"x": 0.0, "y": 0.0}},
          # Sensor modes are reported separately from `controls` so the partial-
          # update assertions above stay exact.
          "camera_mode": {"mode": "detail", "width": 1640, "height": 1232,
@@ -64,18 +66,55 @@ async def status(request: Request):
     }}
 
 
+INSTRUMENT_CALL = "scopio_interfaces/srv/InstrumentCall"
+
+
 @app.get("/api/v1/interfaces")
 async def interfaces(request: Request):
     _auth(request)
-    return {"services": {"stage/jog": {}}, "topics": {}, "actions": {}}
+    # Full names, like the real gateway reports them.
+    return {"services": {"/scopio/stage/jog": {"type": "scopio_interfaces/srv/StageJog"},
+                         "/scopio/awg/call": {"type": INSTRUMENT_CALL},
+                         "/scopio/temperature/call": {"type": INSTRUMENT_CALL}},
+            "topics": {"/scopio/stage/position":
+                       {"type": "scopio_interfaces/msg/StagePosition"}},
+            "actions": {"/scopio/camera/autofocus":
+                        {"type": "scopio_interfaces/action/Autofocus"}}}
+
+
+def _awg(body):
+    """A galvo AWG that keeps position/offsets like the real driver, and logs
+    every call with the time it arrived -- move_xy's contract is about ORDER and
+    WAITS, so those are what a test has to see."""
+    if state["awg_offline"]:
+        return {"success": False, "result": "", "error": "instrument offline"}
+    method, args = body.get("method"), json.loads(body.get("args") or "[]")
+    state["awg_calls"].append((method, args, time.monotonic()))
+    g = state["galvo"]
+    if method == "position":
+        result = {"x": g["x"], "y": g["y"]}
+    elif method == "offsets":
+        result = dict(g["offsets"])
+    elif method == "update":
+        g["x" if args[0] == 1 else "y"] = float(args[1])
+        result = {"x": g["x"], "y": g["y"]}
+    elif method == "list_methods":
+        result = [{"name": "update", "signature": "(ch, val)", "doc": "Jump a mirror."}]
+    else:
+        return {"success": False, "result": "", "error": f"no such method '{method}'"}
+    return {"success": True, "result": json.dumps(result), "error": ""}
 
 
 @app.post("/api/v1/service/{path:path}")
 async def service(path: str, request: Request, body: dict = Body(default={})):
     _auth(request)
+    if path == "stage/move_abs" and body.get("x") == 999999:
+        # What the real node answers with the Sangaboard unplugged.
+        return {"success": False, "message": "Sangaboard unavailable", "x": 0, "y": 0, "z": 0}
     if path in ("stage/jog", "stage/move_abs"):
         return {"ok": True, "echo": body}
     if path == "calibration/set":
+        state["calibration_set"] = body
         return {"ok": True, "echo": body}
     if path == "relay/set":
         return {"success": True, "message": "Relay ON" if body["data"] else "Relay OFF"}
@@ -84,7 +123,7 @@ async def service(path: str, request: Request, body: dict = Body(default={})):
     if path == "awg/query":
         return {"success": True, "response": "RIGOL,DG1022Z", "error": ""}
     if path == "awg/call":
-        return {"success": False, "result": "", "error": "instrument offline"}
+        return _awg(body)
     if path == "temperature/call":
         # Recorded so a caller can assert WHICH driver methods it drove, in
         # order -- a setpoint written without the output switched on heats
@@ -178,6 +217,9 @@ async def ws(sock: WebSocket):
             elif op == "action_cancel":
                 state.setdefault("canceled", []).append(mid)
                 await sock.send_json({"op": "ok", "id": mid})
+            elif op == "publish":
+                state.setdefault("published", []).append((req["topic"], req.get("msg")))
+                await sock.send_json({"op": "ok", "id": mid})
             elif op == "action_send_goal":
                 if req["action"] == "nope":
                     await sock.send_json({"op": "action_ack", "id": mid,
@@ -222,6 +264,62 @@ def _wait_for(predicate, timeout, what):
             return
         time.sleep(0.05)
     raise AssertionError(f"timed out waiting for {what}")
+
+
+def _silent_ws_server():
+    """A peer that completes the WebSocket handshake and then never sends
+    another byte -- not a pong, not a close. That is exactly what a Pi that
+    rebooted (or a Wi-Fi link that roamed) looks like from the client's side."""
+    import base64
+    import hashlib
+    import re
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    accepted = []
+
+    def run():
+        while True:
+            conn, _ = srv.accept()
+            head = b""
+            while b"\r\n\r\n" not in head:
+                head += conn.recv(4096)
+            key = re.search(rb"Sec-WebSocket-Key:\s*(\S+)", head, re.I).group(1)
+            accept = base64.b64encode(hashlib.sha1(
+                key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+            conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                         b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept +
+                         b"\r\n\r\n")
+            accepted.append(conn)          # ...and silence, forever
+
+    threading.Thread(target=run, daemon=True).start()
+    return srv.getsockname()[1], accepted
+
+
+def test_a_half_open_websocket_is_detected_and_replaced():
+    """recv() used to block with no timeout: a far end that vanished without
+    closing froze every subscription on its last value, forever, and nothing
+    ever raised. Now silence past DEAD_AFTER_S drops the link, fails what was
+    waiting on it, and the manager reconnects by itself."""
+    from scopio_client import ws as ws_mod
+
+    port, accepted = _silent_ws_server()
+    saved = ws_mod.PING_INTERVAL_S, ws_mod.DEAD_AFTER_S
+    ws_mod.PING_INTERVAL_S, ws_mod.DEAD_AFTER_S = 0.2, 0.8
+    manager = ws_mod.WsManager(f"ws://127.0.0.1:{port}/api/v1/ws")
+    try:
+        t0 = time.monotonic()
+        try:
+            manager.subscribe("stage/position", lambda m, e: None, timeout=10.0)
+            raise AssertionError("a silent peer must not confirm a subscription")
+        except ScopioError as exc:
+            assert (exc.payload or {}).get("code") == "disconnected", exc
+        assert time.monotonic() - t0 < 5.0, "dead link noticed long after DEAD_AFTER_S"
+        _wait_for(lambda: len(accepted) >= 2, 5.0, "a reconnect after the dead link")
+    finally:
+        manager.close()
+        ws_mod.PING_INTERVAL_S, ws_mod.DEAD_AFTER_S = saved
 
 
 # ------------------------------------------------------------------------ tests
@@ -337,11 +435,14 @@ def test_against_mock_gateway():
         assert scope.galvo.query("*IDN?") == "RIGOL,DG1022Z"
         scope.galvo.write(":OUTPut1 OFF")
         assert scope.temperature.temperature() == 36.6
+        state["awg_offline"] = True
         try:
             scope.galvo.methods()
             raise AssertionError("a failed instrument call must raise")
         except ScopioError as exc:
             assert "instrument offline" in str(exc)
+        finally:
+            state["awg_offline"] = False
 
         # -- MJPEG: whole frames out of arbitrary chunking
         frames = list(scope.stream_frames(chunk_size=7))
@@ -370,6 +471,51 @@ def test_against_mock_gateway():
         _wait_for(lambda: len(state.get("canceled", [])) == 1, 5.0,
                   "action_cancel for the abandoned goal")
 
+        # -- non-blocking goals: start, keep working, cancel from anywhere
+        goal = scope.start_goal("slow/scan", {"step": 10})
+        assert goal.accepted is True and not goal.done()
+        goal.cancel()
+        _wait_for(lambda: len(state["canceled"]) == 2, 5.0, "cancel from the handle")
+        try:
+            goal.wait(timeout=0.2)
+            raise AssertionError("an unfinished goal's wait must time out")
+        except ScopioError as exc:
+            assert "timed out" in str(exc)
+
+        # -- a failed move RAISES: success=false is never a result
+        try:
+            scope.stage.move_abs(999999, 0, 0)
+            raise AssertionError("a refused stage move must raise")
+        except ScopioError as exc:
+            assert "Sangaboard unavailable" in str(exc), exc
+            assert exc.payload["success"] is False
+
+        # -- every instrument node, discovered from the graph
+        assert scope.instruments() == {"awg": "awg/call",
+                                       "temperature": "temperature/call"}
+        assert scope.instrument("awg") is scope.galvo
+        assert scope.instrument("pressure").SERVICE == "pressure/call"
+
+        # -- galvo: one axis at a time, waiting after each, longer across 2 V
+        state["awg_calls"].clear()
+        moved = scope.galvo.move_xy(x=1.0, y=2.5, axis_settle_s=0.05,
+                                    range_settle_s=0.3)
+        assert moved["moved"] == ["x", "y"] and moved["range_switched"] == ["y"]
+        assert (moved["x"], moved["y"]) == (1.0, 2.5)
+        updates = [(a, t) for m, a, t in state["awg_calls"] if m == "update"]
+        assert [a for a, _ in updates] == [[1, 1.0], [2, 2.5]], updates
+        assert updates[1][1] - updates[0][1] >= 0.05, "no wait between the axes"
+        assert moved["waited_s"] == 0.35
+        # Nothing changed: nothing is sent, so no channel switch either.
+        state["awg_calls"].clear()
+        assert scope.galvo.move_xy(x=1.0, y=2.5)["moved"] == []
+        assert [m for m, _, _ in state["awg_calls"]] == ["position", "offsets"]
+        # The range is judged at the CONNECTOR: deflection + offset.
+        state["galvo"]["offsets"]["x"] = 1.5
+        assert scope.galvo.move_xy(x=0.2, axis_settle_s=0, range_settle_s=0)[
+            "range_switched"] == ["x"], "1.0+1.5=2.5 V -> 0.2+1.5=1.7 V crosses 2 V"
+        state["galvo"]["offsets"]["x"] = 0.0
+
         # -- WebSocket: subscribe, then survive a drop that the server refuses
         #    to let us straight back into. The recv loop has to keep retrying
         #    and re-send the subscription once the gateway is back.
@@ -390,4 +536,5 @@ def test_against_mock_gateway():
 if __name__ == "__main__":
     test_offline_bits()
     test_a_scale_survives_a_sensor_mode_change()
+    test_a_half_open_websocket_is_detected_and_replaced()
     test_against_mock_gateway()

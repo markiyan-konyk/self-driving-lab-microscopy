@@ -204,6 +204,12 @@ Create `.claude\settings.json` in the lab folder:
       "mcp__scopio__camera_controls",
       "mcp__scopio__stage_move",
       "mcp__scopio__send_goal",
+      "mcp__scopio__goal",
+      "mcp__scopio__autofocus",
+      "mcp__scopio__read_topic",
+      "mcp__scopio__camera_mode",
+      "mcp__scopio__calibration",
+      "mcp__scopio__wait",
       "mcp__scopio__instrument_call",
       "mcp__scopio__call_service",
       "Read", "Write", "Edit", "Bash"

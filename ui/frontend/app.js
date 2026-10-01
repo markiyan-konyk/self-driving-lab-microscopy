@@ -11,6 +11,10 @@
         async function request(path, options = {}) {
             const response = await fetch(path, { cache: 'no-store', ...options });
             if (response.ok) return response;
+            // The session expired (every restart of the UI server mints a new
+            // key). Go and log in, rather than have every poll quietly fail
+            // and the page look like a dead microscope.
+            if (response.status === 401) { location.href = '/login'; throw new Error('Session expired'); }
             // Unwrap {"error": ...} here, once, so every caller's catch shows the
             // reason instead of a raw JSON blob in the message bar.
             const body = await response.text();
@@ -71,6 +75,12 @@
             btn.addEventListener('pointercancel', stop);
         });
         window.addEventListener('pointerup', () => { [...pHeld].forEach(d => holdStop(pHeld, d)); });
+        // A key held while the window loses focus (Alt-Tab, a dialog) never
+        // gets its keyup, and the stage jogged on until the page was closed.
+        // Losing focus or visibility releases every held direction.
+        function releaseAll() { [...pHeld].forEach(d => holdStop(pHeld, d)); [...kHeld].forEach(d => holdStop(kHeld, d)); }
+        window.addEventListener('blur', releaseAll);
+        document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
 
         const keyMap = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', PageUp: 'page_up', PageDown: 'page_down' };
         document.addEventListener('keydown', e => {
@@ -112,7 +122,10 @@
         const totalSeconds = () => Math.max(0,
             (parseInt(durH.value || 0, 10)) * 3600 + (parseInt(durM.value || 0, 10)) * 60 + (parseInt(durS.value || 0, 10)));
         async function pushDuration() {
-            try { await postJSON('/set_recording_setting', { setting: 'duration', value: infinite ? 0 : totalSeconds() }); }
+            // null = until stopped. A finite length is at least 1 s: 0 used to
+            // mean "infinite" on the server while this page showed 0:00.
+            const value = infinite ? null : Math.max(1, totalSeconds());
+            try { await postJSON('/set_recording_setting', { setting: 'duration', value }); }
             catch (e) { msg(e.message); }
         }
         [durH, durM, durS].forEach(b => b.addEventListener('change', () => {
@@ -187,22 +200,27 @@
         //  Calibration (autofocus / white balance)
         // ============================================================
         const autofocusBtn = $('autofocusBtn'), whiteBalanceBtn = $('whiteBalanceBtn');
+        // Resolves with how the job ENDED ({label, ok, message}), or null if it
+        // is still running at the timeout. "Complete" used to be announced for
+        // a sweep that had failed: the outcome never reached the page.
         async function waitForCalibration(timeoutSec = 120) {
             for (let i = 0; i < timeoutSec; i++) {
                 await new Promise(r => setTimeout(r, 1000));
-                try { if (!(await (await request('/calibration_status')).json()).running) return true; } catch (e) {}
+                try {
+                    const d = await (await request('/calibration_status')).json();
+                    if (!d.running) return d.last;
+                } catch (e) {}
             }
-            return false;
+            return null;
         }
         async function runCalibration(endpoint, button, label) {
             autofocusBtn.disabled = true; whiteBalanceBtn.disabled = true; button.classList.add('busy');
             msg(label + ' started…');
             try {
-                const resp = await fetch(endpoint, { method: 'POST' });
-                const data = await resp.json();
-                if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
-                const finished = await waitForCalibration();
-                msg(finished ? label + ' complete.' : label + ' is taking unusually long — check the server log.');
+                await request(endpoint, { method: 'POST' });
+                const last = await waitForCalibration();
+                if (!last) msg(label + ' is taking unusually long — check the server log.');
+                else msg(last.ok ? `${label} complete: ${last.message}.` : `${label} failed: ${last.message}`);
             } catch (e) { msg(label + ' failed: ' + e.message); }
             finally { autofocusBtn.disabled = false; whiteBalanceBtn.disabled = false; button.classList.remove('busy'); }
         }
@@ -215,9 +233,11 @@
         async function pollTelemetry() {
             try {
                 const d = await (await request('/telemetry')).json();
-                $('posX').textContent = d.position.x;
-                $('posY').textContent = d.position.y;
-                $('posZ').textContent = d.position.z;
+                // null = the stage has not reported; "0" would read as a position.
+                const show = v => (v === null || v === undefined) ? '—' : v;
+                $('posX').textContent = show(d.position.x);
+                $('posY').textContent = show(d.position.y);
+                $('posZ').textContent = show(d.position.z);
             } catch (e) {}
         }
         setInterval(pollTelemetry, 1000); pollTelemetry();
@@ -225,8 +245,13 @@
         async function refreshStatus() {
             try {
                 const d = await (await request('/status')).json();
-                const txt = d.controller_connected ? 'Controller online' : 'Controller unavailable';
-                statusEl.textContent = txt; statusEl.className = 'status ' + (d.controller_connected ? 'ok' : 'bad');
+                // The microscope first, the stage second: a wrong API key or a
+                // Pi that is off used to read as "Controller unavailable".
+                const ok = d.scope_reachable && d.controller_connected;
+                const txt = !d.scope_reachable ? 'Microscope unreachable'
+                          : d.controller_connected ? 'Controller online' : 'Stage unavailable';
+                statusEl.textContent = txt; statusEl.className = 'status ' + (ok ? 'ok' : 'bad');
+                statusEl.title = d.scope_error || '';
                 if (mobileStatus) mobileStatus.textContent = txt;
             } catch (e) {
                 statusEl.textContent = 'Offline'; statusEl.className = 'status bad';
@@ -313,32 +338,39 @@
             if (!calW || !calWin || !NATIVE_W || !NATIVE_WINDOW) return calibration.um_per_px;
             return calibration.um_per_px * (NATIVE_WINDOW / NATIVE_W) / (calWin / calW);
         }
-        function drawScaleBar(rect) {
+        // The annotations take the context and the rectangle to draw into, so
+        // the SAME code draws them on the letterboxed overlay and, at 1:1, on
+        // a screenshot (see shotBtn).
+        function drawScaleBar(ctx, rect) {
             const upp = umPerPx();
             const targetDisp = rect.cw * 0.18;
             const targetUm = (targetDisp / rect.scale) * upp;
             const um = niceNumber(targetUm);
             const dispLen = (um / upp) * rect.scale;
             const x0 = rect.ox + 16, y0 = rect.oy + rect.ch - 18;
-            octx.strokeStyle = '#fff'; octx.fillStyle = '#fff'; octx.lineWidth = 3;
-            octx.beginPath();
-            octx.moveTo(x0, y0); octx.lineTo(x0 + dispLen, y0);
-            octx.moveTo(x0, y0 - 6); octx.lineTo(x0, y0 + 6);
-            octx.moveTo(x0 + dispLen, y0 - 6); octx.lineTo(x0 + dispLen, y0 + 6);
-            octx.stroke();
+            ctx.strokeStyle = '#fff'; ctx.fillStyle = '#fff'; ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(x0, y0); ctx.lineTo(x0 + dispLen, y0);
+            ctx.moveTo(x0, y0 - 6); ctx.lineTo(x0, y0 + 6);
+            ctx.moveTo(x0 + dispLen, y0 - 6); ctx.lineTo(x0 + dispLen, y0 + 6);
+            ctx.stroke();
             const label = um >= 1000 ? (um / 1000) + ' mm' : um + ' µm';
-            octx.font = '600 13px Inter, sans-serif'; octx.textAlign = 'center';
-            octx.lineWidth = 3; octx.strokeStyle = 'rgba(0,0,0,.6)';
-            octx.strokeText(label, x0 + dispLen / 2, y0 - 10);
-            octx.fillText(label, x0 + dispLen / 2, y0 - 10);
+            ctx.font = '600 13px Inter, sans-serif'; ctx.textAlign = 'center';
+            ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,.6)';
+            ctx.strokeText(label, x0 + dispLen / 2, y0 - 10);
+            ctx.fillText(label, x0 + dispLen / 2, y0 - 10);
         }
-        function drawMeasure(rect) {
+        function drawMeasure(ctx, rect) {
             const pts = points.map(p => toDisp(rect, p));
-            octx.fillStyle = '#6ee7b7'; octx.strokeStyle = '#6ee7b7'; octx.lineWidth = 2;
-            pts.forEach(p => { octx.beginPath(); octx.arc(p.x, p.y, 5, 0, 7); octx.fill(); });
+            ctx.fillStyle = '#6ee7b7'; ctx.strokeStyle = '#6ee7b7'; ctx.lineWidth = 2;
+            pts.forEach(p => { ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 7); ctx.fill(); });
             if (pts.length === 2) {
-                octx.beginPath(); octx.moveTo(pts[0].x, pts[0].y); octx.lineTo(pts[1].x, pts[1].y); octx.stroke();
+                ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y); ctx.stroke();
             }
+        }
+        function drawAnnotations(ctx, rect) {
+            if (umPerPx()) drawScaleBar(ctx, rect);
+            if (points.length) drawMeasure(ctx, rect);
         }
         function drawOverlay() {
             octx.clearRect(0, 0, overlay.width, overlay.height);
@@ -348,8 +380,7 @@
                 octx.fillStyle = 'rgba(6,14,10,.28)';
                 octx.fillRect(rect.ox, rect.oy, rect.cw, rect.ch);
             }
-            if (umPerPx()) drawScaleBar(rect);
-            if (points.length) drawMeasure(rect);
+            drawAnnotations(octx, rect);
         }
 
         // The newest frame as a canvas: the frozen still if the view is held,
@@ -449,9 +480,11 @@
             drawOverlay();
         }
 
-        calibrateBtn.addEventListener('click', async () => {
+        // Setting the scale works on a frozen still and touches nothing the
+        // recorder uses, so a recording in progress carries on (it used to be
+        // stopped here, silently cutting the clip short).
+        calibrateBtn.addEventListener('click', () => {
             if (tool === 'calibrate') { cancelTool(); return; }
-            if (isRecording) { try { await request('/stop_recording', { method: 'POST' }); exitRecordingUI('Recording stopped for calibration.'); } catch (e) {} }
             startTool('calibrate');
         });
         measureBtn.addEventListener('click', () => { tool === 'measure' || tool === 'review' ? cancelTool() : startTool('measure'); });
@@ -491,10 +524,13 @@
         shotBtn.addEventListener('click', async () => {
             const frame = currentFrame();
             if (!frame) { msg('No frame to save yet.'); return; }
-            // Burn the overlay in: a screenshot with its own scale bar and
+            // Burn the annotations in: a screenshot with its own scale bar and
             // measurement on it is a lab record; one without is just a picture.
-            try { frame.getContext('2d').drawImage(overlay, 0, 0, NATIVE_W, NATIVE_H); }
-            catch (e) {}
+            // Drawn fresh at 1:1 in frame pixels -- stretching the on-screen
+            // overlay onto the frame dragged its letterbox margins in with it,
+            // so the bar and the measured line landed off the features.
+            drawAnnotations(frame.getContext('2d'),
+                            { scale: 1, ox: 0, oy: 0, cw: NATIVE_W, ch: NATIVE_H });
             shotBtn.disabled = true;
             try {
                 const blob = await new Promise(r => frame.toBlob(r, 'image/jpeg', 0.95));
@@ -511,8 +547,10 @@
         // ============================================================
         const modeReadout = $('modeReadout');
         const modeBtns = [...document.querySelectorAll('.mode-btn')];
+        let lastMode = null;        // the last reply, to repaint after a switch
 
         function paintMode(d) {
+            lastMode = d;
             const spec = (d.modes || {})[d.mode] || {};
             modeBtns.forEach(b => {
                 b.classList.toggle('active', b.dataset.mode === d.mode);
@@ -538,7 +576,9 @@
                 paintMode(await (await postJSON('/camera/mode', { mode: btn.dataset.mode })).json());
                 msg('Sensor mode: ' + btn.dataset.mode);
             } catch (e) { msg('Mode switch failed: ' + e.message); }
-            finally { modeBtns.forEach(b => b.disabled = false); }
+            // Repaint rather than enable all: a mode this camera does not
+            // offer must stay disabled after a switch.
+            finally { if (lastMode) paintMode(lastMode); else modeBtns.forEach(b => b.disabled = false); }
         }));
         request('/camera/mode').then(r => r.json()).then(paintMode).catch(() => {});
 
@@ -586,7 +626,11 @@
                 setGalvoStatus(d.connected);
                 galvoStaged = false;          // sent: polling owns the controls again
                 paintGalvoPosition(d.x, d.y);
-                msg('Galvo updated.');
+                // One axis at a time, only what changed (see /galvo/update).
+                const moved = (d.moved || []).map(a => a.toUpperCase()).join(' then ');
+                const relay = (d.range_switched || []).length
+                    ? ' — crossed ±2 V (relay switch) on ' + d.range_switched.join(', ').toUpperCase() : '';
+                msg(moved ? `Galvo moved ${moved}${relay}.` : 'Galvo already there.');
             } catch (e) { msg('Galvo update failed: ' + e.message); }
             finally { galvoUpdateBtn.disabled = !galvoConnected; }
         });
@@ -670,7 +714,7 @@
         // nothing.
         const tempRead = $('tempRead'), tempSet = $('tempSet'), tempEnableBtn = $('tempEnableBtn');
         const tempSection = document.querySelector('.temp-section');
-        let tempConnected = false, tempOn = false, tempEditing = false;
+        let tempConnected = false, tempOn = false, tempEditing = false, tempUnit = 'C';
 
         // Don't fight the operator: while the box has focus, polling leaves it alone.
         tempSet.addEventListener('focus', () => { tempEditing = true; });
@@ -680,8 +724,11 @@
             tempConnected = !!d.connected;
             tempOn = !!d.output;
             const t = d.temperature, unit = d.units || 'C';
-            tempRead.innerHTML = (t === null || t === undefined ? '—' : t.toFixed(2)) +
-                                 '<i>°' + unit + '</i>';
+            // Built from nodes, not innerHTML: `units` is instrument data.
+            const unitEl = document.createElement('i');
+            unitEl.textContent = '°' + unit;
+            tempRead.replaceChildren(t === null || t === undefined ? '—' : t.toFixed(2), unitEl);
+            tempUnit = unit;
             // grey = idle, amber = driving, green = in tolerance, red = offline/fault
             const faults = d.faults || [];
             let cls = 'fault';
@@ -706,7 +753,7 @@
                 const d = await (await postJSON('/temperature/set', { setpoint: v })).json();
                 if (d.error) throw new Error(d.error);
                 paintTemp(d);
-                msg(`Setpoint ${v.toFixed(1)} °C.` + (tempOn ? '' : ' Press Enable to drive it.'));
+                msg(`Setpoint ${v.toFixed(1)} °${tempUnit}.` + (tempOn ? '' : ' Press Enable to drive it.'));
             } catch (e) { msg('Setpoint failed: ' + e.message); }
         });
 

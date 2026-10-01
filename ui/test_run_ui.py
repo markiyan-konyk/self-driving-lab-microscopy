@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -195,6 +196,109 @@ def test_a_scale_is_refused_without_the_geometry_it_was_measured_in():
                     {**body, "width": 1640, "window": 0},
                     {"width": 1640, "window": 3280}]:         # no measurement
         assert app.post("/set_calibration", json=missing).status_code == 400, missing
+
+
+def _authed_client():
+    app = run_ui.app.test_client()
+    with app.session_transaction() as s:
+        s["authed"] = True
+    return app
+
+
+def test_an_expired_session_is_a_401_the_page_can_act_on():
+    """Every poll used to be redirected to the login PAGE with a 200: app.js
+    failed to parse it, and an expired session looked like a dead microscope."""
+    app = run_ui.app.test_client()                    # not logged in
+    assert app.get("/").status_code == 302, "the page itself still redirects"
+    for path in ("/status", "/telemetry", "/galvo/status", "/video_feed"):
+        r = app.get(path)
+        assert r.status_code == 401, (path, r.status_code)
+        assert "expired" in r.get_json()["error"]
+
+
+def test_the_page_ships_the_script_byte_for_byte():
+    """The assets are inlined AFTER Jinja renders the template. The other order
+    fed app.js and style.css through Jinja: one `{#` in either blanked the page."""
+    page = _authed_client().get("/").get_data(as_text=True)
+    assert run_ui._read("app.js") in page
+    assert run_ui._read("style.css") in page
+    assert 'value="40"' in page, "the template variables still render"
+
+
+def test_a_zero_length_recording_is_not_an_endless_one():
+    app = _authed_client()
+    try:
+        assert app.post("/set_recording_setting",
+                        json={"setting": "duration", "value": 0}).get_json() == {"duration": 1}
+        assert app.post("/set_recording_setting",
+                        json={"setting": "duration", "value": None}).get_json() == {"duration": None}
+        assert app.post("/set_recording_setting",
+                        json={"setting": "duration", "value": "x"}).status_code == 400
+    finally:
+        run_ui.record_duration = 600
+
+
+class _FakeScope:
+    """Just what the galvo and camera-job routes touch."""
+
+    def __init__(self):
+        self.moves, self.release = [], threading.Event()
+        self.galvo = types.SimpleNamespace(move_xy=self._move_xy)
+        self.camera = types.SimpleNamespace(white_balance=self._wb,
+                                            autofocus=self._af)
+
+    def _move_xy(self, x=None, y=None):
+        self.moves.append((x, y))
+        return {"x": x, "y": y, "moved": ["x", "y"], "range_switched": ["y"]}
+
+    def _wb(self):
+        self.release.wait(5)
+        return {"red_gain": 1.5, "blue_gain": 2.0}
+
+    def _af(self, **kw):
+        return {"status": "aborted", "result": {"success": False,
+                                                 "message": "stage/jog unavailable"}}
+
+
+def test_the_galvo_panel_moves_through_the_sequenced_move():
+    """Two back-to-back update()s ignored the AWG's channel-switch and 2 V
+    relay delays; the panel now goes through move_xy like every other client."""
+    fake, real = _FakeScope(), run_ui.scope
+    run_ui.scope = fake
+    try:
+        d = _authed_client().post("/galvo/update", json={"x": 1.0, "y": 9.0}).get_json()
+        assert fake.moves == [(1.0, 5.0)], "clamped to the panel's +/-5 V, sent once"
+        assert d["range_switched"] == ["y"]
+    finally:
+        run_ui.scope = real
+
+
+def test_camera_jobs_run_one_at_a_time_and_report_how_they_ended():
+    fake, real = _FakeScope(), run_ui.scope
+    run_ui.scope = fake
+    app = _authed_client()
+    try:
+        assert app.post("/white_balance").status_code == 200
+        assert app.post("/autofocus").status_code == 409, "second job must wait"
+        fake.release.set()
+        for _ in range(100):
+            last = app.get("/calibration_status").get_json()
+            if not last["running"]:
+                break
+            time.sleep(0.02)
+        assert last["last"] == {"label": "White balance", "ok": True,
+                                "message": "red 1.50, blue 2.00"}
+        # A sweep that FAILED is reported as failed -- it used to say "complete".
+        assert app.post("/autofocus").status_code == 200
+        for _ in range(100):
+            last = app.get("/calibration_status").get_json()
+            if not last["running"]:
+                break
+            time.sleep(0.02)
+        assert last["last"]["ok"] is False
+        assert "stage/jog unavailable" in last["last"]["message"]
+    finally:
+        run_ui.scope = real
 
 
 def main():

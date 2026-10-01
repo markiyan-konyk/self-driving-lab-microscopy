@@ -5,17 +5,22 @@
 Generic surface (works for every current AND future capability):
     scope.call_service("stage/jog", {"dx": 100})     # any ROS service, JSON in/out
     scope.subscribe("stage/position", cb)            # any (small) topic, live
+    scope.publish("some/topic", {...})               # publish on a topic
     scope.send_goal("camera/autofocus", {...})       # any action, blocking
+    scope.start_goal("scan_region", {...})           # any action, non-blocking
     scope.interfaces()                               # ask the microscope what it has
+    scope.instruments()                              # every instrument node, by name
+    scope.instrument("awg").call("sine", 2, freq=5)  # any instrument's driver
 
 Convenience namespaces (thin sugar over the generic surface):
     scope.stage.jog(dx=..., dy=..., dz=...) / move_abs(x, y, z) / position()
+                / move_path(points) / scan_region(...)
     scope.camera.get_controls() / set_controls(...) / set_framerate(fps)
-                 / white_balance() / autofocus(...)
-    scope.galvo.write(cmd) / write_all(cmds) / query(cmd) / status()
+                 / set_mode(m) / white_balance() / autofocus(...) / snapshot()
+    scope.galvo.move_xy(x, y) / call(...) / write(cmd) / query(cmd) / status()
     scope.temperature.temperature() / setpoint(c) / output(on) / status()
     scope.laser.on() / off() / set(bool) / is_on()
-    scope.calibration.get() / set(um_per_px=...)
+    scope.calibration.get() / set(um_per_px=...) / um_per_px_now()
     scope.stream_frames()                            # generator of JPEG bytes
 
 Instrument classes: the galvo and temperature nodes each own a driver CLASS and
@@ -29,20 +34,41 @@ Both instruments are PACED by their drivers on the Pi (under 60 commands/s --
 their input buffers are tiny). Calling faster than that does not fail; each
 call just waits its turn, so a tight loop runs at the instrument's pace.
 
+FAILURES RAISE. Every call either returns what it promises or raises
+ScopioError -- including a service that answered success=false (a stage that is
+unplugged, a relay that refused), which must never come back looking like a
+result.
+
 NaN sentinels: calibration/set (and the ROS camera/set_controls service) treat
 NaN as "leave unchanged". The convenience methods pre-fill JSON null (-> NaN)
 for every field you don't pass, so partial updates are safe by default.
 """
 
 import json
+import time
+from urllib.parse import quote
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from .errors import ScopioError
 from .stream import iter_jpegs
 from .ws import WsManager
 
 DEFAULT_TIMEOUT = 15.0
+# Extra attempts after a failed CONNECTION -- only where repeating cannot
+# double an action: any GET, and a connect that timed out (the request never
+# left). A jog whose reply was lost is never re-sent.
+RETRIES = 2
+RETRY_BACKOFF_S = 0.5
+
+
+def _checked(resp, what):
+    """A service that answered success=false is a failure, not a result."""
+    if isinstance(resp, dict) and resp.get("success") is False:
+        raise ScopioError(f"{what}: {resp.get('message') or resp.get('error') or 'failed'}",
+                          payload=resp)
+    return resp
 
 
 class Scopio:
@@ -55,8 +81,14 @@ class Scopio:
         self.timeout = timeout
         self._http = requests.Session()
         self._http.headers["X-API-Key"] = api_key
-        # http -> ws, https -> wss (keys are hex, so no query escaping needed).
-        ws_url = "ws" + self.base_url[4:] + f"/api/v1/ws?api_key={api_key}"
+        # One client is shared by every thread of an app (the UI runs a dozen);
+        # the default pool of 10 then drops and re-opens connections under load.
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=32)
+        self._http.mount("http://", adapter)
+        self._http.mount("https://", adapter)
+        # http -> ws, https -> wss.
+        ws_url = ("ws" + self.base_url[4:] +
+                  f"/api/v1/ws?api_key={quote(api_key, safe='')}")
         self._ws = WsManager(ws_url)
         self.stage = _Stage(self)
         self.camera = _Camera(self)
@@ -68,11 +100,18 @@ class Scopio:
     # ------------------------------------------------------------ plumbing
     def _request(self, method, path, json_body=None, timeout=None, **kw):
         url = f"{self.base_url}{path}"
-        try:
-            r = self._http.request(method, url, json=json_body,
-                                   timeout=timeout or self.timeout, **kw)
-        except requests.RequestException as exc:
-            raise ScopioError(f"cannot reach the microscope at {url}: {exc}")
+        for attempt in range(RETRIES + 1):
+            try:
+                r = self._http.request(method, url, json=json_body,
+                                       timeout=timeout or self.timeout, **kw)
+                break
+            except requests.ConnectionError as exc:
+                safe = method == "GET" or isinstance(exc, requests.ConnectTimeout)
+                if not safe or attempt == RETRIES:
+                    raise ScopioError(f"cannot reach the microscope at {url}: {exc}")
+                time.sleep(RETRY_BACKOFF_S * (attempt + 1))
+            except requests.RequestException as exc:
+                raise ScopioError(f"cannot reach the microscope at {url}: {exc}")
         if r.status_code >= 400:
             try:
                 body = r.json()
@@ -91,7 +130,8 @@ class Scopio:
 
     # ------------------------------------------------------ generic surface
     def call_service(self, path, body=None, timeout=None):
-        """Call any ROS service (path relative to /scopio, e.g. 'stage/jog')."""
+        """Call any ROS service (path relative to /scopio, e.g. 'stage/jog').
+        Returns the response fields as a dict, exactly as the node sent them."""
         q = f"?timeout={timeout}" if timeout else ""
         return self._request("POST", f"/api/v1/service/{path}{q}",
                              json_body=body or {},
@@ -99,13 +139,25 @@ class Scopio:
 
     def subscribe(self, topic, callback, rate_hz=None):
         """Live-stream a topic. callback(msg_dict, envelope) runs on the SDK's
-        WebSocket thread -- keep it quick. Returns a handle with .unsubscribe()."""
+        WebSocket thread -- keep it quick. Survives reconnects. Returns a handle
+        with .unsubscribe()."""
         return self._ws.subscribe(topic, callback, rate_hz=rate_hz)
 
+    def publish(self, topic, msg, msg_type=None):
+        """Publish one message on a topic. msg_type ('pkg/msg/Type') is needed
+        only when nothing publishes on that topic yet."""
+        self._ws.publish(topic, msg, msg_type)
+
     def send_goal(self, action, goal=None, on_feedback=None, timeout=600.0):
-        """Run an action (autofocus, scans, stage paths) to completion."""
+        """Run an action (autofocus, scans, stage paths) to completion. Returns
+        {"status", "result"}; a timeout or Ctrl-C CANCELS the goal first."""
         return self._ws.send_goal(action, goal, on_feedback=on_feedback,
                                   timeout=timeout)
+
+    def start_goal(self, action, goal=None, on_feedback=None):
+        """Start an action and return at once with a Goal handle:
+        .feedback (latest), .done(), .wait(timeout), .cancel()."""
+        return self._ws.start_goal(action, goal, on_feedback=on_feedback)
 
     def health(self):
         return self._request("GET", "/api/v1/health")
@@ -120,6 +172,25 @@ class Scopio:
         """Latest cached message of a state topic (from /api/v1/status)."""
         entry = self.status()["telemetry"].get(topic)
         return entry["msg"] if entry else None
+
+    def instruments(self):
+        """{name: service} for every instrument node -- every service of type
+        InstrumentCall, e.g. {"awg": "awg/call", "temperature": ...}. A new
+        instrument node appears here with no SDK change."""
+        out = {}
+        for full, spec in self.interfaces().get("services", {}).items():
+            if not str((spec or {}).get("type", "")).endswith("/InstrumentCall"):
+                continue
+            rel = full[len("/scopio/"):] if full.startswith("/scopio/") else full.lstrip("/")
+            if rel.endswith("/call"):
+                out[rel[:-len("/call")]] = rel
+        return out
+
+    def instrument(self, name):
+        """The driver of any instrument node, by name ("awg", "temperature", or
+        a node added later): .call(method, ...), .methods(), .reconnect()."""
+        known = {"awg": self.galvo, "galvo": self.galvo, "temperature": self.temperature}
+        return known.get(name) or _InstrumentCall(self, service=f"{name}/call")
 
     def stream_frames(self, chunk_size=16384, stall_timeout=15.0):
         """Generator of raw JPEG frames from the live camera stream.
@@ -139,7 +210,13 @@ class Scopio:
         except requests.RequestException as exc:
             raise ScopioError(f"cannot open camera stream: {exc}")
         if r.status_code >= 400:
-            raise ScopioError(f"camera stream -> {r.status_code}",
+            try:
+                detail = r.json().get("detail")
+            except Exception:
+                detail = None
+            r.close()          # a streamed error response still holds a connection
+            raise ScopioError(f"camera stream -> {r.status_code}"
+                              + (f": {detail}" if detail else ""),
                               status=r.status_code)
         return iter_jpegs(r, chunk_size=chunk_size)
 
@@ -156,17 +233,22 @@ class Scopio:
 
 # ------------------------------------------------------------- namespaces
 class _Stage:
+    """The Sangaboard stage, in STEPS. Position is open-loop: counted from where
+    the stage was when the stage node started, and lost if it restarts."""
+
     def __init__(self, scope):
         self._s = scope
 
     def jog(self, dx=0, dy=0, dz=0):
-        """Relative move in Sangaboard steps."""
-        return self._s.call_service("stage/jog",
-                                    {"dx": int(dx), "dy": int(dy), "dz": int(dz)})
+        """Relative move in steps; returns once the stage has stopped, with the
+        new position (x, y, z). Raises if the board refused."""
+        return _checked(self._s.call_service(
+            "stage/jog", {"dx": int(dx), "dy": int(dy), "dz": int(dz)}), "stage/jog")
 
     def move_abs(self, x, y, z):
-        return self._s.call_service("stage/move_abs",
-                                    {"x": int(x), "y": int(y), "z": int(z)})
+        """Absolute move in steps; returns once stopped, with the position."""
+        return _checked(self._s.call_service(
+            "stage/move_abs", {"x": int(x), "y": int(y), "z": int(z)}), "stage/move_abs")
 
     def position(self):
         return self._s.telemetry("stage/position")
@@ -228,6 +310,19 @@ class _Camera:
     def state(self):
         return self._s.telemetry("camera/state")
 
+    def snapshot(self, discard=0):
+        """One fresh JPEG frame (bytes). The stream only ever delivers frames
+        encoded AFTER it opens; discard=N skips N more, e.g. to let a frame
+        exposed during a stage move go by."""
+        frames = self._s.stream_frames()
+        try:
+            for i, jpeg in enumerate(frames):
+                if i >= discard:
+                    return jpeg
+        finally:
+            frames.close()
+        raise ScopioError("camera stream ended before a frame arrived")
+
     def autofocus(self, z_range=2000, steps=15, settle_s=0.2,
                   on_feedback=None, timeout=600.0):
         return self._s.send_goal("camera/autofocus",
@@ -238,12 +333,15 @@ class _Camera:
 
 class _InstrumentCall:
     """Shared plumbing for the nodes that expose a whole driver class over one
-    `InstrumentCall` service (galvo -> DG1022Z, temperature -> TC10LAB)."""
+    `InstrumentCall` service (galvo -> DG1022Z, temperature -> TC10LAB, and any
+    instrument node added later -- see Scopio.instrument)."""
 
     SERVICE = None      # e.g. "temperature/call"
 
-    def __init__(self, scope):
+    def __init__(self, scope, service=None):
         self._s = scope
+        if service:
+            self.SERVICE = service
 
     def call(self, method, *args, timeout=None, **kwargs):
         """Call any method of the instrument's driver class. Python args map
@@ -272,9 +370,59 @@ class _InstrumentCall:
     def reconnect(self):
         return bool(self.call("reconnect"))
 
+    def status(self):
+        """This instrument's cached status topic (<name>/status), or None."""
+        return self._s.telemetry(self.SERVICE.rsplit("/", 1)[0] + "/status")
+
 
 class _Galvo(_InstrumentCall):
+    """The Rigol DG1022Z steering the tweezers' galvo mirrors: CH1 = X, CH2 = Y.
+    Positions are DEFLECTIONS in volts from the calibrated centre (offsets()).
+
+    The AWG's physics that move_xy() respects -- write your own sequences the
+    same way:
+      * switching which CHANNEL is being commanded moves something mechanical
+        inside the box: move one axis, wait, then the other;
+      * |output| <= RANGE_V at the connector is one output range; leaving or
+        entering it flips a relay, which is slower still (and wears it).
+    """
+
     SERVICE = "awg/call"
+    # Settle times: conservative starting points -- tune them on the rig.
+    AXIS_SETTLE_S = 0.2       # after each single-axis move
+    RANGE_V = 2.0             # connector volts; one output range inside +/- this
+    RANGE_SETTLE_S = 0.5      # after a move that crossed +/- RANGE_V
+
+    def move_xy(self, x=None, y=None, axis_settle_s=None, range_settle_s=None):
+        """Move the mirrors by DC offset the way the AWG needs it: ONE axis at a
+        time, only the axes that actually change (an unchanged axis is not
+        re-sent, so it costs no channel switch), waiting after each move --
+        longer when the move crossed the +/-RANGE_V range boundary at the
+        connector (deflection + offset). Returns once settled:
+        {"x", "y", "moved": [...], "range_switched": [...], "waited_s"}."""
+        axis_wait = self.AXIS_SETTLE_S if axis_settle_s is None else float(axis_settle_s)
+        range_wait = self.RANGE_SETTLE_S if range_settle_s is None else float(range_settle_s)
+        pos = self.call("position")
+        offsets = self.call("offsets")
+        moved, switched, waited = [], [], 0.0
+        for axis, channel, target in (("x", 1, x), ("y", 2, y)):
+            if target is None:
+                continue
+            target = float(target)
+            if abs(target - float(pos[axis])) < 1e-6:
+                continue
+            before = float(pos[axis]) + float(offsets[axis])
+            after = target + float(offsets[axis])
+            crossed = (abs(before) <= self.RANGE_V) != (abs(after) <= self.RANGE_V)
+            pos = self.call("update", channel, target)
+            wait = range_wait if crossed else axis_wait
+            time.sleep(wait)
+            waited += wait
+            moved.append(axis)
+            if crossed:
+                switched.append(axis)
+        return {"x": pos["x"], "y": pos["y"], "moved": moved,
+                "range_switched": switched, "waited_s": round(waited, 3)}
 
     def _scpi(self, service, command):
         resp = self._s.call_service(service, {"command": command})
@@ -296,9 +444,6 @@ class _Galvo(_InstrumentCall):
         """Send one SCPI query and return the instrument's reply string."""
         return self._scpi("awg/query", command)["response"]
 
-    def status(self):
-        return self._s.telemetry("awg/status")
-
 
 class _Temperature(_InstrumentCall):
     """The TC LAB sample-temperature controller. `status()` is the cheap read
@@ -309,9 +454,6 @@ class _Temperature(_InstrumentCall):
     lists them."""
 
     SERVICE = "temperature/call"
-
-    def status(self):
-        return self._s.telemetry("temperature/status")
 
     def temperature(self):
         """Control-sensor reading, live from the instrument."""
@@ -335,7 +477,8 @@ class _Laser:
 
     is_on() reads cached telemetry (no traffic to the pin). It returns None when
     the microscope has never reported a state, which is NOT "off": treat an
-    unknown laser as live."""
+    unknown laser as live. set()/on()/off() RAISE if the relay refused -- a
+    failed "off" must never pass for a successful one."""
 
     def __init__(self, scope):
         self._s = scope
@@ -345,7 +488,8 @@ class _Laser:
         return None if state is None else bool(state.get("data", False))
 
     def set(self, on):
-        return self._s.call_service("relay/set", {"data": bool(on)})
+        return _checked(self._s.call_service("relay/set", {"data": bool(on)}),
+                        f"laser relay {'ON' if on else 'OFF'}")
 
     def on(self):
         return self.set(True)
@@ -403,6 +547,12 @@ class _Calibration:
                                  int(cal.get("um_per_px_window") or 0),
                                  width, window)
 
+    def um_per_px_now(self):
+        """The image scale for the sensor mode running RIGHT NOW (one extra
+        request to read it), or None if uncalibrated."""
+        controls = self._s.camera.get_controls()
+        return self.um_per_px(controls.get("width"), controls.get("window"))
+
     def set(self, **values):
         """Partial update -- unspecified fields are pre-filled with null
         (-> NaN -> 'leave unchanged') so nothing gets clobbered.
@@ -417,4 +567,4 @@ class _Calibration:
         # int fields: no NaN sentinel, and 0 already means "leave unchanged".
         for f in ("um_per_px_width", "um_per_px_window"):
             body[f] = int(values.get(f) or 0)
-        return self._s.call_service("calibration/set", body)
+        return _checked(self._s.call_service("calibration/set", body), "calibration/set")
